@@ -79,12 +79,53 @@ jobs:
           cache-dependency-path: |
             requirements/*.txt
             constraints/*.txt
+            plugins/*/pyproject.toml
+
+      - name: Resolve virtualenv cache identity
+        id: venv-key
+        env:
+          DEPS_HASH: ${{ hashFiles('requirements/**', 'constraints/**', 'plugins/**') }}
+        run: |
+          PYTHON_VERSION="$(python -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])')"
+          KEY="venv-v1-${RUNNER_OS}-py${PYTHON_VERSION}-${DEPS_HASH}"
+          echo "key=${KEY}" >> "$GITHUB_OUTPUT"
+          echo "::notice::Virtualenv cache key: ${KEY}"
+
+      - name: Restore virtualenv cache
+        id: venv-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: .venv
+          key: ${{ steps.venv-key.outputs.key }}
+
+      - name: Verify restored virtualenv
+        id: venv-verify
+        if: ${{ steps.venv-cache.outputs.cache-hit == 'true' }}
+        run: |
+          if ./.venv/bin/python -c 'import pytest, xdist, pandas, yaml' >/dev/null 2>&1; then
+            ./.venv/bin/python -c 'import sys; print("virtualenv python:", sys.executable, sys.version.split()[0])'
+            echo "usable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Restored virtualenv is unusable; rebuilding it"
+            rm -rf .venv
+            echo "usable=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Install dependencies
+        id: install
+        if: ${{ steps.venv-cache.outputs.cache-hit != 'true' || steps.venv-verify.outputs.usable != 'true' }}
         run: |
           python -m venv .venv
           ./.venv/bin/pip install --upgrade pip
           ./.venv/bin/pip install -r requirements/dev.txt -c constraints/dev.txt
+
+      - name: Save virtualenv cache
+        if: ${{ steps.venv-cache.outputs.cache-hit != 'true' && steps.install.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: .venv
+          key: ${{ steps.venv-key.outputs.key }}
 
       - name: Lint
         run: |
@@ -142,11 +183,48 @@ jobs:
           cache-dependency-path: |
             requirements/*.txt
             constraints/*.txt
+            plugins/*/pyproject.toml
+      - name: Resolve virtualenv cache identity
+        id: venv-key
+        env:
+          DEPS_HASH: ${{ hashFiles('requirements/**', 'constraints/**', 'plugins/**') }}
+        run: |
+          PYTHON_VERSION="$(python -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])')"
+          KEY="venv-v1-${RUNNER_OS}-py${PYTHON_VERSION}-${DEPS_HASH}"
+          echo "key=${KEY}" >> "$GITHUB_OUTPUT"
+          echo "::notice::Virtualenv cache key: ${KEY}"
+      - name: Restore virtualenv cache
+        id: venv-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: .venv
+          key: ${{ steps.venv-key.outputs.key }}
+      - name: Verify restored virtualenv
+        id: venv-verify
+        if: ${{ steps.venv-cache.outputs.cache-hit == 'true' }}
+        run: |
+          if ./.venv/bin/python -c 'import pytest, xdist, pandas, yaml' >/dev/null 2>&1; then
+            ./.venv/bin/python -c 'import sys; print("virtualenv python:", sys.executable, sys.version.split()[0])'
+            echo "usable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Restored virtualenv is unusable; rebuilding it"
+            rm -rf .venv
+            echo "usable=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Install dependencies
+        id: install
+        if: ${{ steps.venv-cache.outputs.cache-hit != 'true' || steps.venv-verify.outputs.usable != 'true' }}
         run: |
           python -m venv .venv
           ./.venv/bin/pip install --upgrade pip
           ./.venv/bin/pip install -r requirements/dev.txt -c constraints/dev.txt
+      - name: Save virtualenv cache
+        if: ${{ steps.venv-cache.outputs.cache-hit != 'true' && steps.install.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: .venv
+          key: ${{ steps.venv-key.outputs.key }}
       - name: Full regression
         id: regression
         timeout-minutes: 15
