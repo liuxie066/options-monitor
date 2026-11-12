@@ -76,7 +76,15 @@ Ctrl+C 停止接收新工作；正在进行的不可取消 I/O 可能继续，�
 
 `serve` 在 `data_dir/bot.lock` 持有实例锁，`api-serve` 在 `data_dir/api.lock` 持有实例锁；同一实例重复启动被拒绝。配置不完整、凭据缺失或地址非回环时进程不启动，也不回退到环境变量或 OM 账户配置。
 
-bot 配置字段固定为 `instance_id`、`data_dir`、`feishu`（`app_id`、`app_secret_ref`、`allowed_chat_ids`）、`model`（`provider`、`model`、`base_url`、`api_key_ref`、`context_window_tokens`、`max_output_tokens`、`timeout_seconds`）和 `query_api`（`base_url`、`token_ref`）；`base_url` 只能是 `http://127.0.0.1:<port>`。三个引用必须是 `group_query_bot.feishu.app_secret`、`group_query_bot.llm.api_key`、`group_query_bot.query_api.token`。`allowed_chat_ids` 同样支持唯一通配 `["*"]`。可选 `limits` 默认每用户 3/min、每群 10/min、用户并发 1、bot 并发 2、回合 90 秒、模型 4 次、API 3 次、输出 2000 tokens、预留 32000 tokens、历史 10 轮/4000 tokens、API 超时 30 秒。模型只能使用 `query_quotes`、`query_candidates`、`evaluate_close`、`evaluate_roll_down`、`evaluate_roll_up` 五个固定工具，群/发送者/线程/截止时间/输入身份由宿主填写；关键数值由结构化结果渲染，模型只解释或补参。
+bot 必填配置字段为 `instance_id`、`data_dir`、`feishu`（`app_id`、`app_secret_ref`、`allowed_chat_ids`）、`model`（`provider`、`model`、`base_url`、`api_key_ref`、`context_window_tokens`、`max_output_tokens`、`timeout_seconds`）和 `query_api`（`base_url`、`token_ref`）；`base_url` 只能是 `http://127.0.0.1:<port>`。三个引用必须是 `group_query_bot.feishu.app_secret`、`group_query_bot.llm.api_key`、`group_query_bot.query_api.token`。`allowed_chat_ids` 同样支持唯一通配 `["*"]`。可选 `limits` 默认每用户 3/min、每群 10/min、用户并发 1、bot 并发 2、回合 90 秒、模型 4 次、API 3 次、输出 2000 tokens、预留 32000 tokens、历史 10 轮/4000 tokens、API 超时 30 秒。模型可使用 `query_quotes`、`query_candidates`、`evaluate_close`、`evaluate_roll_down`、`evaluate_roll_up` 五个固定业务工具，以及提交通用回答的宿主工具 `answer_general`；群/发送者/线程/截止时间/输入身份由宿主填写，业务关键数值必须来自结构化结果。
+
+bot 配置另有可选顶层字段 `"user_timezone": "Asia/Shanghai"`，默认 `Asia/Shanghai`，
+作用于该 bot 实例的用户时间语境；也可配置 `America/New_York` 等 IANA 时区名称，
+无效名称或非字符串在配置加载时拒绝。每轮从服务端当前时钟重新生成 system 消息中的
+UTC、用户所在地、美东（`America/New_York`）与香港（`Asia/Hong_Kong`）时间，
+包含日期、秒、时区名称、缩写及 UTC 偏移；美东的 EST/EDT 由标准库 `zoneinfo` 自动转换。
+通用问题中的“今天”默认按用户时区解释，交易时段以交易所官方说明为准。
+该时间语境仅用于日历与时区推算；行情等业务数字仍取自工具事实卡并经过回复 guard。
 
 API 配置字段固定为 `instance_id`、`data_dir`、`api`（`bind_host` 必须为 `127.0.0.1`、`bind_port`、`token_ref`、`app_id`）、`principal`（`principal_id`、`capabilities`、`markets`、`account_scope` 必须为 `[]`）、`quote`、`max_budget_seconds`、`public_policy`；可选 `principal_requests_per_minute` 默认 30。API 只接受固定五个回环路由，按服务端能力、市场和账户范围授权，不接受账户、持仓、收益或报告参数。
 

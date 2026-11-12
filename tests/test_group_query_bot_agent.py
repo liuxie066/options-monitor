@@ -83,6 +83,34 @@ def test_bot_config_rejects_wildcard_mixed_with_concrete_chats(tmp_path):
         load_bot_settings(_bot_config_file(tmp_path, ["*", "oc_group"]))
 
 
+def test_bot_config_user_timezone_defaults_to_shanghai(tmp_path):
+    assert _settings(tmp_path).user_timezone == "Asia/Shanghai"
+    assert load_bot_settings(_bot_config_file(tmp_path, ["oc_group"])).user_timezone == "Asia/Shanghai"
+
+
+@pytest.mark.parametrize("user_timezone", ["Asia/Shanghai", "America/New_York"])
+def test_bot_config_accepts_user_timezone(tmp_path, user_timezone):
+    path = _bot_config_file(tmp_path, ["oc_group"])
+    raw = json.loads(path.read_text())
+    raw["user_timezone"] = user_timezone
+    path.write_text(json.dumps(raw))
+
+    assert load_bot_settings(path).user_timezone == user_timezone
+
+
+@pytest.mark.parametrize("user_timezone", [
+    "Mars/Olympus_Mons", "/etc/localtime", "", " Asia/Shanghai", None, 8,
+])
+def test_bot_config_rejects_invalid_user_timezone(tmp_path, user_timezone):
+    path = _bot_config_file(tmp_path, ["oc_group"])
+    raw = json.loads(path.read_text())
+    raw["user_timezone"] = user_timezone
+    path.write_text(json.dumps(raw))
+
+    with pytest.raises(ValueError):
+        load_bot_settings(path)
+
+
 def _event(sender="ou_alice", chat="oc_group", message_id="om_1", thread=None):
     return VerifiedGroupEvent(
         app_id="cli_group", tenant_key="tenant", sender_open_id=sender,
@@ -151,13 +179,13 @@ class _FakeAPI:
                 "reason_codes": [], "scope": {}, "evaluated_at_utc": None}
 
 
-def _agent(tmp_path, *, model, api=None, settings=None, **overrides):
+def _agent(tmp_path, *, model, api=None, settings=None, now=None, **overrides):
     settings = settings or _settings(tmp_path, **overrides)
     conversations = ConversationStore(settings.data_dir)
     agent = GroupQueryAgent(
         settings=settings, conversations=conversations,
         api_client=api or _FakeAPI(), api_key="dedicated-model-key",
-        request=model, clock=lambda: CLOCK, now=lambda: NOW,
+        request=model, clock=lambda: CLOCK, now=now or (lambda: NOW),
         estimate=_estimate)
     return agent, conversations
 
@@ -398,6 +426,119 @@ def test_general_answer_uses_host_tool_and_skips_the_clarification_note(tmp_path
     assert "未执行实时查询" not in reply.text
     assert api.calls == []
     assert len(model.calls) == 1
+
+
+@pytest.mark.parametrize("user_timezone", ["Asia/Shanghai", "America/New_York"])
+@pytest.mark.parametrize("instant,shanghai,new_york", [
+    ("2026-03-08T06:59:59+00:00", "2026-03-08 14:59:59",
+     "2026-03-08 01:59:59 (America/New_York, EST, UTC-05:00)"),
+    ("2026-03-08T07:00:00+00:00", "2026-03-08 15:00:00",
+     "2026-03-08 03:00:00 (America/New_York, EDT, UTC-04:00)"),
+    ("2026-11-01T05:59:59+00:00", "2026-11-01 13:59:59",
+     "2026-11-01 01:59:59 (America/New_York, EDT, UTC-04:00)"),
+    ("2026-11-01T06:00:00+00:00", "2026-11-01 14:00:00",
+     "2026-11-01 01:00:00 (America/New_York, EST, UTC-05:00)"),
+])
+def test_general_answer_prompt_has_live_time_and_dst_offsets(
+        tmp_path, user_timezone, instant, shanghai, new_york):
+    path = _bot_config_file(tmp_path, ["oc_group"])
+    raw = json.loads(path.read_text())
+    raw["user_timezone"] = user_timezone
+    path.write_text(json.dumps(raw))
+    model = _ScriptedModel([
+        _tool_response("answer_general", {"answer": "请以交易所官方说明为准。"}),
+    ])
+    api = _FakeAPI()
+    agent, _ = _agent(tmp_path, model=model, api=api,
+                      settings=load_bot_settings(path),
+                      now=lambda: datetime.fromisoformat(instant))
+
+    reply = agent.handle_event(_event(), "今天美股几点开盘？")
+
+    system = model.calls[0]["messages"][0]
+    assert system["role"] == "system"
+    content = system["content"]
+    utc = datetime.fromisoformat(instant).strftime("%Y-%m-%d %H:%M:%S")
+    assert f"服务端 UTC：{utc} (UTC, UTC, UTC+00:00)" in content
+    local = (f"{shanghai} (Asia/Shanghai, CST, UTC+08:00)"
+             if user_timezone == "Asia/Shanghai" else new_york)
+    assert f"当前时间：{local}" in content
+    assert f"美东：{new_york}" in content
+    assert f"香港：{shanghai} (Asia/Hong_Kong, HKT, UTC+08:00)" in content
+    assert "必须基于本轮注入的服务端当前时间与用户时区" in content
+    assert "以交易所官方说明为准" in content
+    assert reply.status == "ok"
+    assert reply.reason_codes == ("general_answer",)
+    assert reply.text == "请以交易所官方说明为准。"
+    assert api.calls == []
+
+
+def test_prompt_time_refreshes_on_each_turn_in_the_same_conversation(tmp_path):
+    instants = iter([NOW, NOW + timedelta(days=1)])
+    model = _ScriptedModel([
+        _tool_response("answer_general", {"answer": "请以交易所官方说明为准。"}),
+        _tool_response("answer_general", {"answer": "请以交易所官方说明为准。"}),
+    ])
+    agent, _ = _agent(tmp_path, model=model, now=lambda: next(instants))
+
+    first = agent.handle_event(_event(message_id="om_1"), "今天几点开盘？")
+    second = agent.handle_event(_event(message_id="om_2"), "今天呢？")
+
+    assert first.status == second.status == "ok"
+    assert len(model.calls) == 2
+    first_prompt = model.calls[0]["messages"][0]["content"]
+    second_prompt = model.calls[1]["messages"][0]["content"]
+    assert "当前时间：2026-11-10 14:00:00" in first_prompt
+    assert "当前时间：2026-11-11 14:00:00" in second_prompt
+    assert "2026-11-10" not in second_prompt
+
+
+def test_real_model_adapter_sends_time_context_and_general_answer_tool(tmp_path, monkeypatch):
+    calls = []
+
+    def completion(**kwargs):
+        calls.append(kwargs)
+        response = _tool_response("answer_general", {"answer": "请以交易所官方说明为准。"})
+        return {"choices": [{"message": response["message"], "finish_reason": "tool_calls"}],
+                "usage": response["usage"]}
+
+    monkeypatch.setattr("src.application.bot.runtime.create_chat_completion", completion)
+    api = _FakeAPI()
+    settings = _settings(tmp_path)
+    agent = GroupQueryAgent(
+        settings=settings, conversations=ConversationStore(settings.data_dir),
+        api_client=api, api_key="dedicated-model-key",
+        clock=lambda: CLOCK, now=lambda: NOW, estimate=_estimate)
+
+    reply = agent.handle_event(_event(), "今天美股几点开盘？")
+
+    assert reply.reason_codes == ("general_answer",)
+    assert len(calls) == 1
+    assert "当前时间：2026-11-10 14:00:00" in calls[0]["messages"][0]["content"]
+    assert {tool["function"]["name"] for tool in calls[0]["tools"]} == TOOL_NAMES | {"answer_general"}
+    assert api.calls == []
+
+
+def test_prompt_time_numbers_do_not_become_business_price_facts(tmp_path):
+    instant = datetime(2031, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+    model = _ScriptedModel([
+        _tool_response("query_quotes", QUOTE_ARGUMENTS),
+        _text_response("NVDA 最新价 2031。"),
+        _text_response("NVDA 最新价 185.0000，买一 184.9000 / 卖一 185.1000。"),
+    ])
+    api = _FakeAPI()
+    agent, _ = _agent(tmp_path, model=model, api=api, now=lambda: instant)
+
+    reply = agent.handle_event(_event(), "NVDA 现价")
+
+    assert "当前时间：2031-01-02 11:04:05" in model.calls[0]["messages"][0]["content"]
+    assert reply.status == "ok"
+    assert reply.reason_codes == ("reply_guard_retry",)
+    assert reply.text == "NVDA 最新价 185.0000，买一 184.9000 / 卖一 185.1000。"
+    assert len(api.calls) == 1
+    assert api.calls[0]["method"] == "query_quotes"
+    assert any(message["role"] == "tool" and "185.0000" in message["content"]
+               for message in model.calls[1]["messages"])
 
 
 def test_invalid_general_answer_falls_back_to_a_clarification(tmp_path):
