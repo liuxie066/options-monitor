@@ -631,6 +631,12 @@ def _normalize_strategy_and_field(raw_strategy: Any, raw_field: Any) -> tuple[st
     field_text = str(raw_field or "").strip()
     if field_text:
         prefix_strategy, field = _split_strategy_field(field_text)
+        if strategy and prefix_strategy and strategy != prefix_strategy:
+            raise AgentToolError(
+                code="INPUT_ERROR",
+                message=f"strategy {strategy} conflicts with field prefix {prefix_strategy}",
+                hint="Use a matching strategy and field prefix, or omit strategy.",
+            )
         return strategy or prefix_strategy, _normalize_field(field)
     return strategy, None
 
