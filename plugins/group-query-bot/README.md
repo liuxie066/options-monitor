@@ -84,6 +84,30 @@ bot 侧会话保存在 `data_dir/conversation.sqlite3`：`messages` 保存按 `t
 
 服务安装是可选显式集合：`om service render` 和 `om service lifecycle install` 接受 `--group-query-bot-instances`（指向 JSON 数组文件的路径，每项 `instance_id`、`bot_config`、`api_config`）。默认空集合不渲染任何群查询单元，保持既有服务集合不变。显式配置时为每个实例渲染 bot 和 API 两个单元；bot 单元接收飞书、模型和查询凭据，API 单元只接收查询凭据。安装不启动服务，也不自动部署或升级。
 
+## 续聊与候选条件
+
+首次消息须真实 @ 当前 bot。随后在同一实例、应用、租户、群、发送者及线程内，最近一条成功回复的用户消息接入时间距今未满 600 秒时，可以直接发送没有 mention 的文本续聊。成功回复会续期；发送失败或结果未知不续期。仅 @ 其他对象的消息不处理。历史保留 24 小时，独立于这一短时窗口。
+
+在 bot 配置的 `limits` 中设置 `followup_window_seconds` 可调整窗口，接受 0..3600 的整数；默认 600，0 恢复逐条要求 @。飞书侧必须具备接收普通群消息的权限并确实投递事件，代码放行不能替代平台权限；最小接入 preflight 仍要求逐条 @。
+
+`query_candidates.parameters` 的行权价条件支持三种字段：
+
+| 字段 | 含义 | 组合 |
+| --- | --- | --- |
+| `strike` | 精确等于 | 与另外两个字段互斥 |
+| `min_strike` | 大于等于，包含下限 | 可与 max_strike 组合 |
+| `max_strike` | 小于等于，包含上限 | 可与 min_strike 组合 |
+
+三者均可省略，采用公共策略范围；只指定一侧时覆盖该侧边界。显式值须为正有限 JSON 数字，不能传 null、布尔值或数字字符串；下限大于上限时在取数前拒绝。例如查询最大行权价 380 的候选：
+
+```json
+{"symbol":"0700.HK","strategy":"short_put","max_strike":380}
+```
+
+续聊修改边界时保留标的、方向及其他未修改的用户条件；从精确价改为上下限要清除旧 strike。上下限均包含端点，严格不含端点的要求须先确认是否接受这一规则。
+
+候选查询完成后，由宿主直接渲染实际生效条件、合约、到期日和报价，不再调用模型改写结果。模型仍负责理解自然语言和提取参数；其他工具继续按事实卡与回复校验规则处理。
+
 ## 本地记录与验收
 
 `data_dir/preflight.sqlite3` 只保存消息/event ID、scope 摘要、固定 uuid、状态和首次创建/失效时间，保留 7 天。scope 包含实例、应用、header tenant、群、发送者和线程；线程缺省 null，header tenant/发送者缺失拒绝。sender 自身 tenant 单独保留来源证据，不用组织归属决定是否可使用。

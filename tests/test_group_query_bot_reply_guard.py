@@ -245,11 +245,11 @@ def test_empty_replies_are_rejected():
 
 def test_fallback_with_many_candidates_stays_within_the_length_cap():
     candidates = [{
-        "contract_symbol": f"US.NVDA2611{index:02d}P120000",
-        "expiration": f"2026-11-{index:02d}", "strike": 120.0,
-        "bid": 1.0 + index / 100, "ask": 1.1 + index / 100,
-        "delta": -0.2, "dte": index, "economic_result": "positive_net_credit",
-        "metrics": {"incremental_annualized_return": 0.2},
+        "contract": f"US.NVDA2611{index:02d}P120000",
+        "expiry": f"2026-11-{index:02d}", "strike": 120.0,
+        "evidence": {"bid": 1.0 + index / 100, "ask": 1.1 + index / 100},
+        "delta": -0.2, "dte": index,
+        "metrics": {"annualized_net_return": 0.2},
     } for index in range(1, 9)]
     data = {"symbol": "NVDA", "market": "US", "outcome": "found",
             "candidates": candidates, "displayed": len(candidates),

@@ -89,6 +89,22 @@ class DeliveryStore:
             if result.rowcount != 1:
                 raise RuntimeError("delivery_already_finished")
 
+    def has_recent_acknowledgement(self, scope: str, now: datetime,
+                                   window_seconds: int) -> bool:
+        """Use successful inbound-message deliveries, never unsent history, for follow-ups."""
+        if window_seconds <= 0:
+            return False
+        with self.connect() as db:
+            row = db.execute(
+                """SELECT 1 FROM deliveries
+                   WHERE scope_sha256 = ? AND state = 'acknowledged'
+                     AND created_at_utc > ? AND created_at_utc <= ?
+                     AND expires_at_utc > ? LIMIT 1""",
+                (scope, utc_text(now - timedelta(seconds=window_seconds)),
+                 utc_text(now), utc_text(now)),
+            ).fetchone()
+        return row is not None
+
     def cleanup(self, now: datetime) -> None:
         with self.connect() as db:
             db.execute("DELETE FROM deliveries WHERE expires_at_utc <= ?", (utc_text(now),))

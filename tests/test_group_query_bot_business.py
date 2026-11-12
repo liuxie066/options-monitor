@@ -42,6 +42,81 @@ def _prepare(query, policy=POLICY):
     return prepare_public_query({**query, "market": "US"}, policy, ROUTE, NOW)
 
 
+@pytest.mark.parametrize("strategy,policy_key", [
+    ("short_put", "sell_put"), ("short_call", "sell_call"),
+])
+@pytest.mark.parametrize("bounds,expected", [
+    ({}, (95.0, 105.0, "public_policy")),
+    ({"strike": 100}, (100.0, 100.0, "request")),
+    ({"min_strike": 100}, (100.0, 105.0, "request")),
+    ({"max_strike": 100}, (95.0, 100.0, "request")),
+    ({"min_strike": 90}, (90.0, 105.0, "request")),
+    ({"max_strike": 110}, (95.0, 110.0, "request")),
+    ({"min_strike": 97.5, "max_strike": 102.5}, (97.5, 102.5, "request")),
+    ({"min_strike": 100, "max_strike": 100}, (100.0, 100.0, "request")),
+])
+def test_public_candidates_report_canonical_strike_filters(strategy, policy_key, bounds, expected):
+    policy = {policy_key: {"min_strike": 95, "max_strike": 105}}
+    prepared = _prepare({"symbol": "NVDA", "strategy": strategy, **bounds}, policy)
+    lower, upper, source = expected
+    assert (prepared.config.min_strike, prepared.config.max_strike) == (lower, upper)
+    assert prepared.filters["strike"] == bounds.get("strike")
+    if "strike" in bounds:
+        assert type(prepared.filters["strike"]) is float
+    assert prepared.filters["min_strike"] == lower
+    assert prepared.filters["max_strike"] == upper
+    assert prepared.filters["strike_source"] == source
+    result = evaluate_public_candidates(prepared, {"rows": [], "meta": {}}, {}, 0, NOW)
+    assert result["effective_filters"] == prepared.filters
+    assert policy == {policy_key: {"min_strike": 95, "max_strike": 105}}
+
+
+@pytest.mark.parametrize("field", ["strike", "min_strike", "max_strike"])
+@pytest.mark.parametrize("value", [
+    None, True, False, "100", 0, -1, float("nan"), float("inf"), -float("inf"),
+])
+def test_public_candidates_reject_invalid_supplied_strike_fields(field, value):
+    with pytest.raises(AgentToolError) as caught:
+        _prepare({"symbol": "NVDA", "strategy": "short_put", field: value})
+    assert caught.value.code == "INPUT_ERROR"
+
+
+@pytest.mark.parametrize("bounds", [
+    {"strike": 100, "min_strike": 100},
+    {"strike": 100, "max_strike": 100},
+    {"strike": 100, "min_strike": 95, "max_strike": 105},
+    {"strike": 100, "min_strike": 100, "max_strike": 100},
+    {"min_strike": 105, "max_strike": 95},
+    {"min_strike": 110}, {"max_strike": 90},
+])
+def test_public_candidates_reject_mixed_or_reversed_effective_strike_bounds(bounds):
+    policy = {"sell_put": {"min_strike": 95, "max_strike": 105}}
+    with pytest.raises(AgentToolError) as caught:
+        _prepare({"symbol": "NVDA", "strategy": "short_put", **bounds}, policy)
+    assert caught.value.code == "INPUT_ERROR"
+
+
+@pytest.mark.parametrize("bounds", [
+    {"strike": None}, {"min_strike": None}, {"max_strike": True},
+    {"min_strike": "100"}, {"max_strike": float("inf")},
+    {"strike": 100, "min_strike": 100},
+    {"min_strike": 105, "max_strike": 95},
+    {"min_strike": 110}, {"max_strike": 90},
+])
+def test_invalid_strike_requests_fail_before_candidate_fetch(tmp_path, monkeypatch, bounds):
+    from test_group_query_bot_api import _body, _service
+
+    service, recorder = _service(tmp_path)
+    service.settings.public_policy.policy["sell_put"].update(min_strike=95, max_strike=105)
+    monkeypatch.setattr(service.business, "_fetch", lambda **kwargs: pytest.fail("unexpected quote I/O"))
+    envelope, status = service.handle("query_candidates", _body({
+        "symbol": "NVDA", "strategy": "short_put", **bounds,
+    }))
+    assert status == 400
+    assert envelope["error"]["code"] == "INPUT_ERROR"
+    assert recorder.calls == []
+
+
 def test_public_candidates_intersect_request_and_policy_delta():
     prepared = _prepare({"symbol": "US.NVDA", "strategy": "short_put",
                          "abs_delta_range": [0.2, 0.4], "limit": 5})

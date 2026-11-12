@@ -31,6 +31,54 @@ def configured(monkeypatch, tmp_path):
     assert config == original
 
 
+@pytest.mark.parametrize('strategy', ['short_put', 'short_call'])
+@pytest.mark.parametrize('bounds,expected_strikes', [
+    ({}, [98, 99, 100, 101, 102]),
+    ({'strike': 100}, [100]),
+    ({'min_strike': 99}, [99, 100, 101, 102]),
+    ({'max_strike': 101}, [98, 99, 100, 101]),
+    ({'min_strike': 99, 'max_strike': 101}, [99, 100, 101]),
+    ({'min_strike': 100, 'max_strike': 100}, [100]),
+])
+def test_group_candidate_facade_applies_inclusive_strike_bounds_before_limit(monkeypatch, strategy, bounds, expected_strikes):
+    from om_group_query_bot.contracts import normalize_request
+    from test_option_candidates_contract import NOW, _bundle, _row
+
+    offset = 20 if strategy == 'short_call' else 0
+    bounds = {name: value + offset for name, value in bounds.items()}
+    expected_strikes = [strike + offset for strike in expected_strikes]
+    request = normalize_request('query_candidates', {
+        'schema_version': 'group_query_request.v1', 'request_id': 'strike-bounds',
+        'request_deadline_utc': (NOW + timedelta(seconds=30)).isoformat(),
+        'request_context': {'tenant_key': 'tenant', 'chat_id': 'chat', 'sender_open_id': 'sender',
+                            'thread_id': None},
+        'parameters': {'symbol': 'NVDA', 'strategy': strategy, 'limit': 50, **bounds},
+    }, now=NOW)
+    policy_key = 'sell_call' if strategy == 'short_call' else 'sell_put'
+    policy = {policy_key: {'min_strike': 90 + offset, 'max_strike': 110 + offset}}
+    route = {'market_data_provider': 'opend', 'host': 'fixture.invalid', 'port': 11111}
+    monkeypatch.setattr(app, 'rates_for_purpose', lambda *a, **kw: {'USDCNY': 7.2})
+    query = {**request.parameters, 'market': request.market}
+    prepared = app.prepare_public_query(query, policy, route, NOW)
+    rows = [_row(mode=strategy.removeprefix('short_'), strike=strike + offset)
+            for strike in [98, 99, 100, 101, 102]]
+    bundle = _bundle(rows)
+    result = app.evaluate_public_candidates(prepared, bundle, {}, 0, NOW)
+    assert result['outcome'] == 'found', result
+    assert result['coverage']['status'] == 'complete'
+    assert result['coverage']['discovered'] == len(expected_strikes)
+    assert result['coverage']['matched'] == len(expected_strikes)
+    assert sorted(row['strike'] for row in result['candidates']) == expected_strikes
+    assert result['effective_filters']['strike_source'] == ('request' if bounds else 'public_policy')
+
+    limited = app.prepare_public_query({**query, 'limit': 1}, policy, route, NOW)
+    first = app.evaluate_public_candidates(limited, bundle, {}, 0, NOW)
+    assert first['coverage'] == result['coverage']
+    assert first['candidates'] == result['candidates'][:1]
+    assert first['displayed'] == 1
+    assert first['omitted'] == len(expected_strikes) - 1
+
+
 def test_prepare_inheritance_overrides_defaults_and_known_route(configured, tmp_path):
     context = app.QueryContext(runtime_root=tmp_path)
     now = datetime.now(timezone.utc)

@@ -81,6 +81,15 @@ evaluate_roll_down、evaluate_roll_up；另有一个宿主工具 answer_general�
    估算、不是账户实际扣费；条件移仓要说明股票覆盖未经核实。
 10. 解释历史结果时按上面的风格转述，不要复述历史原文。不要自行添加
    “未执行实时查询”之类的免责声明：只有澄清问题、没有实时数据时，系统会统一追加。
+11. 候选行权价只有三种条件：strike 是精确等于；min_strike 是最低价（含端点）；
+    max_strike 是最高价（含端点）。min_strike 与 max_strike 可组合，strike 与范围互斥。
+    “max strike=380”“不超过380”“最高380”使用 max_strike=380，不能用 strike 代替。
+    用户明确要求严格小于或大于、不含端点时，说明目前范围包含端点并确认是否接受；
+    不要声称已经执行严格比较，不要丢掉边界后改查行情。
+12. 用户补充或纠正候选条件时，沿用最近候选查询的标的、方向及未修改的用户条件，
+    只替换本轮明确修改的字段；从精确行权价改为上限或下限时，清除旧 strike。
+    用户明确取消某条件时清除该字段、恢复公共策略默认；明确切换到查价等新问题时
+    才改用相应工具。历史只供理解参数，每次候选查询仍须重新取数。
 """
 
 
@@ -134,8 +143,15 @@ TOOLS: list[dict[str, Any]] = [
                         "minItems": 2, "maxItems": 2,
                         "description": "可选；省略时使用公共策略对应方向的期限窗口，"
                                        "不要为此追问用户；结果里会写明实际生效的期限"},
-                "strike": {"type": "number",
-                           "description": "可选；省略时使用公共策略行权价范围"},
+                "strike": {"type": "number", "exclusiveMinimum": 0,
+                           "description": "可选；精确行权价（等于）；与 min_strike、"
+                                          "max_strike 互斥；三者均省略时使用公共策略范围"},
+                "min_strike": {"type": "number", "exclusiveMinimum": 0,
+                               "description": "可选；最低行权价（大于等于，包含端点）；"
+                                              "可与 max_strike 组合，与 strike 互斥"},
+                "max_strike": {"type": "number", "exclusiveMinimum": 0,
+                               "description": "可选；最高行权价（小于等于，包含端点）；"
+                                              "可与 min_strike 组合，与 strike 互斥"},
                 "abs_delta_range": {"type": "array", "items": {"type": "number"},
                                     "minItems": 2, "maxItems": 2,
                                     "description": "可选；省略时使用公共策略 Delta 范围；"
@@ -384,6 +400,29 @@ def _history_tool_messages(content: str, turn_index: int,
              "content": "[历史查询结果，仅供指代，不要复述] " + content}]
 
 
+def _last_candidate_query(history: list[dict]) -> dict[str, Any] | None:
+    """Recover only validated arguments, never conditions invented in prior prose."""
+    for turn in reversed(history):
+        for item in reversed(turn["messages"]):
+            if item["role"] != "tool_result":
+                continue
+            try:
+                payload = json.loads(item["content"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict) or payload.get("method") not in TOOL_NAMES:
+                continue
+            arguments = payload.get("arguments")
+            if (payload["method"] != "query_candidates"
+                    or not isinstance(arguments, dict)
+                    or not {"symbol", "strategy"} <= arguments.keys()):
+                return None
+            return {key: value for key, value in arguments.items()
+                    if key in {"symbol", "strategy", "strike", "min_strike", "max_strike",
+                               "dte", "abs_delta_range", "limit"}}
+    return None
+
+
 class GroupQueryAgent:
     def __init__(self, *, settings: BotSettings, conversations: ConversationStore,
                  api_client: QueryAPIClient, api_key: str,
@@ -434,6 +473,11 @@ class GroupQueryAgent:
 
     def _messages(self, history: list[dict], pending: list[dict], text: str) -> list[dict]:
         system = SYSTEM_PROMPT
+        current_query = _last_candidate_query(history)
+        if current_query is not None:
+            system += ("\n最近一次候选查询的用户参数（只供本轮延续或修改，"
+                       "不是本次查询结果；未指定的条件仍用公共策略默认）：\n"
+                       + _canonical(current_query))
         if pending:
             system += "\n待补参数（仅当用户本轮明确补充时才使用）：\n" + _canonical(pending)
         messages: list[dict] = [{"role": "system", "content": system}]
@@ -569,7 +613,9 @@ class GroupQueryAgent:
                                            "arguments": result[3],
                                            "summary": _tool_summary(result[0], result[1]),
                                            "fact_card": last_card})
-                    if contract_error:
+                    # Candidate conditions and quotes are rendered from the API
+                    # result; another prose pass could claim unapplied filters.
+                    if contract_error or result[0] == "query_candidates":
                         stop = True
                 messages.append({"role": "tool",
                                  "tool_call_id": str(call.get("id") or ""),
@@ -603,6 +649,8 @@ class GroupQueryAgent:
         elif contract_error:
             body = contract_error
             reasons.append("result_contract_inconsistent")
+        elif last_result is not None and last_result[0] == "query_candidates":
+            body = rendered
         elif fallback_used:
             body = rendered
         elif rendered is not None:
@@ -791,10 +839,18 @@ class BotService:
         now = self._now()
         try:
             event = normalize_sdk_event(payload, self.settings.app_id, bot_open_id,
-                                        self.settings.allowed_chat_ids)
+                                        self.settings.allowed_chat_ids,
+                                        require_mention=False)
             user_text = text if text is not None else message_text(payload)
         except EventRejected as exc:
+            LOGGER.info("group_query_event_rejected reason=%s", str(exc))
             return {"status": "rejected", "reason": str(exc)}
+        scope = event.scope_sha256(self.settings.instance_id)
+        if not event.bot_mentioned and not self.deliveries.has_recent_acknowledgement(
+                scope, now, self.settings.followup_window_seconds):
+            LOGGER.info("group_query_event_ignored reason=no_active_conversation scope=%s",
+                        scope)
+            return {"status": "rejected", "reason": "not_mentioned"}
         row, claimed = self.deliveries.claim(event, self.settings.instance_id, now)
         if not claimed:
             return {"status": "duplicate", "delivery_state": row["state"]}

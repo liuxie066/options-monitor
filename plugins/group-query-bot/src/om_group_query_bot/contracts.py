@@ -339,7 +339,8 @@ def _parameters(method: str, value: Any) -> dict[str, Any]:
             result["contract"] = _option_contract(body["contract"])
         return result
     if method == "query_candidates":
-        allowed = {"symbol", "strategy", "dte", "strike", "abs_delta_range", "limit"}
+        allowed = {"symbol", "strategy", "dte", "strike", "min_strike", "max_strike",
+                   "abs_delta_range", "limit"}
         body = {key: item for key, item in value.items() if key in allowed}
         unknown = sorted(set(value) - allowed)
         if unknown:
@@ -355,8 +356,14 @@ def _parameters(method: str, value: Any) -> dict[str, Any]:
                   "strategy": str(strategy)}
         if "dte" in body:
             result["dte"] = _dte_range(body["dte"])
-        if "strike" in body:
-            result["strike"] = _positive(body["strike"], "strike")
+        if "strike" in body and ("min_strike" in body or "max_strike" in body):
+            raise _reject("strike cannot be combined with min_strike or max_strike")
+        for name in ("strike", "min_strike", "max_strike"):
+            if name in body:
+                result[name] = _positive(body[name], name)
+        if ("min_strike" in result and "max_strike" in result
+                and result["min_strike"] > result["max_strike"]):
+            raise _reject("min_strike must not exceed max_strike")
         if "abs_delta_range" in body:
             result["abs_delta_range"] = _delta_range(body["abs_delta_range"])
         result["limit"] = _integer(body.get("limit", 10), "limit", minimum=1, maximum=50)
