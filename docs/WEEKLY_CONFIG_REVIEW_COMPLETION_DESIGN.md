@@ -447,3 +447,23 @@ final closeout 报告：变更、验证、docs、finding 状态、首份真实�
 6. 两个行为切片、一个 Gateflow work unit、一条 draft PR；已知 Feishu secret 无效和生产尚无方向码如实作为外部限制交付。
 
 **用户确认已收到。下一入口依 Gateflow 状态 artifact 记录推进；本设计确认范围保持不变。**
+
+## 14. 合并交付回执（Closeout）
+
+2026-11-12，用户另行授权将 [PR #1151](https://github.com/liuxie066/options-monitor/pull/1151) 标记为 ready、squash 合并，并核对主分支 CI。此节记录该后续授权的结果，作为可提交的 closeout；本地详细运行回执仍保留在不入库的过程文档中。
+
+- 合并提交：[`2236953cc41e27db47434f36d4b1f88606b44852`](https://github.com/liuxie066/options-monitor/commit/2236953cc41e27db47434f36d4b1f88606b44852)。
+- 提交标题：`feat(report): complete weekly strike boundary review (#1151)`。
+- 合并父提交：`9d040d38277e981637c25f2bc4cdd927e9e6eb86`；已 fetch 并通过 ancestry 检查，确认合并提交位于 `origin/main`。
+- 合并树：`6584380838d96df4687ee7c93b6d107df3b327ec`，与同步后 PR 的测试树相同。PR 的八个回归分片和必需门禁均通过后合并。
+
+以下两个 run 均绑定该合并提交和 `main` 分支，不以其他提交的绿灯替代：
+
+| Workflow | Run | Event | 结论 |
+| --- | --- | --- | --- |
+| Guardrails | [43176381200](https://github.com/liuxie066/options-monitor/actions/runs/43176381200) | `push` | `success` |
+| Core/CodeQL | [43176380981](https://github.com/liuxie066/options-monitor/actions/runs/43176380981) | `dynamic` | `success` |
+
+Core/CodeQL 的 Actions workflow 为 `CodeQL`，此次 run 显示为 `Push on main`，路径为 `dynamic/github-code-scanning/codeql`。
+
+本次合并未改动 `VERSION`、`CHANGELOG.md` 或 `release/`，不发版。功能分支、文档回执分支和 worktree 均保留，删除仍需逐次授权。飞书错误码 `10014` 保持原记录；本轮不修改凭据，也不声明投递成功。
