@@ -1,0 +1,11 @@
+[Unit]
+Description=Options Monitor configuration review on Sunday at 20:00 Shanghai
+
+[Timer]
+OnCalendar=Sun *-*-* 20:00:00 Asia/Shanghai
+Persistent=true
+AccuracySec=1min
+Unit=options-monitor-report-config-review.service
+
+[Install]
+WantedBy=timers.target

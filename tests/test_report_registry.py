@@ -35,12 +35,13 @@ def test_schedule_payload_exports_config_review_and_legacy_launchd_labels(tmp_pa
     reports = {item["report_id"]: item for item in payload["reports"]}
     config_review = reports["config_review"]["entries"][0]
     assert config_review["frequency"] == "weekly"
-    assert config_review["weekday"] == 1
-    assert config_review["hour"] == 8
+    assert config_review["trigger"] == "systemd"
+    assert config_review["weekday"] == 7
+    assert config_review["hour"] == 20
     assert config_review["minute"] == 0
-    assert config_review["launchd"]["label"] == "com.options-monitor.report.config-review.weekly"
-    assert config_review["launchd"]["plist_present"] is False
-    assert config_review["launchd"]["start_calendar_interval"] == {"Weekday": 1, "Hour": 8, "Minute": 0}
+    assert config_review["timezone"] == "Asia/Shanghai"
+    assert "launchd" not in config_review
+    assert "options-monitor-report-config-review.timer" in config_review["note"]
     assert config_review["command"] == ["om", "report", "run", "config_review", "--trigger", "schedule"]
 
     labels = {
@@ -71,5 +72,6 @@ def test_retention_policy_is_separate_from_output_runs() -> None:
 
     definition = report_definition("config_review")
     assert definition is not None
-    assert definition.retention.keep_count == 52
+    assert definition.retention.keep_count is None
+    assert definition.retention.keep_days is None
     assert "不自动删除" in definition.retention.note

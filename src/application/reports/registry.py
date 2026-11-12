@@ -37,7 +37,7 @@ class ReportSchedule:
     """One declared run time (a report may have several, e.g. daily + weekly)."""
 
     frequency: str  # daily | weekly | tick | manual
-    trigger: str  # launchd | tick | manual
+    trigger: str  # launchd | systemd | tick | manual
     timezone: str = LOCAL_TIMEZONE
     hour: int | None = None
     minute: int | None = None
@@ -50,7 +50,7 @@ class ReportSchedule:
     def __post_init__(self) -> None:
         if self.frequency not in {"daily", "weekly", "tick", "manual"}:
             raise ValueError(f"unsupported report frequency: {self.frequency}")
-        if self.trigger not in {"launchd", "tick", "manual"}:
+        if self.trigger not in {"launchd", "systemd", "tick", "manual"}:
             raise ValueError(f"unsupported report trigger: {self.trigger}")
         if self.frequency in {"daily", "weekly"}:
             if self.hour is None or self.minute is None:
@@ -284,14 +284,12 @@ REPORT_REGISTRY: tuple[ReportDefinition, ...] = (
         schedules=(
             ReportSchedule(
                 frequency="weekly",
-                trigger="launchd",
-                weekday=1,
-                hour=8,
+                trigger="systemd",
+                weekday=7,
+                hour=20,
                 minute=0,
-                launchd_label="com.options-monitor.report.config-review.weekly",
-                plist_path="~/Library/LaunchAgents/com.options-monitor.report.config-review.weekly.plist",
                 command=("om", "report", "run", "config_review", "--trigger", "schedule"),
-                note="首个走报告中心框架的报告；本期提供调度描述与 plist 模板，不自动安装。",
+                note="远端 options-monitor-report-config-review.timer；确认投递后才撤本机旧 launchd。",
             ),
         ),
         run_entry="src/application/reports/config_review.py::build_config_review",
@@ -301,11 +299,10 @@ REPORT_REGISTRY: tuple[ReportDefinition, ...] = (
         migrated=True,
         delivery=DELIVERY_FEISHU_APP,
         retention=RetentionPolicy(
-            keep_count=52,
-            note="每周一份，保留约一年；报告中心只声明策略，不自动删除。",
+            keep_count=None,
+            note="远端周报追加保存全部运行与投递回执，不自动删除；清理需另行安排。",
         ),
-        plist_template="deploy/launchd/com.options-monitor.report.config-review.weekly.plist.template",
-        notes="依赖 configs/user.hk.json、configs/user.us.json；现价缺失会明确标注，不阻断报告。",
+        notes="默认读取 runtime config 与 output_runs 冻结行情；--configs-root 仅显式本地使用，缺失/过期行情明确标注。",
     ),
 )
 

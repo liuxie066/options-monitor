@@ -11,6 +11,7 @@ from typing import Any
 
 from domain.domain.symbol_identity import canonical_symbol
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.agent_tool_config import load_runtime_config
 from src.application.reports.prices import (
     PriceSnapshot,
     resolve_price_snapshot,
@@ -37,27 +38,32 @@ class ConfigReviewResult:
 
 def build_config_review(
     *,
-    configs_root: str | Path,
     runtime_root: str | Path,
+    configs_root: str | Path | None = None,
     prices_file: str | Path | None = None,
     candidate_evidence_file: str | Path | None = None,
     now: datetime | None = None,
 ) -> ConfigReviewResult:
     generated_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    root = Path(configs_root).expanduser().resolve()
-    markets, config_files, data_gaps, system_config = _load_market_configs(root)
+    root = Path(configs_root if configs_root is not None else runtime_root).expanduser().resolve()
+    config_source = "local_user" if configs_root is not None else "runtime"
+    markets, config_files, data_gaps, system_config = (
+        _load_market_configs(root) if configs_root is not None else _load_runtime_market_configs(root)
+    )
     if not markets:
         raise AgentToolError(
             code="REPORT_CONFIG_MISSING",
-            message="no market user config was found",
-            details={"configs_root": str(root), "expected": [name for _, name in _MARKET_FILES]},
-            hint="Pass --configs-root or create configs/user.hk.json and configs/user.us.json.",
+            message="no market config was found for the selected source",
+            details={"root": str(root), "config_source": config_source},
+            hint="Build config.hk.json/config.us.json in the runtime root, or explicitly pass --configs-root for local user files.",
         )
     snapshot = resolve_price_snapshot(
         runtime_root=runtime_root,
         prices_file=prices_file,
         markets=[item["market"] for item in markets],
+        now=generated_at,
     )
+    data_gaps.extend(snapshot.data_gaps)
     market_payloads: list[dict[str, Any]] = []
     all_rows: list[dict[str, Any]] = []
     for market in markets:
@@ -88,7 +94,10 @@ def build_config_review(
         "schema_version": CONFIG_REVIEW_SCHEMA_VERSION,
         "generated_at_utc": _iso(generated_at),
         "configs_root": str(root),
+        "config_source": config_source,
         "config_files": config_files,
+        "price_runs": snapshot.runs,
+        "price_diagnostics": list(snapshot.diagnostics),
         "system_config": system_config,
         "price_source": snapshot.source,
         "price_observed_at_utc": snapshot.observed_at_utc,
@@ -108,6 +117,41 @@ def build_config_review(
     )
     markdown = _render_review_sections(payload) + "\n" + markdown.partition("\n")[2].lstrip()
     return ConfigReviewResult(markdown=markdown, payload=payload, summary=summary, evidence=evidence)
+
+
+def _load_runtime_market_configs(
+    root: Path,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], dict[str, Any]]:
+    markets: list[dict[str, Any]] = []
+    files: list[dict[str, Any]] = []
+    gaps: list[str] = []
+    for market in ("HK", "US"):
+        path = root / f"config.{market.lower()}.json"
+        files.append({"market": market, "path": str(path), "exists": path.is_file(), "symbol_count": 0})
+        if not path.is_file():
+            gaps.append(f"{market} runtime config 缺失：{path}")
+            continue
+        _, payload = load_runtime_config(config_path=path, expected_market=market)
+        symbols = payload.get("symbols")
+        if isinstance(symbols, dict):
+            rows = [{**value, "symbol": symbol} for symbol, value in symbols.items() if isinstance(value, dict)]
+        elif isinstance(symbols, list):
+            rows = [dict(value) for value in symbols if isinstance(value, dict)]
+        else:
+            raise AgentToolError(
+                code="REPORT_CONFIG_INVALID", message="runtime symbols must be a mapping or list",
+                details={"path": str(path)},
+            )
+        if len(rows) != len(symbols):
+            raise AgentToolError(
+                code="REPORT_CONFIG_INVALID", message="runtime symbol settings must be objects",
+                details={"path": str(path)},
+            )
+        files[-1]["symbol_count"] = len(rows)
+        if not rows:
+            gaps.append(f"{market} runtime config 未配置标的")
+        markets.append({"market": market, "path": path, "symbols": rows, "symbol_defaults": {}})
+    return markets, files, gaps, {"path": None, "exists": False, "source": "resolved_runtime"}
 
 
 def _load_market_configs(
@@ -573,7 +617,9 @@ def _render_markdown(
     for item in config_files:
         status = "已读取" if item["exists"] else "不存在"
         lines.append(f"- {item['market']}：`{item['path']}`（{status}，{item['symbol_count']} 个标的）")
-    if isinstance(system_config, dict):
+    if system_config.get("source") == "resolved_runtime":
+        lines.append("- 配置源：config.yaml 构建的 runtime JSON；默认值已在构建时解析，不再叠加本机 user/system 配置。")
+    else:
         status = "已读取" if system_config.get("exists") else "不存在"
         lines.append(
             f"- system.json：`{system_config.get('path')}`（{status}；仅用于用户配置未声明字段的回退）"
@@ -688,7 +734,7 @@ def _detail_lines(row: dict[str, Any]) -> list[str]:
         observed = price.get("observed_at_utc") or "时间未知"
         lines.append(f"- 现价：{price['value']:.2f}（{price.get('source')}，观察于 {observed}）")
     else:
-        lines.append("- 现价：不可用（没有最新 brief 观察或未提供价格文件）")
+        lines.append("- 现价：不可用（所选扫描缺少可用行情，或显式价格输入无此标的）")
     for label, side_name, side in (
         ("卖出看跌", "sell_put", row["strategies"]["sell_put"]),
         ("卖出看涨", "sell_call", row["strategies"]["sell_call"]),
@@ -762,6 +808,9 @@ def _dte_text(min_dte: int | None, max_dte: int | None) -> str:
 
 
 def _price_source_text(snapshot: PriceSnapshot) -> str:
+    if snapshot.source == "runtime_scan":
+        runs = "；".join(f"{market}: {run_id}" for market, run_id in snapshot.runs.items()) or "未找到成功扫描"
+        return f"output_runs 冻结扫描行情（{runs}；行情时点见各标的；超过 {RULES['max_price_age_hours']} 小时按过期处理）"
     if not snapshot.observations:
         if snapshot.source.startswith("prices_file:"):
             return f"`{snapshot.source.removeprefix('prices_file:')}`（无可用价格）"

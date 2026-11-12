@@ -128,19 +128,19 @@ class _ReadOnlyTradeReconciliationEvidenceRepository:
             return {"trade_events": self._read_trade_events(conn, strict=True),
                     "wheel_events": repo.list_wheel_events(account=account, conn=conn)}
 
-    def list_trade_events(self) -> list[dict[str, Any]]:
-        return [
-            trade_event_application_payload(item)
-            for item in self._read_json_column("trade_events", "event_json")
-        ]
+    def list_trade_events(self, *, conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
+        with (nullcontext(conn) if conn is not None else closing(self._connect())) as active_conn:
+            return [
+                trade_event_application_payload(item)
+                for item in self._read_json_column_from_conn(active_conn, "trade_events", "event_json")
+            ]
 
     def list_assigned_stock_events(self) -> list[dict[str, Any]]:
         return self._read_json_column("assigned_stock_events", "event_json")
 
-    def list_position_lots(self) -> list[dict[str, Any]]:
-        with closing(self._connect()) as conn:
-            rows = self._read_position_lots(conn)
-        return rows
+    def list_position_lots(self, *, conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
+        with (nullcontext(conn) if conn is not None else closing(self._connect())) as active_conn:
+            return self._read_position_lots(active_conn)
 
     def read_trade_receipt_evidence(self, *, conn: sqlite3.Connection | None = None) -> dict[str, list[dict[str, Any]]]:
         """Read required execution and projection evidence from one read-only snapshot."""

@@ -237,7 +237,7 @@ def load_state_probe(manager, value, *, failure=None, after_only=False, active_s
 
 @pytest.mark.parametrize('value,failure,state', [
     ('loaded', None, 'loaded-idle'), ('not-found', None, 'absent'),
-    ('bad-setting', None, 'unknown'), ('error', None, 'unknown'),
+    ('bad-setting', None, 'bad-setting'), ('error', None, 'error'),
     (' future=value ', None, 'unknown'), ('', None, 'unknown'), (None, None, 'unknown'),
     ('loaded', 'nonzero', 'unknown'), (None, 'timeout', 'unknown'), (None, 'oserror', 'unknown'),
 ])
@@ -275,8 +275,7 @@ def load_state_cli(ctx, monkeypatch, capsys, action, *, preview_sha256=None):
 @pytest.mark.parametrize('action', ['install', 'start', 'stop'])
 @pytest.mark.parametrize('confirm', [False, True])
 @pytest.mark.parametrize('value,failure,active_state', [
-    ('masked', None, None), ('masked-runtime', None, None), ('bad-setting', None, None),
-    ('error', None, None), ('merged', None, None), ('future', None, None),
+    ('masked-runtime', None, None), ('future', None, None),
     ('', None, None), (None, None, None), ('loaded', None, 'future-active'),
     ('loaded', 'nonzero', None), (None, 'timeout', None), (None, 'oserror', None),
 ])
@@ -332,7 +331,8 @@ def test_load_state_cli_after_preserves_gates_and_redaction(
     assert data['status'] == ({'install': 'installed', 'start': 'started', 'stop': 'stopped'}[action] if success else 'unverified')
     assert {row['load_state'] for row in data['after'].values()} == {value}
     assert {row['state'] for row in data['after'].values()} == (
-        {'running', 'loaded-idle'} if success and action == 'start' else {'loaded-idle'} if success else {'unknown'}
+        {'running', 'loaded-idle'} if success and action == 'start' else {'loaded-idle'} if success
+        else {value} if value in {'bad-setting', 'error'} and failure is None else {'unknown'}
     )
     assert not data['files_changed']
     assert data['operations'] and all(op['ok'] for op in data['operations'])
@@ -441,7 +441,7 @@ def test_install_failed_reload_keeps_original_outcome_with_bad_after(instance, t
     data = result['data']
     assert not result['ok'] and data['status'] == ('unknown' if timeout else 'failed')
     assert data['changed'] and data['write_applied']
-    assert {row['state'] for row in data['after'].values()} == {'unknown'}
+    assert {row['state'] for row in data['after'].values()} == {'bad-setting'}
     assert len([call for call in manager.calls if call[1] == 'daemon-reload']) == 1
     assert not data['operations'][-1]['ok']
 
@@ -514,6 +514,173 @@ def test_install_start_and_stop_share_profile_and_idempotent_state(instance, tmp
     assert result['ok'], result
     assert result['status'] == 'stopped'
     assert (instance / 'service.profile.json').exists()
+
+
+@pytest.mark.parametrize('target', ['systemd', 'launchd'])
+@pytest.mark.parametrize('action', ['install', 'start', 'stop'])
+def test_cli_planned_operations_use_objects_for_every_action(instance, tmp_path, target, action):
+    from functools import partial
+    from src.interfaces.cli.main import parse_args
+    from src.interfaces.cli.service_ops import handle_service_update_command
+
+    ctx, manager = context(instance, tmp_path, target)
+    if action != 'install':
+        apply('install', ctx)
+    if action == 'stop':
+        apply('start', ctx)
+    manager.calls.clear()
+    lifecycle = partial(service_lifecycle, unit_root=ctx['unit_root'], system=ctx['system'],
+                        run_cmd=manager, credential_store_root=ctx['credential_store_root'])
+    command = ['service', action, '--runtime-root', str(instance), '--target', target]
+    preview = handle_service_update_command(parse_args(command), service_lifecycle_fn=lifecycle,
+                                            repo_base_fn=lambda: REPO)
+    planned = preview['data']['planned_operations']
+    assert planned
+    assert not any(item.get('remove') == '/not-planned' for item in planned)
+    assert all(isinstance(item, dict) and len(item) == 1 for item in planned)
+    commands = [item['command'] for item in planned if 'command' in item]
+    if action == 'install':
+        assert commands == ([['systemctl', 'daemon-reload']] if target == 'systemd' else [])
+        assert all(set(item) <= {'write', 'remove', 'command'} for item in planned)
+    else:
+        assert len(commands) == len(planned)
+    assert not any(call[1] not in {'show', 'print', 'print-disabled'} for call in manager.calls)
+
+    confirmed = handle_service_update_command(
+        parse_args(command + ['--confirm', '--expected-preview-sha256', preview['data']['preview_sha256']]),
+        service_lifecycle_fn=lifecycle, repo_base_fn=lambda: REPO,
+    )
+    assert confirmed['data']['ok'], confirmed
+    assert confirmed['data']['planned_operations'] == planned
+    actual_commands = [call for call in manager.calls if call[1] not in {'show', 'print', 'print-disabled'}]
+    assert actual_commands == commands
+
+
+@pytest.mark.parametrize('value,state', [
+    ('loaded', 'loaded-idle'), ('not-found', 'absent'), ('masked', 'loaded-idle'),
+    ('bad-setting', 'bad-setting'), ('error', 'error'), ('merged', 'loaded-idle'),
+])
+def test_systemd_query_recognizes_known_load_states(load_state_context, value, state):
+    from src.application.service_lifecycle import _query
+
+    ctx, manager = load_state_context(seed=True)
+    result = _query('options-monitor-trade-intake.service', target='systemd', uid=os.getuid(),
+                    content='', run_cmd=load_state_probe(manager, value))
+    assert result['state'] == state
+    assert result['load_state'] == value
+    assert result['probe']['ok']
+    assert all(call[1] == 'show' for call in manager.calls)
+
+
+@pytest.mark.parametrize('confirm', [False, True])
+@pytest.mark.parametrize('value,action,expected_code', [
+    ('masked', 'install', 'SERVICE_MASKED'), ('masked', 'start', 'SERVICE_MASKED'),
+    ('bad-setting', 'install', 'SERVICE_LOAD_FAILED'), ('bad-setting', 'start', 'SERVICE_LOAD_FAILED'),
+    ('bad-setting', 'stop', 'SERVICE_LOAD_FAILED'), ('error', 'install', 'SERVICE_LOAD_FAILED'),
+    ('error', 'start', 'SERVICE_LOAD_FAILED'), ('error', 'stop', 'SERVICE_LOAD_FAILED'),
+])
+def test_known_systemd_load_failure_is_explicit(
+    load_state_context, monkeypatch, capsys, value, action, expected_code, confirm,
+):
+    ctx, manager = load_state_context(seed=True)
+    token = None
+    if confirm:
+        code, preview = load_state_cli(ctx, monkeypatch, capsys, action)
+        assert code == 0 and preview['ok']
+        token = preview['data']['preview_sha256']
+    ctx['run_cmd'] = load_state_probe(manager, value)
+    manager.calls.clear()
+    before = {p: p.read_bytes() for p in ctx['runtime_root'].parent.rglob('*') if p.is_file()}
+    code, result = load_state_cli(ctx, monkeypatch, capsys, action, preview_sha256=token)
+    assert code == 2 and result['error']['code'] == expected_code
+    assert result['error']['details']['load_state'] == value
+    assert 'secret-' not in json.dumps(result)
+    assert all(call[1] == 'show' for call in manager.calls)
+    assert {p: p.read_bytes() for p in ctx['runtime_root'].parent.rglob('*') if p.is_file()} == before
+
+
+@pytest.mark.parametrize('action', ['install', 'start', 'stop'])
+@pytest.mark.parametrize('confirm', [False, True])
+def test_owned_merged_units_keep_activity_and_confirmation(load_state_context, monkeypatch, capsys, action, confirm):
+    ctx, manager = load_state_context(seed=True)
+    ctx['run_cmd'] = load_state_probe(manager, 'merged')
+    code, preview = load_state_cli(ctx, monkeypatch, capsys, action)
+    assert code == 0 and preview['ok']
+    assert all(call[1] == 'show' for call in manager.calls)
+    if confirm:
+        code, result = load_state_cli(ctx, monkeypatch, capsys, action, preview_sha256=preview['data']['preview_sha256'])
+        assert code == 0 and result['ok']
+        assert result['data']['ok']
+        assert result['data']['status'] == {'install': 'installed', 'start': 'started', 'stop': 'stopped'}[action]
+
+
+def test_owned_masked_stop_preserves_mask_and_only_stops(instance, tmp_path):
+    ctx, manager = context(instance, tmp_path, 'systemd')
+    apply('install', ctx)
+    name = 'options-monitor-tick-us.timer'
+    manager.states[name] = ('active', 'masked')
+    ctx['run_cmd'] = load_state_probe(manager, 'masked')
+    manager.calls.clear()
+    before = {p: p.read_bytes() for p in ctx['unit_root'].rglob('*') if p.is_file()}
+    preview = service_lifecycle('stop', **ctx)
+    assert preview['planned_operations'] == [{'command': ['systemctl', 'stop', name]}]
+    assert all(call[1] == 'show' for call in manager.calls)
+    result = service_lifecycle('stop', **ctx, confirm=True, expected_preview_sha256=preview['preview_sha256'])
+    assert result['ok'] and result['status'] == 'stopped'
+    assert [call for call in manager.calls if call[1] != 'show'] == [['systemctl', 'stop', name]]
+    assert manager.states[name] == ('inactive', 'masked')
+    assert {p: p.read_bytes() for p in ctx['unit_root'].rglob('*') if p.is_file()} == before
+
+
+@pytest.mark.parametrize('action,expected_code', [('start', 'SERVICE_MASKED'), ('stop', 'SERVICE_PATH_UNSAFE')])
+def test_real_dev_null_mask_keeps_path_and_ownership_guards(instance, tmp_path, action, expected_code):
+    ctx, manager = context(instance, tmp_path, 'systemd')
+    apply('install', ctx)
+    unit = ctx['unit_root'] / 'options-monitor-tick-us.timer'
+    retained = unit.with_suffix('.retained')
+    unit.rename(retained)
+    unit.symlink_to('/dev/null')
+    original = retained.read_bytes()
+    manager.calls.clear()
+    with pytest.raises(AgentToolError) as caught:
+        service_lifecycle(action, **ctx)
+    assert caught.value.code == expected_code
+    assert unit.is_symlink() and os.readlink(unit) == '/dev/null'
+    assert retained.read_bytes() == original
+    assert all(call[1] == 'show' for call in manager.calls)
+
+
+@pytest.mark.parametrize('value,field,expected_code', [
+    ('masked', 'missing-runtime', 'SERVICE_INSTANCE_UNVERIFIED'),
+    ('masked', 'foreign-runtime', 'SERVICE_INSTANCE_CONFLICT'),
+    ('masked', 'null-fragment', 'SERVICE_INSTANCE_CONFLICT'),
+    ('merged', 'foreign-fragment', 'SERVICE_INSTANCE_CONFLICT'),
+])
+def test_known_load_state_keeps_stop_ownership_guards(instance, tmp_path, value, field, expected_code):
+    ctx, manager = context(instance, tmp_path, 'systemd')
+    apply('install', ctx)
+    name = 'options-monitor-trade-intake.service'
+    observe = load_state_probe(manager, value)
+
+    def probe(command, **kwargs):
+        result = observe(command, **kwargs)
+        if command[1] != 'show' or command[2] != name:
+            return result
+        values = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+        if field == 'missing-runtime':
+            values['Environment'] = ''
+        elif field == 'foreign-runtime':
+            values['Environment'] = 'OM_RUNTIME_ROOT=/another-runtime'
+        else:
+            values['FragmentPath'] = '/dev/null' if field == 'null-fragment' else '/another-instance.service'
+        return subprocess.CompletedProcess(command, 0, '\n'.join(f'{key}={val}' for key, val in values.items()), '')
+
+    ctx['run_cmd'] = probe
+    manager.calls.clear()
+    with pytest.raises(AgentToolError) as caught:
+        service_lifecycle('stop', **ctx)
+    assert caught.value.code == expected_code
+    assert all(call[1] == 'show' for call in manager.calls)
 
 
 def test_stale_preview_rejected_before_writes(instance, tmp_path):

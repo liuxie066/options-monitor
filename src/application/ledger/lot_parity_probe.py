@@ -207,6 +207,7 @@ def _connect_read_only(resolved: Path, *, immutable: bool) -> sqlite3.Connection
     conn.row_factory = sqlite3.Row
     try:
         conn.execute("PRAGMA query_only=ON")
+        conn.execute("PRAGMA foreign_keys=ON")
         # ``sqlite3.connect`` is lazy: it does not touch the file until the first
         # statement, and "unable to open database file" for a settled WAL store
         # arrives exactly there (not at connect time). Force the open now, or the

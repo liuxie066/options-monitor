@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from src.application.ledger.repository_core import read_position_projection_inputs
+
 import hashlib
 import json
 from datetime import datetime, timezone
@@ -450,8 +452,10 @@ def verify_position_projection(
     if mode_key not in {"auto", "full"}:
         raise ValueError("mode must be auto or full")
 
-    events = _repo_events(repo)
-    current_lots = _repo_lots(repo)
+    inputs = read_position_projection_inputs(repo)
+    events = inputs["trade_events"] if isinstance(inputs["trade_events"], list) else []
+    current_rows = inputs["position_lots"] if isinstance(inputs["position_lots"], list) else []
+    current_lots = _canonical_lots(current_rows)
     event_fingerprint = _fingerprint(events)
     current_fingerprint = _fingerprint(_fingerprint_input(current_lots))
     checkpoint = _load_checkpoint(base)

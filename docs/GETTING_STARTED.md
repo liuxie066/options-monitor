@@ -153,6 +153,8 @@ om service stop
 
 安装返回 `installed` 表示定义写入及服务管理器读回已确认，不要求服务正在运行或启用；macOS 尚未加载的 LaunchAgent 也允许安装成功。读回不可用或归属不匹配时返回 `unverified`，保留已写文件、备份及操作回执；这不表示已回滚，重试前须重新预览并核对服务状态。
 
+systemd 单元被 mask 时，start 返回 `SERVICE_MASKED`；安装和启动均不自动解除 mask。stop 仅在定义路径与实例归属通过原有校验时停止服务，并保留 mask。指向 `/dev/null` 的 mask symlink 仍由路径门禁拒绝，返回 `SERVICE_PATH_UNSAFE`，须转高级服务管理核验归属。执行操作前的查询中，systemd 成功返回 `bad-setting` 或 `error` 时，命令明确返回 `SERVICE_LOAD_FAILED`；`merged` 别名仍须通过实际定义路径和 runtime 归属检查。
+
 预览列出所有任务，包括交易监听写入账本、自动平仓记录维护和可能的通知。新启用可选功能后须按新配置重新预览安装服务，配置修改本身不重启已暂停服务。
 
 macOS 使用当前用户 LaunchAgents/Keychain；Linux 使用 systemd 系统服务和明确的部署用户。普通用户默认自身身份，root 必须指定 `--deploy-user`，配置与运行目录的属主必须匹配。权限不足时显示交接命令，不自动 sudo。所有可选功能关闭时，基础服务不会要求无关 Feishu/LLM 密钥。

@@ -330,6 +330,22 @@ def with_sqlite_repo_writer_lock(repo: Any):
     yield candidate
 
 
+def read_position_projection_inputs(repo: Any) -> dict[str, list[dict[str, Any]]]:
+    """Freeze diagnostic inputs without requiring the stored projection to match."""
+    db_path = getattr(repo, "db_path", None)
+    if isinstance(db_path, (str, Path)) and Path(db_path).is_file():
+        from .lot_parity_probe import _read_only_connection
+
+        with _read_only_connection(Path(db_path)) as (conn, _read_mode):
+            assert_final_lot_identity_shape(conn)
+            return {
+                "position_lots": repo.list_position_lots(conn=conn),
+                "trade_events": repo.list_trade_events(conn=conn),
+            }
+    # In-memory protocol repositories have no durable cross-process state.
+    return {"position_lots": repo.list_position_lots(), "trade_events": repo.list_trade_events()}
+
+
 class RepositoryCoreMixin:
     def __init__(self, db_path: Path, *, initialize: bool = True):
         self.db_path = private_path(db_path)

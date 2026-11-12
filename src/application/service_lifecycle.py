@@ -222,7 +222,8 @@ def _definition_preview(content: str, kind: str) -> str:
     return "".join(lines)
 
 
-def _managed_files(bundle: dict[str, Any], *, target: str, unit_root: Path, runtime: Path, repo: Path) -> list[dict[str, Any]]:
+def _managed_files(bundle: dict[str, Any], *, target: str, unit_root: Path, runtime: Path, repo: Path,
+                   reject_masked: bool = False) -> list[dict[str, Any]]:
     files = []
     for item in bundle["files"]:
         relative = str(item["relative_path"])
@@ -246,6 +247,10 @@ def _managed_files(bundle: dict[str, Any], *, target: str, unit_root: Path, runt
             path = unit_root / rel
         else:
             _error("SERVICE_PROFILE_UNSUPPORTED", "basic lifecycle cannot install this advanced service asset; use the advanced deployment workflow", kind=kind)
+        if (reject_masked and kind in {"systemd_service", "systemd_timer"}
+                and path.is_symlink() and os.readlink(path) == "/dev/null"):
+            _error("SERVICE_MASKED", "service is explicitly masked; review it in advanced service management",
+                   service=path.name, path=str(path))
         fact = _file_fact(path)
         content = str(item["content"])
         if fact["exists"] and kind in {"systemd_service", "systemd_timer", "launchd_plist"}:
@@ -278,8 +283,10 @@ def _query(name: str, *, target: str, uid: int, content: str, run_cmd: Callable[
         if result["ok"]:
             if load == "not-found":
                 state = "absent"
-            elif load == "loaded" and active in {"active", "activating", "inactive", "failed", "deactivating"}:
+            elif load in {"loaded", "masked", "merged"} and active in {"active", "activating", "inactive", "failed", "deactivating"}:
                 state = "running" if active == "active" else ("loaded-idle" if active == "inactive" else active)
+            elif load in {"bad-setting", "error"}:
+                state = load
         runtime = None
         try:
             for assignment in shlex.split(values.get("Environment") or ""):
@@ -341,7 +348,7 @@ def _activation_commands(action: str, units: list[dict[str, Any]], states: dict[
                 if state["state"] != "running" or state["enabled"] not in {"enabled", "enabled-runtime"}:
                     commands.append(["systemctl", "enable", "--now", name])
             elif action == "stop":
-                if unit["startup"] and state["enabled"] not in {"disabled", "masked", "masked-runtime"}:
+                if unit["startup"] and state["enabled"] not in {"disabled", "masked", "masked-runtime"} and state.get("load_state") != "masked":
                     commands.append(["systemctl", "disable", "--now", name])
                 elif state["state"] not in {"absent", "loaded-idle"}:
                     commands.append(["systemctl", "stop", name])
@@ -432,6 +439,9 @@ def service_lifecycle(
 ) -> dict[str, Any]:
     """Preview, then apply using the returned preview_sha256 and identical scope.
 
+    planned_operations contains single-key objects: write/remove map to a path,
+    and command maps to an argv list, for every action and provider.
+
     system/unit_root/euid/run_cmd are dependency-injection points for fixtures.
     Nonstandard roots require an injected runner and cannot call the host manager.
     """
@@ -521,7 +531,8 @@ def service_lifecycle(
             bundle = {"files": installed}
         else:
             bundle = _expected_bundle_from_profile(profile, provider=provider, repo_root=repo, runtime_root=runtime)
-    files = _managed_files(bundle, target=provider, unit_root=root, runtime=runtime, repo=repo)
+    files = _managed_files(bundle, target=provider, unit_root=root, runtime=runtime, repo=repo,
+                           reject_masked=provider == "systemd" and action == "start")
     if action == "install" and not selected_env.exists():
         if selected_env.parent != runtime:
             _error("SERVICE_PATH_UNSAFE", "new ordinary env file must be inside the selected runtime")
@@ -587,6 +598,13 @@ def service_lifecycle(
               for unit in units}
     for unit in units:
         state = before[unit["name"]]
+        if provider == "systemd" and state["probe"]["ok"]:
+            if action in {"install", "start"} and (state.get("load_state") == "masked" or state["enabled"] in {"masked", "masked-runtime"}):
+                _error("SERVICE_MASKED", "service is explicitly masked; review it in advanced service management",
+                       service=unit["name"], load_state=state["load_state"])
+            if state.get("load_state") in {"bad-setting", "error"}:
+                _error("SERVICE_LOAD_FAILED", "systemd could not load the service definition; review it in advanced service management",
+                       service=unit["name"], load_state=state["load_state"])
         if state["state"] == "unknown":
             details = {"load_state": state["load_state"]} if provider == "systemd" else {}
             message = ("cannot establish service ownership from the reported systemd state"
@@ -652,7 +670,9 @@ def service_lifecycle(
     out = {"ok": True, "action": action, "status": "preview", "scope": scope, "preview_sha256": token,
            "files": public_files, "input_files": inputs, "tasks": [unit["name"] for unit in units], "side_effects": _SIDE_EFFECTS,
            "required_credentials": required, "missing_credentials": missing, "unreadable_credential_metadata": inaccessible, "credential_readiness": "encrypted_store_metadata_only" if provider == "systemd" else "keychain_runtime_not_checked",
-           "planned_operations": ([{"remove" if item.get("remove") else "write": item["path"]} for item in changed_files] + ([["systemctl", "daemon-reload"]] if provider == "systemd" else []) if action == "install" else commands),
+           "planned_operations": ([{"remove" if item.get("remove") else "write": item["path"]} for item in changed_files]
+                                  + ([{"command": ["systemctl", "daemon-reload"]}] if provider == "systemd" else [])
+                                  if action == "install" else [{"command": command} for command in commands]),
            "before": before, "operations": [], "changed": False, "files_changed": False, "confirmed": bool(confirm)}
     if not confirm:
         return attach_write_contract(out, dry_run=True, write_applied=False, generate_audit_id=False)

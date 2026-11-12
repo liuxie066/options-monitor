@@ -299,6 +299,7 @@ def test_runtime_candidate_workflow_never_publishes_and_release_waits_for_qualif
     workflow = yaml.load((ROOT / '.github/workflows/runtime-bundle.yml').read_text(), Loader=yaml.BaseLoader)
     assert workflow['permissions'] == {'contents': 'read'}
     assert set(workflow['on']) == {'workflow_call', 'workflow_dispatch', 'pull_request'}
+    assert '.gitattributes' in workflow['on']['pull_request']['paths']
     text = str(workflow)
     assert 'softprops/action-gh-release' not in text and 'gh release' not in text
     assert 'release_platforms' in text and 'runtime_bundle.lock.json' in text

@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1520 (`src`: 621, `domain`: 99, `scripts`: 30, `tests`: 766)
-- Internal import edges: 13642 total, 4617 production/script edges excluding tests
+- Python files scanned: 1521 (`src`: 621, `domain`: 99, `scripts`: 30, `tests`: 767)
+- Internal import edges: 13660 total, 4622 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -51,11 +51,11 @@ flowchart LR
   scripts -->|1| tests
   src -->|1| application
   storage -->|1| domain
-  tests -->|6821| application
+  tests -->|6828| application
   tests -->|747| domain
   tests -->|2| domain_services
   tests -->|464| infrastructure
-  tests -->|521| interfaces
+  tests -->|524| interfaces
   tests -->|13| om_strategy_core
   tests -->|91| scripts
   tests -->|77| storage
@@ -90,9 +90,9 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 6821 |
+| tests | application | 6828 |
 | tests | domain | 747 |
-| tests | interfaces | 521 |
+| tests | interfaces | 524 |
 | tests | infrastructure | 464 |
 | tests | scripts | 91 |
 | tests | storage | 77 |
@@ -195,8 +195,8 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | domain.domain.symbol_identity | 108 |
 | src.application.payload_helpers | 101 |
 | src.application.ledger.api | 95 |
+| src.application.agent_tool_config | 79 |
 | src.application.account_config | 79 |
-| src.application.agent_tool_config | 78 |
 | domain.domain.trade_contract_identity | 74 |
 | domain.domain.decision_state_fingerprint | 64 |
 | domain.domain.option_position_identity | 62 |
@@ -211,7 +211,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | outgoing imports |
 |---|---|
-| src.application.ledger.api | 55 |
+| src.application.ledger.api | 56 |
 | src.application.trades.auto_intake | 51 |
 | src.application.ledger.trade_attribution | 42 |
 | src.interfaces.cli.main | 39 |
