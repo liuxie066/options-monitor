@@ -170,7 +170,7 @@ def _candidate_data():
         "symbol": "0700.HK", "market": "HK", "outcome": "found",
         "candidates": [{
             "contract": "HK.TCH261120P375000", "expiry": "2026-11-20",
-            "strike": 375.0, "dte": 8, "delta": -0.111,
+            "strike": 375.0, "dte": 8, "delta": -0.111, "sell_limit": 1.40,
             "evidence": {"bid": 1.34, "ask": 1.45},
             "metrics": {"annualized_net_return": 0.1452},
         }],
@@ -197,6 +197,7 @@ def test_candidate_reply_uses_api_conditions_and_quotes_without_model_prose(tmp_
     assert "≤ 380.00" in reply.text
     assert "HK.TCH261120P375000" in reply.text and "2026-11-20" in reply.text
     assert "买 1.3400 / 卖 1.4500" in reply.text
+    assert "建议卖出限价 1.4000" in reply.text
     assert "14.52%" in reply.text
     assert "不超过500" not in reply.text and "不可用" not in reply.text
 

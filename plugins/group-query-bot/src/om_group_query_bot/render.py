@@ -466,6 +466,8 @@ def _candidate_facts(candidate: dict[str, Any], *, opening: bool = False) -> str
         f"行权价 {_number(strike, 2)}",
         f"买 {_number(quote.get('bid'), 4)} / 卖 {_number(quote.get('ask'), 4)}",
     ]
+    if opening and _is_number(candidate.get("sell_limit")):
+        bits.append(f"建议卖出限价 {_number(candidate['sell_limit'], 4)}")
     if _is_number(candidate.get("delta")):
         bits.append(f"Delta {_number(candidate['delta'], 3)}")
     if candidate.get("dte") is not None:
