@@ -229,11 +229,14 @@ make release-preflight ARGS="--full"
 
 - 当前 Python 解释器和 git 工作区状态
 - 即将运行 full 或 focused 测试时，确认当前环境允许在 `127.0.0.1` 绑定临时监听端口
+- 即将运行 full 或 focused 测试时，核对所选 Python 实际定位的全部本地开发插件：分发版本、加载路径、全部 `.py` 的文件集合和字节必须与当前 checkout 一致
 - `VERSION` / `CHANGELOG.md` / tag metadata
 - 上一稳定 tag 到当前版本的 commit-to-release-note coverage
 - `docs/DEPENDENCY_GRAPH.md` 是否过期
 - agent plugin focused tests
-- 完整 pytest（传 `--full` 时），固定使用两个 worker、按文件分配；worker 崩溃不自动重启
+- 完整 pytest（传 `--full` 时），固定使用四个 worker、按文件分配；worker 崩溃不自动重启
+
+插件环境检查复用现有解释器选择（包括显式 `OM_PYTHON`），只读，不自动安装依赖；失败时先按已经确认的 checkout 在该解释器环境重新安装对应本地插件，再重新预检。允许本 checkout 的 editable 安装，拒绝其他 checkout 的 editable 路径，即使当时字节相同。此检查仅绑定 Python 源文件，不证明 package data。可用所选解释器单独执行 `scripts/release_environment.py`，JSON 会记录 Git HEAD、解释器、实际 package 路径和摘要。只检查 metadata/dependency graph 的现有 `--skip-focused` 路径（不传 `--full`）不会要求全部开发插件，也不会执行新环境探针。
 
 回环探针在依赖安装和 pytest 之前执行。如果 `socket.bind()` 返回
 `PermissionError: [Errno 1] Operation not permitted`，preflight 会明确停止并提示使用允许本机

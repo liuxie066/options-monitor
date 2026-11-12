@@ -129,6 +129,7 @@ fi
 
 if (( FULL == 1 || FOCUSED == 1 )); then
   probe_loopback_bind
+  run_step "test plugin environment" "${PYTHON_BIN}" scripts/release_environment.py --repo-root "${ROOT}"
 fi
 
 run_step "Python Bot import" "${PYTHON_BIN}" -c 'import src.application.bot.host; import src.application.bot.runtime'
