@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from src.application.ledger.repository_core import read_position_projection_inputs
+
 from domain.domain.ledger.events import lot_id_for_open_event
 from .option_allocation import allocate_broker_option_execution
 from .futu_time_repair import apply_futu_time_repair, prepare_futu_time_repair, open_futu_time_repair_store
@@ -413,6 +415,7 @@ from .wheel_policy_binding import (
 from .ordinary_attribution import ordinary_attribution_window as ordinary_attribution_window
 
 __all__ = [
+    "read_position_projection_inputs",
     "ordinary_attribution_window",
     'WheelPolicyBindingReplayError',
     'build_wheel_policy_binding_request',

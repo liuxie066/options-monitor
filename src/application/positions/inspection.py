@@ -14,6 +14,8 @@ from domain.domain.ledger.identity import ContractKey, position_key_for
 from domain.domain.option_position_identity import normalize_side
 from domain.domain.trade_contract_identity import canonical_contract_symbol, derive_position_side
 from src.application.ledger.api import (
+    attach_event_strategy_metadata,
+    read_position_projection_inputs,
     lot_id_for_open_event,
     valid_void_target_event_id,
     list_position_lot_snapshots,
@@ -487,8 +489,13 @@ def inspect_projection_state(
     strike: float | None = None,
     expiration_ymd: str | None = None,
 ) -> dict[str, object]:
-    current_rows = list_position_lot_snapshots(repo)
-    events = trade_event_log(repo)
+    inputs = read_position_projection_inputs(repo)
+    events = inputs["trade_events"]
+    if not isinstance(inputs["position_lots"], list):
+        raise TypeError("position lot repository returned a non-list payload")
+    if not isinstance(events, list):
+        raise TypeError("trade event repository must return a list")
+    current_rows = attach_event_strategy_metadata(inputs["position_lots"], events)
     projection = project_trade_event_log(events)
     projected_rows = projection.lots
 
