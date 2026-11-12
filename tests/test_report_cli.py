@@ -36,13 +36,37 @@ def _configs_and_prices(tmp_path: Path) -> tuple[Path, Path]:
     return configs, prices
 
 
+def test_report_cli_records_explicit_candidate_evidence(tmp_path: Path, capsys) -> None:
+    from datetime import datetime, timezone
+    from src.application.reports.strike_metrics import unavailable_evidence
+    from src.interfaces.cli.main import parse_args
+    from src.interfaces.cli.report_ops import handle_report_command
+
+    configs, prices = _configs_and_prices(tmp_path)
+    evidence = unavailable_evidence(datetime.now(timezone.utc), "fixture_remote_unavailable")
+    path = tmp_path / "remote-evidence.json"
+    path.write_text(json.dumps(evidence))
+    args = parse_args(["report", "run", "config_review", "--runtime-root", str(tmp_path),
+                       "--configs-root", str(configs), "--prices-file", str(prices),
+                       "--candidate-evidence-file", str(path), "--no-deliver", "--json"])
+    assert handle_report_command(args, repo_base_fn=lambda: tmp_path) == 0
+    result = json.loads(capsys.readouterr().out)
+    stored = json.loads((Path(result["run_dir"]) / "candidate_evidence.json").read_text())
+    assert stored["errors"] == [{"reason": "fixture_remote_unavailable"}]
+    assert result["delivery"]["status"] == "skipped"
+    assert result["summary"]["conclusion"] == "观察"
+    receipt = json.loads((Path(result["run_dir"]) / "run.json").read_text())
+    assert "--candidate-evidence-file" in receipt["command"]
+
+
 def test_report_cli_parser() -> None:
     from src.interfaces.cli.main import parse_args
 
     listing = parse_args(["report", "list", "--json"])
     assert listing.report_command == "list" and listing.json is True
 
-    run = parse_args(["report", "run", "config_review", "--dry-run", "--prices-file", "p.json"])
+    run = parse_args(["report", "run", "config_review", "--dry-run", "--prices-file", "p.json", "--candidate-evidence-file", "e.json"])
+    assert run.candidate_evidence_file == "e.json"
     assert run.report_id == "config_review"
     assert run.dry_run is True
     assert run.prices_file == "p.json"
@@ -88,6 +112,8 @@ def test_report_cli_run_history_show_list_and_schedule(tmp_path: Path, capsys: p
     assert (run_dir / "run.json").is_file()
     assert (run_dir / "report.md").is_file()
     assert (run_dir / "report.json").is_file()
+    assert (run_dir / "candidate_evidence.json").is_file()
+    assert json.loads((run_dir / "candidate_evidence.json").read_text())["schema_version"] == "config_review_candidate_evidence.v1"
     run_id = run_payload["run_id"]
 
     assert main(["report", "history", "config_review", "--runtime-root", str(runtime), "--json"]) == 0

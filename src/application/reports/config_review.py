@@ -1,11 +1,4 @@
-"""Weekly configuration review report (the first report-center-owned report).
-
-Scope of this first slice: show every configured strike boundary from the
-market user-config files, attach the latest known underlier price, and report
-the signed distance between price and each boundary.  Candidate counts rejected
-by a boundary are explicitly out of scope until candidate snapshots carry the
-rejection reason.
-"""
+"""Conclusion-first weekly review of configured strike targets and frozen rejects."""
 
 from __future__ import annotations
 
@@ -24,7 +17,13 @@ from src.application.reports.prices import (
 )
 
 
-CONFIG_REVIEW_SCHEMA_VERSION = "config_review.v1"
+from src.application.reports.strike_metrics import (
+    DIRECTIONS, RULES, assess_boundary, collect_candidate_evidence,
+    load_candidate_evidence, report_conclusion, summarize_rejections,
+)
+
+
+CONFIG_REVIEW_SCHEMA_VERSION = "config_review.v2"
 _MARKET_FILES: tuple[tuple[str, str], ...] = (("HK", "user.hk.json"), ("US", "user.us.json"))
 
 
@@ -33,6 +32,7 @@ class ConfigReviewResult:
     markdown: str
     payload: dict[str, Any]
     summary: dict[str, Any]
+    evidence: dict[str, Any]
 
 
 def build_config_review(
@@ -40,6 +40,7 @@ def build_config_review(
     configs_root: str | Path,
     runtime_root: str | Path,
     prices_file: str | Path | None = None,
+    candidate_evidence_file: str | Path | None = None,
     now: datetime | None = None,
 ) -> ConfigReviewResult:
     generated_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
@@ -72,8 +73,18 @@ def build_config_review(
         ]
         all_rows.extend(rows)
         market_payloads.append({"market": market["market"], "symbols": rows})
+    evidence = (load_candidate_evidence(candidate_evidence_file, generated_at) if candidate_evidence_file
+                else collect_candidate_evidence(runtime_root, generated_at))
+    rejections = summarize_rejections(evidence)
+    if rejections["coverage"] != "complete":
+        data_gaps.append("指标A：方向化拒绝证据不足（旧快照或数据缺口），不能视为0")
+    assessments = _assess_boundaries(all_rows, evidence=evidence, now=generated_at)
+    conclusion = report_conclusion(assessments, data_gaps)
     summary = _summary(all_rows, snapshot=snapshot, data_gaps=data_gaps)
+    summary.update(conclusion=conclusion["state"], strike_rejection_coverage=rejections["coverage"])
     payload = {
+        "period": evidence["period"], "conclusion": conclusion, "rules": dict(RULES),
+        "strike_rejections": rejections, "boundary_assessments": assessments,
         "schema_version": CONFIG_REVIEW_SCHEMA_VERSION,
         "generated_at_utc": _iso(generated_at),
         "configs_root": str(root),
@@ -95,7 +106,8 @@ def build_config_review(
         summary=summary,
         data_gaps=data_gaps,
     )
-    return ConfigReviewResult(markdown=markdown, payload=payload, summary=summary)
+    markdown = _render_review_sections(payload) + "\n" + markdown.partition("\n")[2].lstrip()
+    return ConfigReviewResult(markdown=markdown, payload=payload, summary=summary, evidence=evidence)
 
 
 def _load_market_configs(
@@ -368,7 +380,7 @@ def _distance_entries(
         ("sell_call", call, "max_strike", "卖出看涨上限"),
     ):
         value = side.get(boundary_key)
-        if value is None:
+        if value is None or value <= 0:
             continue
         binding = None
         if side_name == "sell_put" and boundary_key == "max_strike":
@@ -384,7 +396,7 @@ def _distance_entries(
         ))
     for boundary_key, label in (("call_min_strike", "Combo 看涨下限"), ("call_max_strike", "Combo 看涨上限")):
         value = combo.get(boundary_key)
-        if value is None:
+        if value is None or value <= 0:
             continue
         entries.append(_distance_entry(
             path=f"combo_yield.call.{boundary_key.removeprefix('call_')}",
@@ -396,7 +408,7 @@ def _distance_entries(
 
 
 def _distance_entry(*, path: str, label: str, value: float, price: float, binding: str | None = None) -> dict[str, Any]:
-    signed_pct = (price - value) / price * 100.0
+    signed_pct = (price - value) / value * 100.0
     relation = "above" if signed_pct > 0 else "below" if signed_pct < 0 else "equal"
     return {
         "path": path,
@@ -406,6 +418,79 @@ def _distance_entry(*, path: str, label: str, value: float, price: float, bindin
         "relation": relation,
         "binding": binding,
     }
+
+
+def _assess_boundaries(rows: list[dict[str, Any]], *, evidence: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
+    assessments = []
+    for row in rows:
+        strategies = row["strategies"]
+        for side in ("sell_put", "sell_call"):
+            policy = strategies[side]
+            for field in ("min_strike", "max_strike"):
+                value = policy.get(field)
+                if value is not None and value > 0:
+                    assessments.append(assess_boundary(
+                        market=row["market"], symbol=row["canonical_symbol"], path=f"{side}.{field}", value=float(value),
+                        enabled=policy.get("enabled") is not False, price=row["price"], evidence=evidence, now=now,
+                    ))
+        combo = strategies["combo_yield"]
+        for field in ("min_strike", "max_strike"):
+            value = combo.get(f"call_{field}")
+            if value is not None and value > 0:
+                assessments.append(assess_boundary(
+                    market=row["market"], symbol=row["canonical_symbol"], path=f"combo_yield.call.{field}", value=float(value),
+                    enabled=combo.get("enabled") is True, price=row["price"], evidence=evidence, now=now,
+                ))
+    return assessments
+
+
+def _render_review_sections(payload: dict[str, Any]) -> str:
+    conclusion, metric = payload["conclusion"], payload["strike_rejections"]
+    coverage_text = {"complete": "已留存快照完整可判读", "partial": "部分数据", "unavailable": "该期无数据"}
+    lines = ["# 周度配置清单报告", "", f"**结论：{conclusion['state']}**", ""]
+    lines.extend(f"- {reason}" for reason in conclusion["reasons"])
+    lines.extend(["", f"统计周期：{payload['period']['label']}（Asia/Shanghai）。现价为本次生成时最近可用观察。", "",
+                  "## 指标 A：strike 边界拒绝", "",
+                  f"数据覆盖：**{coverage_text[metric['coverage']]}**；快照 {metric['snapshot_count']} 份，"
+                  f"决策 {metric['decision_count']} 次，日期 {len(metric['dates'])} 个。",
+                  f"已验证观测中的旧 hard_strike：{metric['legacy_hard_strike_count']} 次；未验证历史不计入，方向不可恢复，缺失不能当作0。",
+                  f"快照读取/验证缺口：{len(metric['errors'])}；封存范围：{metric['sealed_at_min'] or '无'} ～ {metric['sealed_at_max'] or '无'}。", "",
+                  "计数是账户扫描观测；同一合约会重复出现，不等于独立交易机会。完整性仅指已取得的留存快照。", "",
+                  "| 市场 | 快照 | 方向拒绝观测 | 覆盖 |", "| --- | ---: | ---: | --- |"])
+    for market in metric["markets"]:
+        count = str(market["count"]) if market["count"] is not None else (f"至少 {market['observed_count']}（部分）" if market["observed_count"] else "该期无数据")
+        lines.append(f"| {market['market']} | {market['snapshot_count']} | {count} | {coverage_text[market['coverage']]} |")
+    if not metric["markets"]:
+        lines.append("| — | 0 | 该期无数据 | 无可用快照 |")
+    if metric["groups"]:
+        lines.extend(["", "| 市场 | 标的 | 方向 | 已观测拒绝 | 不同合约 | 仅因 strike |",
+                      "| --- | --- | --- | ---: | ---: | ---: |"])
+        for group in metric["groups"]:
+            lines.append(f"| {group['market']} | {group['symbol']} | {DIRECTIONS[group['reason']]} | {group['observed_count']} | {group['unique_contracts']} | {group['strike_only_count']} |")
+    lines.extend(["", "## 指标 B：现价相对配置边界", "",
+                  "距离 = (现价 − 边界) / 边界 × 100%；压力在 max 上界取距离、min 下界取负距离。价格时点为采集时点，不冒充成交时间。", "",
+                  "| 市场/标的 | 配置边界 | 边界值 | 现价 | 距离 | 压力 | 同值边界 R/N | 结论与理由 |",
+                  "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |"])
+    for row in payload["boundary_assessments"]:
+        price = row["price"]
+        distance = f"{row['distance_pct']:+.2f}%" if row["distance_pct"] is not None else "无数据"
+        pressure = f"{row['pressure_pct']:+.2f}%" if row["pressure_pct"] is not None else "无数据"
+        lines.append(f"| {row['market']} {row['symbol']} | {row['path']} | {_fmt_number(row['value'])} | "
+                     f"{_fmt_number(price['value']) if price else '无数据'} | {distance} | {pressure} | "
+                     f"{row['R']}/{row['N']} | {row['conclusion']}：{row['reason']} |")
+    lines.extend(["", "价格来源与采集时点："])
+    seen = set()
+    for row in payload["boundary_assessments"]:
+        if (row["market"], row["symbol"]) in seen:
+            continue
+        seen.add((row["market"], row["symbol"]))
+        price = row["price"] or {}
+        lines.append(f"- {row['market']} {row['symbol']}：{price.get('source', '无数据')}；{price.get('observed_at_utc') or '时点未知'}")
+    lines.extend(["", "判定门槛：至少30次可比决策、3个日期且证据完整、价格不超过96小时。建议人工复核须压力≥15%、"
+                  "仅因strike拒绝≥20次且占比≥30%、至少5个合约和3个拒绝日期；无需调整须压力≤5%、拒绝率<10%；其余观察。",
+                  "同值边界仅表示封存 policy/threshold 与当前配置相等，不证明配置是唯一原因，也不保证调整后候选通过。", "",
+                  "## 配置清单与系统总览", ""])
+    return "\n".join(lines)
 
 
 def _summary(
@@ -479,8 +564,8 @@ def _render_markdown(
         "",
         f"- 生成时间：{_iso(generated_at)}",
         f"- 配置目录：`{config_root}`",
-        "- 本期范围：用户配置中的行权价边界与最新现价的距离；被边界挡掉的候选数暂不统计。",
-        "- 距离定义：(现价 − 边界) ÷ 现价；正数表示现价高于边界，负数表示现价低于边界。",
+        "- 清单范围：用户配置中的行权价边界与本次现价；上方指标A列出上一完整周的边界拒绝观测与数据覆盖。",
+        "- 距离定义：(现价 − 边界) ÷ 边界 × 100%；正数表示现价高于边界，负数表示现价低于边界。",
         "",
         "## 数据来源",
         "",

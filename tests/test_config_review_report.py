@@ -67,7 +67,7 @@ def test_config_review_renders_boundaries_prices_and_distances(tmp_path: Path) -
     result = build_config_review(configs_root=configs, runtime_root=tmp_path, prices_file=prices)
 
     payload = result.payload
-    assert payload["schema_version"] == "config_review.v1"
+    assert payload["schema_version"] == "config_review.v2"
     assert payload["summary"]["symbol_count"] == 4
     assert payload["summary"]["market_counts"] == {"HK": 2, "US": 2}
     assert payload["summary"]["price_available"] == 3
@@ -75,16 +75,24 @@ def test_config_review_renders_boundaries_prices_and_distances(tmp_path: Path) -
     assert payload["summary"]["put_cap_configured"] == 4
     assert payload["summary"]["call_floor_configured"] == 2
     assert payload["summary"]["combo_enabled"] == 2
+    assert payload["conclusion"]["state"] == "观察"
+    assert payload["strike_rejections"]["count"] is None
 
     markdown = result.markdown
-    assert "| 0700.HK | 403.20 | 450 | 低于 11.6% | 550 | 低于 36.4% | 启用 |" in markdown
-    assert "上限 450（低于 11.6%；现价成为实际边界）" in markdown
-    assert "下限 550（低于 36.4%；配置边界生效）" in markdown
+    assert markdown.index("**结论：观察**") < markdown.index("## 指标 A")
+    assert "该期无数据" in markdown
+    assert "上一完整周的边界拒绝观测与数据覆盖" in markdown
+    assert "距离定义：(现价 − 边界) ÷ 边界 × 100%" in markdown
+    assert "候选数暂不统计" not in markdown
+    assert "÷ 现价" not in markdown
+    assert "| 0700.HK | 403.20 | 450 | 低于 10.4% | 550 | 低于 26.7% | 启用 |" in markdown
+    assert "上限 450（低于 10.4%；现价成为实际边界）" in markdown
+    assert "下限 550（低于 26.7%；配置边界生效）" in markdown
     assert "看涨下限 560" in markdown
     assert "DTE 20–45" in markdown
     assert "| 9992.HK | — | 145 | — |" in markdown
     assert "现价：不可用" in markdown
-    assert "| NVDA | 173.73 | 150 | 高于 13.7% | 190 |" in markdown
+    assert "| NVDA | 173.73 | 150 | 高于 15.8% | 190 |" in markdown
     assert "配置上限生效" in markdown
 
     nvda = next(
@@ -94,7 +102,7 @@ def test_config_review_renders_boundaries_prices_and_distances(tmp_path: Path) -
         if symbol["symbol"] == "NVDA"
     )
     distances = {item["path"]: item for item in nvda["distances"]}
-    assert distances["sell_put.max_strike"]["signed_pct"] == 13.66
+    assert distances["sell_put.max_strike"]["signed_pct"] == 15.82
     assert distances["sell_put.max_strike"]["binding"] == "config_bound"
     assert distances["sell_put.min_strike"]["binding"] is None
     assert distances["sell_call.min_strike"]["relation"] == "below"

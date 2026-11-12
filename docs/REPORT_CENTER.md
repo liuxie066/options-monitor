@@ -41,7 +41,7 @@
 
 ```bash
 om report list [--json] [--configs-root PATH]
-om report run <report_id> [--dry-run] [--json] [--configs-root PATH] [--prices-file PATH]
+om report run <report_id> [--dry-run] [--no-deliver] [--json] [--configs-root PATH] [--prices-file PATH] [--candidate-evidence-file PATH]
 om report history <report_id> [--limit N] [--json]
 om report show <report_id> <run_id> [--artifact NAME] [--json]
 om report schedule [--format text|json]
@@ -60,6 +60,7 @@ om report schedule [--format text|json]
   run.json
   report.md
   report.json
+  candidate_evidence.json  # config_review 的本次候选证据投影
 ```
 
 `run_id` 形如 `20261112T014229Z-60951035`，以 UTC 时间开头，后接随机后缀，保证同秒并发也不会冲突。
@@ -110,7 +111,7 @@ om report schedule [--format text|json]
 
 - ISO weekday：`1=Monday .. 7=Sunday`；launchd 的 `StartCalendarInterval` 输出时把周日写成 `0`。
 - `plist_present` 只检查 `~/Library/LaunchAgents/<label>.plist` 是否存在，不加载、不修改。
-- `config_review` 的模板在 `deploy/launchd/com.options-monitor.report.config-review.weekly.plist.template`。本期只提供模板，不安装。
+- `config_review` 的模板在 `deploy/launchd/com.options-monitor.report.config-review.weekly.plist.template`。仓库不自动安装；安装需明确授权，并按下述步骤预览、备份和读回。
 
 新增报告时，注册表加一条 + 补一个 plist 模板即可；不需要重新设计调度。
 
@@ -122,6 +123,42 @@ om report schedule [--format text|json]
 - 未迁移报告：继续由各自现有目录/清理策略管理，报告中心不接管。
 
 本期只**声明**策略，不实现自动删除：删除属于需要单独授权的操作，且旧报告尚未迁移。后续若要执行，应在 `service_cleanup` 增加 `reports/` 类别并沿用 `run.json` 身份校验，而不是在每次 `run` 后静默删除。
+
+## 周度配置结论与候选证据
+
+`config_review.v2` 先显示 **建议调整 / 观察 / 无需调整**，再列 A、B 和配置清单。指标 owner 是 `src/application/reports/strike_metrics.py`；配置继承、价格选择、渲染和落盘仍使用原报告 owner。[完整定义与取舍](WEEKLY_CONFIG_REVIEW_COMPLETION_DESIGN.md)。
+
+- A 读取 `output_runs/<run_id>/accounts/<account>/state/opening_candidate_snapshot.json`，按封存时间选取 **Asia/Shanghai 上一完整自然周**（周一 00:00 含，到下周一 00:00 不含）。只消费封存决定，不重跑策略。显式 `--candidate-evidence-file` 使用该文件独立的数据集，不与本机记录混合。
+- 四种方向码为 `put_strike_below_min`、`put_strike_above_max`、`call_strike_below_min`、`call_strike_above_max`。同一观测同一方向去重，总量取观测并集。观测身份是 run/account/market/candidate；不同 tick 或账户重复扫描仍是不同观测，不是独立交易机会。
+- A 展示市场、标的、方向、独立合约和日期；另按当前配置的同值边界统计。策略的有效阈值也可能来自价格窗口或成本，“同值”不能证明用户配置是唯一原因。
+- 新快照的可选哈希字段 `strike_boundary_reason_codes_version: 1` 声明方向码能力。无能力标记、遗留 `hard_strike`、失败/未知 scope、缺失或不兼容文件不能证明零；未知计数为 `null`，正文写“该期无数据”或部分覆盖。无标记且没有方向码的文件提前记录为不支持，不计入已验证观测；无标记但有方向码的文件仍走原 loader，合格时保留部分观测。所有被采纳记录继续验证原始快照及依赖。只有完整、有标记的数据能报告真实 0。覆盖仅指留存记录，不证明每个历史 tick 都已保留。
+- B 的 signed distance 为 `(spot - boundary) / boundary * 100`；max 边界压力等于此值，min 边界压力取相反数。v1 以现价为分母，v2 明确改为边界分母。缺价仍保留边界行。
+
+规则常量随版本固定。N 是有效封存 policy 与当前边界同值的可比较观测；R 是方向与 threshold 同值的拒绝；C 是 R 中只因四种 strike 方向码拒绝的观测。多原因含非 strike 拒绝的不计入 C。共同门槛：启用且边界有效，价格有效、时间有时区且不在未来/不超过 96 小时，相关 A 完整，N ≥ 30，观测日期 ≥ 3。
+
+| 结论 | 共同门槛外的条件 |
+|---|---|
+| 建议调整 | 压力 ≥ 15%，C ≥ 20，C/N ≥ 30%，C 的独立合约 ≥ 5、日期 ≥ 3；仅建议人工复核，不自动给替换行权价 |
+| 无需调整 | 压力 ≤ 5%，R/N < 10% |
+| 观察 | 其余情形，包括数据不足、不可比较或边界停用 |
+
+任一启用边界达到建议条件，报告为“建议调整”；全部启用边界均合格且无数据缺口才是“无需调整”；其余为“观察”。停用边界展示但不驱动整体结论。阈值比较使用未四舍五入的值。
+
+## 本机周度包装入口
+
+`run-config-review-weekly.sh.template` 进入稳定安装源码，再执行 `run-config-review-weekly.py`。两次只读 SSH 分别传入共享候选 exporter 与 `fetch-config-review-prices.py`；后者复用 canonical symbol/Futu code owner，从远端 OpenD 取 market snapshot。每次 SSH 限 480 秒，报告限 600 秒，总预算 26 分钟。报告 core 不联网取数。
+
+每次使用新的 `<OM_REPORT_INPUTS_ROOT>/<UTC时间>-<随机后缀>/`，保留 `prefetch.json`、本次候选投影和成功获取的价格输入。预取失败写明确原因，候选证据降级为未知；价格失败不传旧 prices 文件，回到带来源和时间戳的 runtime brief 观察，再由报告新鲜度门槛判定。旧的 `prices.current.json` 不作为成功输入。
+
+安装操作顺序：
+
+1. 先核对本机时区与注册表 Asia/Shanghai 一致，记录配置文件及 health/entropy plist 的校验和。
+2. 将审查通过的 commit 安装到独立稳定版本目录，使用已有获外置卷读取权限的 venv Python；不能依赖临时 worktree。
+3. 渲染 shell 的 `__SOURCE_ROOT__` / `__PYTHON__`；渲染 plist 中的 `__OM_BIN__` 为该 shell，填写 runtime/config/env/log/home/inputs 及远端 host/repo/runtime 占位符。env 只引用现有文件，不写凭证值。
+4. 完整展示最终 plist，lint 后备份现有报告 job 和包装文件，只更新相同 label。调度仍为周一 08:00，不触碰其他 job。
+5. bootstrap/reload 后 kickstart **一次**；读回新 `run_id` 的三个报告产物、`run.json`、`prefetch.json` 和 launchd 退出状态，再比对受保护校验和。不要以已有报告或进程退出代替新运行证据。
+
+`prefetch.json` 的 `fetched` 仅表示获得 JSON；指标完整性仍由报告证据 owner 判断。报告生成与投递结果分别记录；失败重试需先核对已有回执，避免因不确定结果重复 kickstart。回退可恢复已备份的报告 plist/包装文件并重新加载同 label，仍需操作授权。
 
 ## 现价来源（`config_review`）
 
@@ -146,7 +183,7 @@ om report schedule [--format text|json]
 
 | status | 含义 | CLI |
 |---|---|---|
-| `delivered` | 飞书返回 `message_id`，投递确认 | 退出码 0 |
+| `delivered` | 飞书返回 `message_id`，渠道已接受；目标会话独立读回/用户确认是更强证据 | 退出码 0 |
 | `skipped` | 未声明渠道、`--no-deliver`、插件未安装或凭证缺失；`reason` / `message` 明确写出原因 | 退出码 0 |
 | `failed` | 已尝试发送但未确认；报告仍完整落盘 | 退出码 1，stderr 输出错误 |
 

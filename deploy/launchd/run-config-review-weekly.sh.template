@@ -1,0 +1,7 @@
+#!/bin/bash
+# Installed source and the granted venv must outlive the development worktree.
+set -eu
+unset PYTHONPATH
+export PYTHONDONTWRITEBYTECODE=1
+cd '__SOURCE_ROOT__'
+exec '__PYTHON__' '__SOURCE_ROOT__/deploy/launchd/run-config-review-weekly.py' "$@"

@@ -45,6 +45,7 @@ def add_report_commands(subparsers: argparse._SubParsersAction) -> None:
     run.add_argument("--runtime-root", default=None)
     run.add_argument("--configs-root", default=None)
     run.add_argument("--prices-file", default=None, help="JSON 价格文件；默认读取 runtime daily brief")
+    run.add_argument("--candidate-evidence-file", default=None, help="本期候选拒绝证据投影；默认读取 runtime 封存快照")
     run.add_argument("--trigger", choices=("manual", "schedule"), default="manual", help=argparse.SUPPRESS)
     run.add_argument("--json", action="store_true")
 
@@ -150,6 +151,8 @@ def _handle_list(*, runtime_root: Path, configs_root: Path, as_json: bool) -> in
 def _handle_run(args: argparse.Namespace, *, runtime_root: Path, configs_root: Path) -> int:
     definition = _definition_or_raise(args.report_id)
     prices_file = Path(args.prices_file).expanduser().resolve() if args.prices_file else None
+    evidence_arg = getattr(args, "candidate_evidence_file", None)
+    evidence_file = Path(evidence_arg).expanduser().resolve() if evidence_arg else None
     command = ["om", "report", "run", definition.report_id]
     if args.dry_run:
         command.append("--dry-run")
@@ -157,6 +160,8 @@ def _handle_run(args: argparse.Namespace, *, runtime_root: Path, configs_root: P
         command.append("--no-deliver")
     if prices_file is not None:
         command.extend(["--prices-file", str(prices_file)])
+    if evidence_file is not None:
+        command.extend(["--candidate-evidence-file", str(evidence_file)])
     if args.trigger != "manual":
         command.extend(["--trigger", args.trigger])
     result = execute_report(
@@ -165,6 +170,7 @@ def _handle_run(args: argparse.Namespace, *, runtime_root: Path, configs_root: P
             runtime_root=runtime_root,
             configs_root=configs_root,
             prices_file=prices_file,
+            candidate_evidence_file=evidence_file,
             now=datetime.now(timezone.utc),
         ),
         command=command,

@@ -249,6 +249,7 @@ def seal_opening_candidate_snapshot(
         ),
         "dependencies": dependency_rows,
         "sealed_at_utc": seal_time,
+        "strike_boundary_reason_codes_version": 1,
         "opening_status": opening_status,
         "strategy_results": strategy_results,
         "scope_results": scope_results,
@@ -409,6 +410,10 @@ def validate_opening_candidate_snapshot(
     item = dict(payload or {})
     if item.get("schema_version") not in {OPENING_CANDIDATE_SNAPSHOT_SCHEMA, OPENING_BROKER_SNAPSHOT_SCHEMA}:
         raise OpeningCandidateSnapshotError("opening candidate snapshot schema mismatch")
+    if "strike_boundary_reason_codes_version" in item:
+        version = item["strike_boundary_reason_codes_version"]
+        if type(version) is not int or version != 1:
+            raise OpeningCandidateSnapshotError("opening candidate strike reason capability is unsupported")
     if item.get("run_id") != expected_run_id:
         raise OpeningCandidateSnapshotError("opening candidate snapshot run mismatch")
     if item.get("account") != expected_account:
