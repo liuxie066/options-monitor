@@ -115,6 +115,11 @@ class _SdkLab:
             TradeOrderHandlerBase=type("OrderBase", (), {}),
         ))
         monkeypatch.setattr(gateway, "port_open", lambda host, port: host.endswith(".invalid") and port == 1)
+        monkeypatch.setattr(
+            gateway, "_start_futu_query_context",
+            lambda kind, kwargs, **controls: gateway._FutuQueryContext(
+                gateway._create_futu_sdk_context(kind, kwargs), deadline=None, cancelled=None),
+        )
         monkeypatch.setattr(push, "threading", SimpleNamespace(Thread=worker, Event=threading.Event, Lock=threading.Lock))
 
     def add(self, message="", ret=0):
@@ -320,6 +325,11 @@ def test_gateway_preserves_result_and_retires_observer_after_initialization(monk
 
     monkeypatch.setitem(sys.modules, "futu", SimpleNamespace(RET_OK=0, OpenSecTradeContext=Context))
     monkeypatch.setattr(gateway, "port_open", lambda *_: True)
+    monkeypatch.setattr(
+        gateway, "_start_futu_query_context",
+        lambda kind, kwargs, **controls: gateway._FutuQueryContext(
+            gateway._create_futu_sdk_context(kind, kwargs), deadline=None, cancelled=None),
+    )
     handlers = list(logging.getLogger("FTConsoleLog").handlers)
     kwargs = {"on_init_connect_error": lambda message: messages.append(message) or object()} if observer else {}
     context = gateway.build_futu_trade_context(host="synthetic.invalid", port=1, **kwargs)

@@ -953,6 +953,11 @@ def test_default_backend_quote_readiness_does_not_construct_trade_context(monkey
         ),
     )
 
+    monkeypatch.setattr(
+        futu_gateway, "_start_futu_query_context",
+        lambda kind, kwargs, **controls: futu_gateway._FutuQueryContext(
+            futu_gateway._create_futu_sdk_context(kind, kwargs), **controls),
+    )
     gateway = build_ready_futu_quote_gateway()
     gateway.close()
 
@@ -1038,6 +1043,11 @@ def test_port_open_preserves_original_sdk_path(monkeypatch) -> None:
         SimpleNamespace(RET_OK=0, OpenQuoteContext=FakeQuote, OpenSecTradeContext=FakeQuote),
     )
 
+    monkeypatch.setattr(
+        mod, "_start_futu_query_context",
+        lambda kind, kwargs, **controls: mod._FutuQueryContext(
+            mod._create_futu_sdk_context(kind, kwargs), **controls),
+    )
     with pytest.raises(mod.FutuGatewayError):
         mod.build_ready_futu_quote_gateway(host="127.0.0.9", port=11119)
     assert constructed == [("127.0.0.9", 11119)]

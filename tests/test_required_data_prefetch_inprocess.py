@@ -892,6 +892,66 @@ def test_prefetch_required_data_inprocess_reuses_gateways_per_endpoint(tmp_path:
     assert all(gw.close_calls >= 1 for gw in built)
 
 
+def test_blocked_sdk_query_only_removes_affected_symbol_receipt(tmp_path: Path, monkeypatch) -> None:
+    import threading
+    from src.infrastructure import futu_gateway
+
+    release = threading.Event()
+    built = []
+    seen = []
+    watchlist = [
+        {"symbol": symbol,
+         "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111},
+         "sell_put": {"enabled": True, "min_dte": 1, "max_dte": 60, "max_strike": 200}}
+        for symbol in ("AAPL", "MSFT")
+    ]
+
+    class Context:
+        def get_sync_conn_id(self):
+            return 1
+
+        def get_market_snapshot(self, symbol):
+            seen.append(symbol)
+            if symbol == "AAPL":
+                release.wait(timeout=2.0)  # Test harness guard; no response before the deadline.
+            return 0, []
+
+        def close(self):
+            release.wait(timeout=2.0)
+
+    def build(**_kwargs):
+        context = futu_gateway._FutuQueryContext(Context(), deadline=None, cancelled=None)
+        gateway = futu_gateway.FutuGateway(
+            client=SimpleNamespace(), backend=SimpleNamespace(_quote_client=context),
+            host="127.0.0.1", port=11111,
+        )
+        built.append(gateway)
+        return gateway
+
+    def fetch(symbol, **kwargs):
+        kwargs["gateway"].backend._quote_client.get_market_snapshot(symbol)
+        return _strict_success_rows_for_fetch(symbol, kwargs)
+
+    monkeypatch.setattr(futu_gateway, "FUTU_QUERY_TIMEOUT_SEC", 0.05)
+    monkeypatch.setattr(futu_gateway, "build_ready_futu_quote_gateway", build)
+    monkeypatch.setattr(mod, "resolve_watchlist_config", lambda _cfg: watchlist)
+    monkeypatch.setattr(mod, "has_shared_required_data", lambda *_args: False)
+    monkeypatch.setattr(mod, "fetch_symbol", fetch)
+    _silence_source_snapshot_events(monkeypatch)
+    started = time.monotonic()
+    try:
+        result = _prefetch(tmp_path, producer_run_id="run-query-timeout")
+        assert result["fetched_ok"] == 1
+        assert result["errors"] == 1
+        assert set(result["quote_receipts"]) == {"MSFT"}
+        assert seen == ["AAPL", "MSFT"]
+        assert len(built) == 2  # The next symbol replaces the discarded context.
+        assert time.monotonic() - started < 5.0
+    finally:
+        release.set()
+        mod._gateway_pool.close_registered()
+
+
 def test_inprocess_provider_typed_error_marks_gateway_failure_without_receipt(
     tmp_path: Path,
     monkeypatch,
