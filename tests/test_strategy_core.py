@@ -122,7 +122,7 @@ def test_cc_cost_multiplier_identity_is_frozen_custom_and_restorable():
     from domain.domain.strategy_core import validate_strategy_identity
     from domain.domain.strategy_identity import strategy_policy_hash
 
-    baseline = resolve_strategy(mode="call", config=InsuranceUnderwritingConfig(min_dte=7, max_dte=60, max_abs_delta=.30))
+    baseline = resolve_strategy(mode="call", config=InsuranceUnderwritingConfig(min_dte=7, max_dte=60, max_abs_delta=.40))
     custom = replace(baseline, config=replace(baseline.config, min_strike_cost_multiplier=1.20))
     assert baseline.config.min_strike_cost_multiplier == 1.02
     assert baseline.identity["policy_kind"] == "baseline"
