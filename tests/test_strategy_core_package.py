@@ -126,7 +126,7 @@ prepared = calculate_constraints(row, mode='call', strategy=policy,
     exchange_rate_converter=CurrencyConverter(ExchangeRates(**case['rates'])))
 decision = evaluate_candidates([prepared], strategy=policy)['decisions'][0]
 assert not decision['accepted']
-assert any(r['reason'] == 'hard_strike' and r['threshold'] == 132.6 for r in decision['opening_decision']['rejects'])
+assert any(r['reason'] == 'call_strike_below_min' and r['threshold'] == 132.6 for r in decision['opening_decision']['rejects'])
 identity = runtime_identity(mode='installed')
 assert identity['mode'] == 'installed' and len(identity['build_digest']) == 64
 print(json.dumps(identity))

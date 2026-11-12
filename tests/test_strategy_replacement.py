@@ -166,7 +166,7 @@ def test_baseline_multi_failure_exact_order_and_no_evidence_opt_out_regression(m
     actual = core.evaluate_candidates([row], strategy=core.resolve_strategy(mode=mode, config=cfg))['decisions'][0]
     assert actual == expected
     assert [r['reason'] for r in actual['opening_decision']['rejects']] == [
-        'hard_dte', 'hard_strike', f'hard_capacity_{mode}', 'return_annualized', 'input_missing',
+        'hard_dte', f'{mode}_strike_below_min', f'hard_capacity_{mode}', 'return_annualized', 'input_missing',
         'risk_spread', 'risk_iv_rv_ratio', 'risk_iv_minus_rv', 'risk_earnings_unavailable']
     no_evidence = evaluate_opening_candidate_policy(row, mode=mode, require_earnings_evidence=False)
     assert 'risk_earnings_unavailable' not in [r['reason'] for r in no_evidence['rejects']]

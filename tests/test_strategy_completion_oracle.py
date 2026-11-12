@@ -71,28 +71,63 @@ def _checked_current_projection(value, *, clock, delta):
     return value
 
 
-def _historical_input_variant(value, *, delta):
+def _historical_input_variant(value, *, delta, mode=None):
     """Copy archived output with the approved synthetic input and sizing basis changes.
 
     The historical generator imported helpers whose Delta was unavailable. Current
     helpers supply signed 0.3, so the default gate stays enabled. The candidate
     sizing basis now identifies directional scenarios; these fixtures have no
     opposite-direction assignments, so all numeric sizing facts stay compared.
-    Archived bytes remain unchanged.
+    Strike rejects now name their direction; the archived ``hard_strike`` is
+    projected only when metric/threshold prove the violated bound. Archived bytes
+    remain unchanged.
     """
     if isinstance(value, dict):
         if "delta" in value:
             assert value["delta"] is None
         if value.get("position_sizing_basis") is not None:
             assert value["position_sizing_basis"] == "non_option_net_assets_before_assignment_fees.v2"
-        return {key: (None if value.get("candidate_count") == 0 else delta)
-                if key == "delta" else CANDIDATE_POSITION_SIZING_BASIS
-                if key == "position_sizing_basis" and child is not None
-                else _historical_input_variant(child, delta=delta)
-                for key, child in value.items()}
+        resolved_mode = (
+            value.get("mode") if value.get("mode") in {"put", "call"} else mode
+        )
+        out = {}
+        for key, child in value.items():
+            if key == "delta":
+                out[key] = None if value.get("candidate_count") == 0 else delta
+            elif key == "position_sizing_basis" and child is not None:
+                out[key] = CANDIDATE_POSITION_SIZING_BASIS
+            elif key == "rejects" and resolved_mode is not None and isinstance(child, list):
+                out[key] = _historical_strike_reject_variant(
+                    child, mode=resolved_mode, delta=delta
+                )
+            else:
+                out[key] = _historical_input_variant(
+                    child, delta=delta, mode=resolved_mode
+                )
+        return out
     if isinstance(value, list):
-        return [_historical_input_variant(child, delta=delta) for child in value]
+        return [_historical_input_variant(child, delta=delta, mode=mode) for child in value]
     return value
+
+
+def _historical_strike_reject_variant(rejects, *, mode, delta):
+    out = []
+    for reject in rejects:
+        metric = reject.get("metric_value") if isinstance(reject, dict) else None
+        threshold = reject.get("threshold") if isinstance(reject, dict) else None
+        if (
+            isinstance(reject, dict)
+            and reject.get("reason") == "hard_strike"
+            and isinstance(metric, (int, float))
+            and not isinstance(metric, bool)
+            and isinstance(threshold, (int, float))
+            and not isinstance(threshold, bool)
+        ):
+            direction = "above_max" if metric > threshold else "below_min"
+            out.append({**reject, "reason": f"{mode}_strike_{direction}"})
+        else:
+            out.append(_historical_input_variant(reject, delta=delta, mode=mode))
+    return out
 
 
 @pytest.mark.parametrize("change", [
@@ -106,6 +141,24 @@ def test_oracle_projection_does_not_hide_contract_regressions(change):
            "decision_now_utc": oracle.old.NOW.isoformat(), **change}
     with pytest.raises(AssertionError):
         _checked_current_projection(row, clock=oracle.old.NOW.isoformat(), delta=0.3)
+
+
+def test_oracle_strike_reason_projection_requires_provable_direction():
+    below = _historical_input_variant(
+        {"mode": "call", "rejects": [{"reason": "hard_strike", "metric_value": 83.0, "threshold": 104.0}]},
+        delta=0.3,
+    )
+    assert below["rejects"][0]["reason"] == "call_strike_below_min"
+    above = _historical_input_variant(
+        {"mode": "put", "rejects": [{"reason": "hard_strike", "metric_value": 110.0, "threshold": 100.0}]},
+        delta=0.3,
+    )
+    assert above["rejects"][0]["reason"] == "put_strike_above_max"
+    unavailable = _historical_input_variant(
+        {"mode": "put", "rejects": [{"reason": "hard_strike", "metric_value": None, "threshold": 100.0}]},
+        delta=0.3,
+    )
+    assert unavailable["rejects"][0]["reason"] == "hard_strike"
 
 
 

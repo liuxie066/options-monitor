@@ -309,7 +309,7 @@ def test_cc_cost_policy_steps_decision_snapshot_and_restoration(frozen_scan, mul
     assert row["strategy_core"]["policy_kind"] == ("baseline" if multiplier == 1.02 else "custom")
     assert validate_strategy_identity(row, mode="call") == policy
     if not accepted:
-        assert decision["opening_decision"]["rejects"][0]["reason"] == "hard_strike"
+        assert decision["opening_decision"]["rejects"][0]["reason"] == "call_strike_below_min"
     sealed = _seal_snapshot(
         frozen_scan, run_id="cc-cost", scan_statuses=[_scan_status("NVDA", "call", "completed")],
         final_candidates={"call": finals}, candidate_evaluations={"call": decisions},

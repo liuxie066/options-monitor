@@ -273,5 +273,5 @@ def test_public_cc_evaluation_requires_prepared_constraints(floor):
     decision = evaluate_candidates([prepared], strategy=strategy)["decisions"][0]
     assert prepared["effective_min_strike"] == 132.6
     assert not decision["accepted"]
-    assert any(reject["reason"] == "hard_strike" and reject["threshold"] == 132.6
+    assert any(reject["reason"] == "call_strike_below_min" and reject["threshold"] == 132.6
                for reject in decision["opening_decision"]["rejects"])

@@ -177,7 +177,10 @@ def test_cc_floor_gate_does_not_redefine_spot_distance(minimum, cost, multiplier
     assert decision["normalized_input"]["effective_min_strike"] == pytest.approx(floor)
     assert decision["normalized_input"]["strike_upside_margin_pct"] == row["strike_above_spot_pct"]
     if not accepted:
-        assert decision["opening_decision"]["rejects"][0]["reason"] == "hard_strike"
+        expected_reason = (
+            "call_strike_below_min" if strike < floor else "call_strike_above_max"
+        )
+        assert decision["opening_decision"]["rejects"][0]["reason"] == expected_reason
 
 
 def test_repeat_underwriting_keeps_canonical_precision_and_inputs():

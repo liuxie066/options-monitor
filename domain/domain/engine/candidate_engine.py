@@ -55,7 +55,27 @@ REJECT_CONTRACT_INELIGIBLE = "contract_ineligible"
 REJECT_EVIDENCE_UNAVAILABLE = "evidence_unavailable"
 REJECT_POLICY_REJECTED = "policy_rejected"
 REJECT_HARD_DTE = "hard_dte"
+# ``hard_strike`` remains for an unavailable strike or a legacy sealed decision;
+# every evaluated strike bound reports its mode, direction and violated bound.
 REJECT_HARD_STRIKE = "hard_strike"
+REJECT_PUT_STRIKE_BELOW_MIN = "put_strike_below_min"
+REJECT_PUT_STRIKE_ABOVE_MAX = "put_strike_above_max"
+REJECT_CALL_STRIKE_BELOW_MIN = "call_strike_below_min"
+REJECT_CALL_STRIKE_ABOVE_MAX = "call_strike_above_max"
+_STRIKE_BOUND_REJECT_REASONS: dict[tuple[str, str], str] = {
+    ("put", "min"): REJECT_PUT_STRIKE_BELOW_MIN,
+    ("put", "max"): REJECT_PUT_STRIKE_ABOVE_MAX,
+    ("call", "min"): REJECT_CALL_STRIKE_BELOW_MIN,
+    ("call", "max"): REJECT_CALL_STRIKE_ABOVE_MAX,
+}
+_STRIKE_CONDITION_REJECT_REASONS: dict[str, tuple[str, ...]] = {
+    mode: (
+        REJECT_HARD_STRIKE,
+        _STRIKE_BOUND_REJECT_REASONS[(mode, "min")],
+        _STRIKE_BOUND_REJECT_REASONS[(mode, "max")],
+    )
+    for mode in ("put", "call")
+}
 REJECT_HARD_CAPACITY_PUT = "hard_capacity_put"
 REJECT_HARD_CAPACITY_CALL = "hard_capacity_call"
 REJECT_RETURN_ANNUALIZED = "return_annualized"
@@ -84,6 +104,10 @@ CANDIDATE_REJECT_REASONS: tuple[str, ...] = (
     REJECT_POLICY_REJECTED,
     REJECT_HARD_DTE,
     REJECT_HARD_STRIKE,
+    REJECT_PUT_STRIKE_BELOW_MIN,
+    REJECT_PUT_STRIKE_ABOVE_MAX,
+    REJECT_CALL_STRIKE_BELOW_MIN,
+    REJECT_CALL_STRIKE_ABOVE_MAX,
     REJECT_HARD_CAPACITY_PUT,
     REJECT_HARD_CAPACITY_CALL,
     REJECT_RETURN_ANNUALIZED,
@@ -926,7 +950,10 @@ def opening_qualification_rejects(
 def merge_opening_rejects(policy: list[dict[str, Any]], shared: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Preserve baseline rule order and stable custom-rule order within stages."""
     rules = (
-        REJECT_HARD_DTE, REJECT_HARD_STRIKE, REJECT_HARD_CAPACITY_PUT, REJECT_HARD_CAPACITY_CALL,
+        REJECT_HARD_DTE, REJECT_HARD_STRIKE,
+        REJECT_PUT_STRIKE_BELOW_MIN, REJECT_PUT_STRIKE_ABOVE_MAX,
+        REJECT_CALL_STRIKE_BELOW_MIN, REJECT_CALL_STRIKE_ABOVE_MAX,
+        REJECT_HARD_CAPACITY_PUT, REJECT_HARD_CAPACITY_CALL,
         REJECT_RETURN_ANNUALIZED, REJECT_INPUT_MISSING, REJECT_RETURN_NET_PREMIUM_CNY,
         REJECT_RISK_SPREAD, REJECT_RISK_IV_RV_RATIO, REJECT_RISK_IV_MINUS_RV,
         REJECT_RISK_EARNINGS_UNAVAILABLE, REJECT_RISK_EARNINGS_EVENT, REJECT_RISK_DELTA_UNAVAILABLE, REJECT_RISK_DELTA,
@@ -1065,7 +1092,11 @@ def evaluate_opening_candidate_policy(
         _reject(
             rejects,
             stage=STAGE_HARD_CONSTRAINTS,
-            reason=REJECT_HARD_STRIKE,
+            reason=(
+                REJECT_HARD_STRIKE
+                if strike is None
+                else _STRIKE_BOUND_REJECT_REASONS[(mode_norm, "min")]
+            ),
             message="strike below formal recall window or unavailable",
             metric_value=strike,
             threshold=effective_min_strike,
@@ -1076,7 +1107,11 @@ def evaluate_opening_candidate_policy(
         _reject(
             rejects,
             stage=STAGE_HARD_CONSTRAINTS,
-            reason=REJECT_HARD_STRIKE,
+            reason=(
+                REJECT_HARD_STRIKE
+                if strike is None
+                else _STRIKE_BOUND_REJECT_REASONS[(mode_norm, "max")]
+            ),
             message="strike above formal recall window or unavailable",
             metric_value=strike,
             threshold=effective_max_strike,
@@ -1188,7 +1223,8 @@ def evaluate_opening_candidate_policy(
         conditions: list[dict[str, Any]] = []
         for name, actual, lower, upper, reason in (
             ("dte", dte, resolved_min_dte, resolved_max_dte, REJECT_HARD_DTE),
-            ("strike", strike, effective_min_strike, effective_max_strike, REJECT_HARD_STRIKE),
+            ("strike", strike, effective_min_strike, effective_max_strike,
+             _STRIKE_CONDITION_REJECT_REASONS[mode_norm]),
             ("annualized_net_return", annualized, resolved_min_annualized_return, None, REJECT_RETURN_ANNUALIZED),
             ("net_premium_cny", net_premium_cny, resolved_min_net_premium_cny, None, REJECT_RETURN_NET_PREMIUM_CNY),
             ("spread_ratio", spread_ratio, None, resolved_max_spread_ratio, REJECT_RISK_SPREAD),
@@ -1205,8 +1241,10 @@ def evaluate_opening_candidate_policy(
                 required = {"operator": "gte", "value": lower}
             else:
                 required = {"operator": "lte", "value": upper}
-            status = "unknown" if actual is None else "fail" if reason in rejected_reasons else "pass"
-            reason_code = None if status == "pass" else reason
+            reason_candidates = reason if isinstance(reason, tuple) else (reason,)
+            matched_reason = next((item for item in reason_candidates if item in rejected_reasons), None)
+            status = "unknown" if actual is None else "fail" if matched_reason is not None else "pass"
+            reason_code = None if status == "pass" else (matched_reason or reason_candidates[0])
             if name == "net_premium_cny" and actual is None:
                 reason_code = "net_premium_cny_unavailable"
             conditions.append(
