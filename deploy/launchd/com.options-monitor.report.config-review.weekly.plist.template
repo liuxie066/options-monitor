@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template for the weekly config review report.
+
+  Replace __OM_BIN__, __RUNTIME_ROOT__, __CONFIGS_ROOT__, and __LOG_DIR__
+  before installing under ~/Library/LaunchAgents/.  This file is a template;
+  the repository never installs it automatically.
+
+  The schedule mirrors the registry entry in
+  src/application/reports/registry.py (weekly, Monday 08:00 host local time,
+  ISO weekday 1).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.options-monitor.report.config-review.weekly</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__OM_BIN__</string>
+    <string>report</string>
+    <string>run</string>
+    <string>config_review</string>
+    <string>--trigger</string>
+    <string>schedule</string>
+    <string>--runtime-root</string>
+    <string>__RUNTIME_ROOT__</string>
+    <string>--configs-root</string>
+    <string>__CONFIGS_ROOT__</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__RUNTIME_ROOT__</string>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Weekday</key><integer>1</integer>
+    <key>Hour</key><integer>8</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LowPriorityIO</key>
+  <true/>
+  <key>Nice</key>
+  <integer>10</integer>
+  <key>Umask</key>
+  <integer>63</integer>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>__HOME__</string>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>LANG</key><string>en_US.UTF-8</string>
+    <key>PYTHONDONTWRITEBYTECODE</key><string>1</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/config-review.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/config-review.stderr.log</string>
+</dict>
+</plist>

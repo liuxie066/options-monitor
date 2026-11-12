@@ -63,6 +63,7 @@ from src.interfaces.cli.portfolio_ops import (
     handle_portfolio_command,
 )
 from src.interfaces.cli.plugin_ops import add_plugin_commands, handle_plugin_command
+from src.interfaces.cli.report_ops import add_report_commands, handle_report_command
 from src.interfaces.cli.group_query_bot_ops import add_group_query_bot_commands, handle_group_query_bot_command
 from src.interfaces.quality.cli import add_quality_commands, handle_quality_command
 from src.interfaces.cli.observability_ops import (
@@ -171,6 +172,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add_group_query_bot_commands(sub)
 
     add_daily_brief_commands(sub)
+    add_report_commands(sub)
     add_decision_history_commands(sub)
     add_quality_commands(sub)
 
@@ -362,6 +364,8 @@ def _main(argv: list[str] | None = None, *, parsed_args: argparse.Namespace | No
             return handle_decision_history_command(args, repo_base_fn=repo_base)
         if args.command == "daily-brief":
             return handle_daily_brief_command(args, repo_base_fn=repo_base)
+        if args.command == "report":
+            return handle_report_command(args, repo_base_fn=repo_base)
 
         if args.command == "quality":
             result = handle_quality_command(args)
