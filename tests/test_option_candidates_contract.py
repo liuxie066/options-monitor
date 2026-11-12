@@ -325,13 +325,18 @@ def test_closed_or_unknown_market_never_reports_none(state, has_rows):
     assert result["coverage"]["evaluated"] == 0
 
 
-@pytest.mark.parametrize("mode,strike", [("put", 120), ("call", 100)])
-def test_explicit_strike_outside_spot_policy_is_excluded_not_silently_filtered(mode, strike):
+@pytest.mark.parametrize(
+    "mode,strike,reason_code",
+    [("put", 120, "put_strike_above_max"), ("call", 100, "call_strike_below_min")],
+)
+def test_explicit_strike_outside_spot_policy_is_excluded_not_silently_filtered(
+    mode, strike, reason_code
+):
     prepared = _prepared(mode=mode, strike=strike)
     result = _evaluate([_row(mode=mode, strike=strike)], prepared=prepared)
     assert result["outcome"] == "none" and result["effective_filters"] == prepared.filters
     _assert_counts(result, matched=0, excluded=1, unassessed=0)
-    assert result["exclusion_summary"] == [{"code": "hard_strike", "count": 1}]
+    assert result["exclusion_summary"] == [{"code": reason_code, "count": 1}]
 
 
 def test_exact_strike_and_inclusive_dte_do_not_match_neighboring_contracts():

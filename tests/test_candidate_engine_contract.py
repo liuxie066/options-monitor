@@ -5,14 +5,18 @@ import pytest
 
 from candidate_evidence_helpers import earnings_evidence, delta_evidence
 from domain.domain.engine import (
+    CANDIDATE_REJECT_REASONS,
     CANDIDATE_STAGE_ORDER,
     SELL_PUT_RANKING_CONTRACT_VERSION,
     SELL_PUT_RANKING_PROFILES,
+    build_candidate_decision,
     build_candidate_reject,
     evaluate_opening_candidate_policy,
     explain_candidate_rank,
+    normalize_candidate_reject,
     rank_candidate_rows,
     select_best_candidate_per_symbol,
+    validate_candidate_decision_payload,
 )
 
 
@@ -103,16 +107,16 @@ def test_sell_put_recall_window_uses_smaller_of_config_max_and_spot_then_80_pct(
     above = _decide(_policy_row(strike=110.01), min_strike=70.0, max_strike=120.0)
 
     assert accepted["accepted"] is True
-    assert "hard_strike" in _reasons(below)
-    assert "hard_strike" in _reasons(above)
+    assert "put_strike_below_min" in _reasons(below)
+    assert "put_strike_above_max" in _reasons(above)
 
 
 def test_covered_call_recall_window_starts_at_spot_and_caps_at_120_pct() -> None:
     assert _decide(_policy_row(mode="call", strike=110.0), mode="call", min_strike=100.0, max_strike=150.0)["accepted"] is True
-    assert "hard_strike" in _reasons(
+    assert "call_strike_below_min" in _reasons(
         _decide(_policy_row(mode="call", strike=109.99), mode="call", min_strike=100.0, max_strike=150.0)
     )
-    assert "hard_strike" in _reasons(
+    assert "call_strike_above_max" in _reasons(
         _decide(_policy_row(mode="call", strike=132.01), mode="call", min_strike=100.0, max_strike=150.0)
     )
 
@@ -436,6 +440,92 @@ def test_fx_purpose_flows_to_cny_premium_gate(holiday, mode, monkeypatch):
     reasons = _reasons(_decide(row, mode=mode))
     assert row["net_income_cny"] == pytest.approx(85.43)
     assert "input_missing" not in reasons and "return_net_premium_cny" not in reasons
+
+
+@pytest.mark.parametrize(
+    ("mode", "strike", "reason", "bound"),
+    [
+        ("put", 87.99, "put_strike_below_min", 88.0),
+        ("put", 110.01, "put_strike_above_max", 110.0),
+        ("call", 109.99, "call_strike_below_min", 110.0),
+        ("call", 132.01, "call_strike_above_max", 132.0),
+    ],
+)
+def test_strike_reject_names_bound_and_keeps_evidence(
+    mode: str, strike: float, reason: str, bound: float
+) -> None:
+    decision = _decide(
+        _policy_row(mode=mode, strike=strike),
+        mode=mode,
+        min_strike=70.0,
+        max_strike=None,
+    )
+    strike_rejects = [
+        row
+        for row in decision["rejects"]
+        if "strike" in row["reason"] and row["stage"] == "stage1_hard_constraints"
+    ]
+    assert [row["reason"] for row in strike_rejects] == [reason]
+    reject = strike_rejects[0]
+    assert reject["stage"] == "stage1_hard_constraints"
+    assert reject["metric_value"] == pytest.approx(strike)
+    assert reject["threshold"] == pytest.approx(bound)
+
+
+@pytest.mark.parametrize("mode", ["put", "call"])
+def test_unavailable_strike_keeps_legacy_hard_strike_reason(mode: str) -> None:
+    decision = _decide(_policy_row(mode=mode, strike=None), mode=mode)
+    assert decision["accepted"] is False
+    strike_rejects = [row for row in decision["rejects"] if row["stage"] == "stage1_hard_constraints"]
+    assert strike_rejects
+    assert {row["reason"] for row in strike_rejects} == {"hard_strike"}
+    assert all(row["metric_value"] is None for row in strike_rejects)
+
+
+def test_strike_direction_codes_are_registered_and_unknown_codes_still_fail_closed() -> None:
+    for code in (
+        "put_strike_below_min",
+        "put_strike_above_max",
+        "call_strike_below_min",
+        "call_strike_above_max",
+        "hard_strike",
+    ):
+        assert code in CANDIDATE_REJECT_REASONS
+        assert normalize_candidate_reject(
+            build_candidate_reject(
+                stage="stage1_hard_constraints",
+                reason=code,
+                metric_value=1.0,
+                threshold=2.0,
+            )
+        )["reason"] == code
+    with pytest.raises(ValueError, match="unsupported candidate reject reason"):
+        normalize_candidate_reject(
+            {"stage": "stage1_hard_constraints", "reason": "strike_too_high"}
+        )
+
+
+def test_legacy_hard_strike_decision_payload_still_validates() -> None:
+    payload = build_candidate_decision(
+        mode="put",
+        symbol="NVDA",
+        contract_symbol="NVDA-PUT-100",
+        accepted=False,
+        rejects=[
+            {
+                "stage": "stage1_hard_constraints",
+                "reason": "hard_strike",
+                "message": "legacy sealed decision",
+                "metric_value": 120.0,
+                "threshold": 110.0,
+            }
+        ],
+    )
+
+    validated = validate_candidate_decision_payload(payload)
+    assert validated["rejects"][0]["reason"] == "hard_strike"
+    assert validated["rejects"][0]["metric_value"] == 120.0
+    assert validated["rejects"][0]["threshold"] == 110.0
 
 
 def test_call_ranking_uses_shared_sizing_instead_of_legacy_aliases():

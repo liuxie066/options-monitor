@@ -107,13 +107,21 @@ def test_conditions_follow_inclusive_gates_and_distinguish_missing(mode, field, 
         json.dumps(decision["conditions"], allow_nan=False)
 
 
-@pytest.mark.parametrize("mode,strike,bounds", [("put", 120, [120, 110]), ("call", 100, [110, 100])])
-def test_exact_strike_outside_spot_rules_remains_rejected_with_actual_bounds(mode, strike, bounds):
+@pytest.mark.parametrize(
+    "mode,strike,bounds,reason_code",
+    [
+        ("put", 120, [120, 110], "put_strike_above_max"),
+        ("call", 100, [110, 100], "call_strike_below_min"),
+    ],
+)
+def test_exact_strike_outside_spot_rules_remains_rejected_with_actual_bounds(
+    mode, strike, bounds, reason_code
+):
     decision = _query(_policy_row(mode=mode, strike=strike), mode=mode, min_strike=strike, max_strike=strike)
     assert decision["accepted"] is False
     assert _conditions(decision)["strike"] == {
         "name": "strike", "status": "fail", "actual": strike,
-        "required": {"operator": "between", "value": bounds}, "reason_code": "hard_strike",
+        "required": {"operator": "between", "value": bounds}, "reason_code": reason_code,
     }
 
 

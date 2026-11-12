@@ -531,14 +531,18 @@ def _put_risk_fields(row: pd.Series) -> dict[str, Any]:
     }
 
 
-def _put_leg_passes_assignment_bounds(put_leg: ComboYieldLeg, sell_put_cfg: dict[str, Any] | None) -> bool:
+def _put_leg_assignment_bound_reject_reason(
+    put_leg: ComboYieldLeg, sell_put_cfg: dict[str, Any] | None
+) -> str | None:
     cfg = sell_put_cfg if isinstance(sell_put_cfg, dict) else {}
     min_strike = _safe_float(cfg.get("min_strike"))
     max_strike = _safe_float(cfg.get("max_strike"))
     effective_max_strike = min(value for value in (max_strike, put_leg.spot) if value is not None)
     if min_strike is not None and put_leg.strike < min_strike:
-        return False
-    return put_leg.strike <= effective_max_strike
+        return "put_strike_below_min"
+    if put_leg.strike > effective_max_strike:
+        return "put_strike_above_max"
+    return None
 
 
 def _load_required_data(
@@ -981,14 +985,15 @@ def _build_combo_yield_pair_rows(
                 )
             )
             continue
-        if not _put_leg_passes_assignment_bounds(put_leg, sell_put_cfg):
-            reject_counts["put_assignment_bounds"] += 1
+        assignment_bound_reason = _put_leg_assignment_bound_reject_reason(put_leg, sell_put_cfg)
+        if assignment_bound_reason is not None:
+            reject_counts[assignment_bound_reason] += 1
             diagnostics.append(
                 _diagnostic_row(
                     scope="put",
                     stage="put_filter",
                     accepted=False,
-                    reject_reasons=("put_assignment_bounds",),
+                    reject_reasons=(assignment_bound_reason,),
                     put_leg=put_leg,
                 )
             )

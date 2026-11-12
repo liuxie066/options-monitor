@@ -255,6 +255,10 @@ recall_lower = max(configured_min_strike, recall_upper * 0.80)
 - `max_strike` 是愿意接货的最高价，spot 是自然上限。
 - spot 缺失时 fail closed，不用旧 spot 或单独的 configured max 猜窗口。
 - DTE 不增加额外加分；较长周期偏好通过持有周期收益自然体现。
+- 边界拒绝按方向记码：低于 `recall_lower` 为 `put_strike_below_min`，高于
+  `recall_upper` 为 `put_strike_above_max`；`strike` 缺失或历史封存决策保留
+  `hard_strike`。拒绝载荷的 `threshold` 是本次生效边界，配置值/成本底价/spot/
+  80% 回撤的来源由 `threshold` 与 `spot`、`policy_*` 推导，不另写入字段。
 
 ### 5.2 收益口径
 
@@ -344,6 +348,10 @@ recall_max = min(configured_max_strike, recall_min * 1.20)
 
 - 保持现有 DTE 配置窗口。
 - spot 缺失时 fail closed。
+- 边界拒绝按方向记码：低于 `recall_min` 为 `call_strike_below_min`，高于
+  `recall_max` 为 `call_strike_above_max`；`strike` 缺失或历史封存决策保留
+  `hard_strike`。`threshold` 是该次生效边界，配置值/`avg_cost * 1.02`/spot/
+  1.2 倍上限的来源由 `threshold` 与 `spot`、`policy_*` 推导。
 - `recall_max < recall_min` 表示当前没有可行窗口，返回等待，不改写边界。
 - OM `avg_cost` 表示同一物理账户、同一 symbol 的平均成本价；富途映射 OpenD `average_cost`，长桥映射其股票持仓 `cost_price`。
 - OpenD `cost_price` / `diluted_cost` 是摊薄成本口径，不得写入或回退为 OM `avg_cost`。
