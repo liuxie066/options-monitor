@@ -21,9 +21,10 @@ NOW = datetime(2026, 11, 15, 12, tzinfo=timezone.utc)
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _runtime_config(root: Path, market: str, symbol: str, minimum: int = 100) -> Path:
+def _runtime_config(root: Path, market: str, symbol: str, minimum: int = 100, *, as_list: bool = False) -> Path:
     payload = _inline_runtime_config(market=market.lower())
-    payload["symbols"] = {symbol: {"sell_call": {"enabled": True, "min_strike": minimum, "min_dte": 7, "max_dte": 60}}}
+    settings = {"sell_call": {"enabled": True, "min_strike": minimum, "min_dte": 7, "max_dte": 60}}
+    payload["symbols"] = [{"symbol": symbol, **settings}] if as_list else {symbol: settings}
     path = root / f"config.{market.lower()}.json"
     path.write_text(json.dumps(payload))
     return path
@@ -66,9 +67,10 @@ def _scan(root: Path, monkeypatch: pytest.MonkeyPatch, *, run_id: str, symbol: s
     return manifest_path
 
 
-def test_report_defaults_to_generated_runtime_config_and_preserves_explicit_local_source(tmp_path: Path) -> None:
-    _runtime_config(tmp_path, "US", "PDD", 100)
-    _runtime_config(tmp_path, "HK", "0700.HK")
+@pytest.mark.parametrize("as_list", [False, True])
+def test_report_defaults_to_generated_runtime_config_and_preserves_explicit_local_source(tmp_path: Path, as_list: bool) -> None:
+    _runtime_config(tmp_path, "US", "PDD", 100, as_list=as_list)
+    _runtime_config(tmp_path, "HK", "0700.HK", as_list=as_list)
     local = tmp_path / "configs"
     local.mkdir()
     (local / "user.us.json").write_text(json.dumps({"symbols": [{"symbol": "PDD", "sell_call": {"min_strike": 130}}]}))
@@ -88,7 +90,7 @@ def test_report_defaults_to_generated_runtime_config_and_preserves_explicit_loca
 def test_cli_default_reads_runtime_without_local_override(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     from src.interfaces.cli.main import main
 
-    _runtime_config(tmp_path, "US", "PDD", 100)
+    _runtime_config(tmp_path, "US", "PDD", 100, as_list=True)
     prices = tmp_path / "prices.json"
     prices.write_text(json.dumps({"generated_at_utc": NOW.isoformat(), "prices": {"PDD": 80}}))
     assert main(["report", "run", "config_review", "--runtime-root", str(tmp_path),

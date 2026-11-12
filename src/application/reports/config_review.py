@@ -133,12 +133,15 @@ def _load_runtime_market_configs(
             continue
         _, payload = load_runtime_config(config_path=path, expected_market=market)
         symbols = payload.get("symbols")
-        if not isinstance(symbols, dict):
+        if isinstance(symbols, dict):
+            rows = [{**value, "symbol": symbol} for symbol, value in symbols.items() if isinstance(value, dict)]
+        elif isinstance(symbols, list):
+            rows = [dict(value) for value in symbols if isinstance(value, dict)]
+        else:
             raise AgentToolError(
-                code="REPORT_CONFIG_INVALID", message="runtime symbols must be a mapping",
+                code="REPORT_CONFIG_INVALID", message="runtime symbols must be a mapping or list",
                 details={"path": str(path)},
             )
-        rows = [{**value, "symbol": symbol} for symbol, value in symbols.items() if isinstance(value, dict)]
         if len(rows) != len(symbols):
             raise AgentToolError(
                 code="REPORT_CONFIG_INVALID", message="runtime symbol settings must be objects",
