@@ -5,6 +5,7 @@ import json
 from copy import deepcopy
 from typing import Any
 
+from domain.domain.candidate_defaults import DEFAULT_SELL_CALL_MAX_ABS_DELTA, DEFAULT_SELL_PUT_MAX_ABS_DELTA
 from domain.domain.engine.combo_yield import COMBO_LONG_MAX_DELTA, COMBO_LONG_MIN_DELTA
 
 
@@ -19,7 +20,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
                     "min_open_interest": 50,
                     "min_volume": 10,
                     "max_spread_ratio": 0.4,
-                    "max_abs_delta": 0.40,
+                    "max_abs_delta": DEFAULT_SELL_PUT_MAX_ABS_DELTA,
                     "min_iv_rv_ratio": 1.10,
                     "min_iv_minus_rv": 0.05,
                 }
@@ -30,7 +31,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
                     "min_open_interest": 50,
                     "min_volume": 10,
                     "max_spread_ratio": 0.4,
-                    "max_abs_delta": 0.40,
+                    "max_abs_delta": DEFAULT_SELL_CALL_MAX_ABS_DELTA,
                     "min_strike_cost_multiplier": 1.02,
                     "min_iv_rv_ratio": 1.10,
                     "min_iv_minus_rv": 0.05,

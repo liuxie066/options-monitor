@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING
 from typing import Any, Literal
 
-from domain.domain.candidate_defaults import DEFAULT_MAX_ABS_DELTA, validate_max_abs_delta
+from domain.domain.candidate_defaults import default_max_abs_delta, validate_max_abs_delta
 from domain.domain.fee_calc import estimate_futu_option_sell_fee
 from domain.domain.strategy_identity import candidate_ranking_profile
 from domain.domain.trade_contract_identity import contract_share_quantity, require_option_multiplier
@@ -813,7 +813,7 @@ def _delta_qualification_rejects(
     min_abs_delta: Any = None,
 ) -> list[dict[str, Any]]:
     cap = validate_max_abs_delta(
-        row.get("policy_max_abs_delta", DEFAULT_MAX_ABS_DELTA)
+        row.get("policy_max_abs_delta", default_max_abs_delta(mode))
         if max_abs_delta is _MAX_ABS_DELTA_UNSET else max_abs_delta
     )
     floor = validate_max_abs_delta(min_abs_delta)
@@ -1215,7 +1215,7 @@ def evaluate_opening_candidate_policy(
         # Project this evaluation's rejects and resolved bounds, never rerun policy.
         rejected_reasons = {item["reason"] for item in rejects}
         resolved_max_abs_delta = validate_max_abs_delta(
-            src.get("policy_max_abs_delta", DEFAULT_MAX_ABS_DELTA)
+            src.get("policy_max_abs_delta", default_max_abs_delta(mode_norm))
             if max_abs_delta is _MAX_ABS_DELTA_UNSET else max_abs_delta
         )
         delta = _first_float(src, "delta")
