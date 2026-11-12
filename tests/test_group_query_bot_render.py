@@ -1,6 +1,8 @@
 """Fact cards keep numeric authority; fallback wording stays short and human."""
 from __future__ import annotations
 
+import pytest
+
 from om_group_query_bot.render import (
     CLARIFICATION_NOTE,
     effective_filter_line,
@@ -143,6 +145,40 @@ def test_quote_render_labels_non_continuous_market_states():
     assert "市场状态 按最新价交易" in text_for("TRADE_AT_LAST")
     assert "市场状态 午盘结束" in text_for("AFTERNOON_END")
     assert "市场状态 交易竞价" in text_for("TRADE_AUCTION")
+
+
+@pytest.mark.parametrize("option_type", ["P", "C"])
+def test_opening_candidates_show_owner_sell_limit_in_card_and_reply(option_type):
+    candidate = {
+        "contract": f"US.NVDA261218{option_type}180000", "expiry": "2026-12-18",
+        "strike": 180.0, "sell_limit": 3.10,
+        "evidence": {"bid": 3.0, "ask": 3.15},
+    }
+    data = {"symbol": "NVDA", "market": "US", "outcome": "found",
+            "candidates": [candidate], "displayed": 1, "omitted": 0}
+
+    for text in (fact_card("query_candidates", data), render_candidates(data)):
+        assert "建议卖出限价 3.1000" in text
+        assert "买 3.0000 / 卖 3.1500" in text
+        assert candidate["contract"] in text
+        assert "到期 2026-12-18" in text
+
+
+@pytest.mark.parametrize("price_fields", [{}, {"sell_limit": None}])
+def test_opening_candidates_without_sell_limit_do_not_invent_one(price_fields):
+    data = {
+        "symbol": "NVDA", "market": "US", "outcome": "found",
+        "candidates": [{
+            "contract": "US.NVDA261218P180000", "expiry": "2026-12-18",
+            "strike": 180.0, "evidence": {"bid": 3.0, "ask": 3.15},
+            **price_fields,
+        }],
+        "displayed": 1, "omitted": 0,
+    }
+
+    for text in (fact_card("query_candidates", data), render_candidates(data)):
+        assert "建议卖出限价" not in text
+        assert "买 3.0000 / 卖 3.1500" in text
 
 
 def test_candidates_render_closed_reference_and_observation_time():
