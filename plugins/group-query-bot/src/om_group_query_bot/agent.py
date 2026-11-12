@@ -16,6 +16,7 @@ import threading
 import time
 import uuid
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from src.application.bot.runtime import request_model, token_estimate
 from src.application.secret_store.runtime import resolve_secret
@@ -61,7 +62,10 @@ evaluate_roll_down、evaluate_roll_up；另有一个宿主工具 answer_general�
 2. 与这五项业务无关的通用问题（例如今天几点开盘、交易所日程、市场规则、合约常识、
    概念解释等）必须调用 answer_general 回答，answer 参数放完整、简短的中文回答；
    不得给出具体价格、费用、年化数值或买卖建议，也不得声称执行了实时查询。涉及
-   开盘时间、交易时段等时区或夏令时敏感信息时，提醒以交易所官方说明为准。
+   开盘时间、交易时段、夏令时等信息时，必须基于本轮注入的服务端当前时间与用户时区
+   计算；用户未另行指定时，“今天”等相对日期以用户时区为准，不得猜测当前日期或
+   夏令时，并提醒以交易所官方说明为准。时间上下文仅用于通用问答中的日历与时区
+   推算；业务数字仍必须来自工具，不得把时间上下文当作行情或其他业务事实。
 3. 标的直接传用户原话即可（如 NVDA、0700、腾讯、MSFU）；宿主会自动补全并归一化，
    不要要求用户提供市场前缀，也不要把猜测的前缀当成事实。只有工具明确返回无法识别
    标的时，才请用户确认代码。
@@ -71,7 +75,7 @@ evaluate_roll_down、evaluate_roll_up；另有一个宿主工具 answer_general�
    其余参数均可省略：用户没给时不要把可选参数当缺失去追问，直接调用工具；
    工具结果里会写明实际采用的期限、Delta、行权价和展示上限。
 5. 只有必填参数缺失，或方向、合约、张数、权利金单位等意图本身有歧义时才追问。
-6. 用户给出的相对日期要保留原话并请用户确认明确日期；最晚新到期日必须由用户明确给出。
+6. 业务工具参数中的相对日期要保留用户原话并请用户确认明确日期；最晚新到期日必须由用户明确给出。
 7. 工具返回的「查询结果」是唯一的事实来源。直接引用里面的数字、日期和合约代码，
    可以保留原精度；不要自己计算（不要算价差、收益率或比例），不要编造或改写数字。
 8. 像群里的朋友说话：先给结论，再说关键数字，2-4 句就够；可以分 1-3 行，但不要
@@ -471,8 +475,19 @@ class GroupQueryAgent:
         with permit:
             return self._run(event, clean, now, scope)
 
-    def _messages(self, history: list[dict], pending: list[dict], text: str) -> list[dict]:
-        system = SYSTEM_PROMPT
+    def _messages(self, history: list[dict], pending: list[dict], text: str,
+                  now: datetime) -> list[dict]:
+        time_context = ["本轮时间上下文（服务端时钟，以下均为同一时刻）："]
+        for label, zone in (("服务端 UTC", "UTC"),
+                            ("当前时间", self.settings.user_timezone),
+                            ("美东", "America/New_York"),
+                            ("香港", "Asia/Hong_Kong")):
+            local = now.astimezone(ZoneInfo(zone))
+            offset = local.strftime("%z")
+            time_context.append(
+                f"{label}：{local:%Y-%m-%d %H:%M:%S} "
+                f"({zone}, {local.tzname()}, UTC{offset[:3]}:{offset[3:]})")
+        system = SYSTEM_PROMPT + "\n" + "\n".join(time_context)
         current_query = _last_candidate_query(history)
         if current_query is not None:
             system += ("\n最近一次候选查询的用户参数（只供本轮延续或修改，"
@@ -518,7 +533,7 @@ class GroupQueryAgent:
             scope, now, max_turns=self.settings.context_turns,
             max_tokens=self.settings.context_tokens, estimate=self._estimate)
         pending = self.conversations.pending_inputs(scope, now)
-        messages = self._messages(history, pending, text)
+        messages = self._messages(history, pending, text, now)
         stored_results: list[dict] = []
         last_result: tuple[str, dict[str, Any]] | None = None
         last_card: str | None = None

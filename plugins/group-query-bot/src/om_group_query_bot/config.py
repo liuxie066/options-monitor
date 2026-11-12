@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import re
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from src.application.bot.model_config import ModelSettings
 from src.application.secret_store.registry import (
@@ -291,6 +292,7 @@ class BotSettings:
     context_tokens: int = 4000
     api_timeout_seconds: int = 30
     followup_window_seconds: int = 600
+    user_timezone: str = "Asia/Shanghai"
 
 
 def _loopback_base_url(value: object) -> str:
@@ -310,10 +312,15 @@ def load_bot_settings(path: str | Path) -> BotSettings:
                          object_pairs_hook=_unique_object)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError("cannot read bot JSON configuration") from exc
-    if isinstance(raw, dict) and "limits" not in raw:
-        raw = {**raw, "limits": {}}
+    if isinstance(raw, dict):
+        raw = {"limits": {}, "user_timezone": "Asia/Shanghai", **raw}
     raw = _object(raw, {"instance_id", "data_dir", "feishu", "model", "query_api",
-                        "limits"})
+                        "limits", "user_timezone"})
+    user_timezone = _text(raw["user_timezone"])
+    try:
+        ZoneInfo(user_timezone)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ValueError("bot user_timezone must be a valid IANA time zone") from exc
     instance = _text(raw["instance_id"])
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", instance):
         raise ValueError("invalid bot instance_id")
@@ -354,7 +361,7 @@ def load_bot_settings(path: str | Path) -> BotSettings:
         instance_id=instance, data_dir=data_dir, app_id=app_id,
         app_secret_ref=app_secret_ref, allowed_chat_ids=chat_ids,
         model=model_settings, query_api_base_url=query_api_base_url,
-        query_api_token_ref=query_api_token_ref,
+        query_api_token_ref=query_api_token_ref, user_timezone=user_timezone,
         user_per_minute=_int_range(limits.get("user_per_minute", 3),
                                    "limits.user_per_minute", low=1, high=30),
         group_per_minute=_int_range(limits.get("group_per_minute", 10),
