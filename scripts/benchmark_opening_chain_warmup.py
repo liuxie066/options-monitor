@@ -242,6 +242,9 @@ def offline_runtime(root: Path, *, linger: bool = False) -> Iterator[FakeProvide
 
     fork_context = multiprocessing.get_context("fork")
     with ExitStack() as stack:
+        # A reused temporary path must not retain a gate bound to another
+        # fixture's virtual clock. Restore the real registry on context exit.
+        stack.enter_context(patch("src.application.option_chain_fetching._RATE_GATE_CACHE", {}))
         for target, replacement in (
             ("socket.socket.connect", reject_network),
             ("socket.create_connection", reject_network),

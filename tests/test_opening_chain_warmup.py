@@ -5,6 +5,7 @@ from datetime import timedelta
 import json
 import multiprocessing
 from pathlib import Path
+import shutil
 import time
 
 import pytest
@@ -78,7 +79,12 @@ def test_warmup_broad_shards_cover_formal_sides_without_extra_chain_calls(tmp_pa
     for result in (cold, warm):
         calls = [row["at"] for row in result["records"] if row["endpoint"] == "chain"]
         assert max(sum(-1e-6 <= now - other < 30.0 - 1e-6 for other in calls)
-                   for now in calls) <= 10
+                   for now in calls) <= 10, {
+            "market": market, "warmup": result["warmup"], "chain_times": calls,
+            "rate_wait": result["opening_rate_gate_wait_seconds"],
+            "limiter_state": json.loads((tmp_path / ("warm" if result is warm else "cold")
+                                         / "output_shared/state/opend_option_chain_limiter.json").read_text()),
+        }
 
 
 def test_final_with_lingering_provider_thread_is_reaped_without_deadline_failure(tmp_path):
@@ -95,6 +101,19 @@ def test_final_with_lingering_provider_thread_is_reaped_without_deadline_failure
     assert {process.pid for process in multiprocessing.active_children()} == before
     with exclusive_private_file_lock(tmp_path / "output_shared/state/required_data_prefetch.lock"):
         pass
+
+
+def test_reused_temporary_path_gets_a_fresh_virtual_limiter_clock(tmp_path):
+    root = tmp_path / "reused"
+    first = run_comparison(root, warmup=False, market="US")
+    shutil.rmtree(root)
+    second = run_comparison(root, warmup=False, market="HK")
+    assert first["opening_seconds"] == second["opening_seconds"]
+    assert first["opening_rate_gate_wait_seconds"] == second["opening_rate_gate_wait_seconds"]
+    for result in (first, second):
+        calls = [row["at"] for row in result["records"] if row["endpoint"] == "chain"]
+        assert max(sum(-1e-6 <= now - other < 30.0 - 1e-6 for other in calls)
+                   for now in calls) <= 10, calls
 
 
 @pytest.mark.parametrize("status", ["ready", "degraded", "deadline_reached"])
