@@ -288,6 +288,29 @@ VERSION="$(cat VERSION)"
 
 ---
 
+## 升级独立验收与证据收尾
+
+Linux/systemd 的源码安装可使用 `scripts/release_acceptance.py` 固定采集入口。先从已审查的 checkout 将脚本暂存到目标机器，再用目标 release 的 `.venv/bin/python -I` 执行；旧版本无需已经包含此脚本。传入稳定代码 symlink 和实际 runtime root，profile 固定读取该 runtime 下的 `service.profile.json`。此入口只读，不升级、不重启、不 reconcile，不提供 SSH 传输或凭据安装。
+
+升级前，以当时 release 的解释器建立基线；升级完成后，改用新 release 的解释器验收：
+
+```bash
+"$OLD_RELEASE/.venv/bin/python" -I "$STAGED_SCRIPT" baseline \
+  --repo-root "$STABLE_LINK" --runtime-root "$RUNTIME_ROOT" --output-dir "$BEFORE_DIR"
+
+"$NEW_RELEASE/.venv/bin/python" -I "$STAGED_SCRIPT" accept \
+  --repo-root "$STABLE_LINK" --runtime-root "$RUNTIME_ROOT" \
+  --expected-version "$VERSION" --baseline "$BEFORE_DIR/baseline.json" --output-dir "$AFTER_DIR"
+```
+
+这些变量由本次交付确定；`OLD_RELEASE` / `NEW_RELEASE` 分别为切换前后的真实 release 目录，`STABLE_LINK` 保留服务安装时的 symlink 拼写。输出目录须不存在或为空，已有证据不会被覆盖。baseline 非零时不得把它用作有效基线。
+
+采集复用目标 release 的插件清单、版本和服务健康 owner；记录 fresh health checks、pip check、当前服务属性及进程 cwd、带精确身份/结果校验的 `update verify --no-check-latest` 与只读 `service drift`、全部 installed timers、failed units，以及执行 verify 前保存的当前 upgrade status 指标。空 profile、空健康检查、坏 JSON 和缺行均不能通过。插件保留安装及 managed 选择；timer 保留基线中的 UnitFileState/ActiveState，包括故意 disabled 的已退役 timer。drift 的 warning 可保留，零 error 不授权丢失基线 timer。
+
+一次采集产生 `acceptance-evidence.json`、`acceptance-summary.json`、`upgrade-comparison.json` 与带大小/SHA-256 的 `evidence-index.json`；摘要与对比不会重跑探针。凭据字段和 URL 查询参数在写盘前脱敏，不收集 journal 或保存原始 profile/env。基线旧指标未知时保持 null，不把两个未知 hash 视为相同；当前目标指标缺失会阻止通过。结果为 `passed` / `failed` / `missing_data`，退出码分别为 0 / 1 / 2；失败优先于缺少证据。超时属于失败，取消时尽可能保留脱敏的 incomplete 证据，须使用新目录重试。
+
+首轮支持带升级基线及默认 profile 的 Linux/systemd 源码安装；launchd、完整 runtime bundle、自定义 profile 路径和首次安装仍沿用原交付验收。此工具不改变发布/升级授权，也不替代 apply 的退出结果。健康路径三分钟收尾仅为后续实际交付的观测目标，不是全局超时或已验证收益。
+
 ## 自动发布
 
 合并到 `main` 的版本提交如果修改了顶层 `VERSION`，`Guardrails` workflow 会先完成普通
