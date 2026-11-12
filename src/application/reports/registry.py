@@ -17,6 +17,9 @@ from typing import Any
 
 SCHEDULE_SCHEMA_VERSION = "report_schedule.v1"
 LOCAL_TIMEZONE = "Asia/Shanghai"
+DELIVERY_NONE = "none"
+DELIVERY_FEISHU_APP = "feishu_app"
+DELIVERY_CHANNELS = (DELIVERY_NONE, DELIVERY_FEISHU_APP)
 _WEEKDAY_LABELS = {
     1: "周一",
     2: "周二",
@@ -117,6 +120,7 @@ class ReportDefinition:
     config_keys: tuple[str, ...]
     migrated: bool
     retention: RetentionPolicy
+    delivery: str = DELIVERY_NONE
     legacy_probe: LegacyProbe | None = None
     plist_template: str | None = None
     notes: str = ""
@@ -126,6 +130,8 @@ class ReportDefinition:
             raise ValueError(f"invalid report_id: {self.report_id!r}")
         if not self.schedules:
             raise ValueError(f"{self.report_id}: at least one schedule is required")
+        if self.delivery not in DELIVERY_CHANNELS:
+            raise ValueError(f"{self.report_id}: unsupported report delivery channel: {self.delivery!r}")
         if not self.migrated and self.legacy_probe is None:
             raise ValueError(f"{self.report_id}: legacy report requires a legacy_probe")
 
@@ -293,6 +299,7 @@ REPORT_REGISTRY: tuple[ReportDefinition, ...] = (
         state_dir="<runtime_root>/reports/config_review",
         config_keys=(),
         migrated=True,
+        delivery=DELIVERY_FEISHU_APP,
         retention=RetentionPolicy(
             keep_count=52,
             note="每周一份，保留约一年；报告中心只声明策略，不自动删除。",

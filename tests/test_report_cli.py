@@ -46,6 +46,10 @@ def test_report_cli_parser() -> None:
     assert run.report_id == "config_review"
     assert run.dry_run is True
     assert run.prices_file == "p.json"
+    assert run.no_deliver is False
+
+    no_deliver = parse_args(["report", "run", "config_review", "--no-deliver"])
+    assert no_deliver.no_deliver is True
 
     history = parse_args(["report", "history", "config_review", "--limit", "3"])
     assert history.limit == 3
@@ -72,6 +76,7 @@ def test_report_cli_run_history_show_list_and_schedule(tmp_path: Path, capsys: p
         str(configs),
         "--prices-file",
         str(prices),
+        "--no-deliver",
         "--json",
     ]
     assert main(run_args) == 0

@@ -101,6 +101,7 @@ def create_run(
         trigger=trigger,
         artifacts=[],
         summary=None,
+        delivery=None,
         error=None,
     )
     return handle
@@ -133,6 +134,7 @@ def finalize_run(
     status: str,
     artifacts: list[dict[str, Any]] | None = None,
     summary: dict[str, Any] | None = None,
+    delivery: dict[str, Any] | None = None,
     error: dict[str, Any] | None = None,
     command: Iterable[str] | None = None,
     trigger: str | None = None,
@@ -149,6 +151,7 @@ def finalize_run(
         trigger=str(trigger if trigger is not None else existing.get("trigger") or "manual"),
         artifacts=list(artifacts or []),
         summary=summary,
+        delivery=delivery,
         error=error,
     )
 
@@ -240,6 +243,7 @@ def _write_manifest(
     trigger: str,
     artifacts: list[dict[str, Any]],
     summary: dict[str, Any] | None,
+    delivery: dict[str, Any] | None,
     error: dict[str, Any] | None,
 ) -> dict[str, Any]:
     payload = {
@@ -253,6 +257,7 @@ def _write_manifest(
         "command": command,
         "artifacts": artifacts,
         "summary": summary,
+        "delivery": delivery,
         "error": error,
     }
     atomic_write_json(handle.manifest_path, payload)

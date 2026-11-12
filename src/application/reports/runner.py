@@ -10,6 +10,7 @@ import json
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.reports.config_review import build_config_review
+from src.application.reports.delivery import deliver_report
 from src.application.reports.registry import ReportDefinition
 from src.application.reports.store import (
     ReportArtifact,
@@ -66,6 +67,7 @@ def execute_report(
     command: Iterable[str],
     trigger: str = "manual",
     dry_run: bool = False,
+    deliver: bool = True,
 ) -> dict[str, Any]:
     if not definition.migrated:
         raise AgentToolError(
@@ -110,11 +112,19 @@ def execute_report(
     try:
         build = builder(context)
         records = write_artifacts(handle, build.artifacts)
+        delivery = _deliver(
+            definition,
+            run_id=handle.run_id,
+            artifacts=build.artifacts,
+            runtime_root=context.runtime_root,
+            enabled=deliver,
+        )
         manifest = finalize_run(
             handle,
             status="succeeded",
             artifacts=records,
             summary=build.summary,
+            delivery=delivery,
             finished_at=datetime.now(timezone.utc),
         )
     except Exception as exc:
@@ -147,7 +157,40 @@ def execute_report(
         "finished_at_utc": manifest["finished_at_utc"],
         "artifacts": manifest["artifacts"],
         "summary": manifest["summary"],
+        "delivery": manifest.get("delivery"),
     }
+
+
+def _deliver(
+    definition: ReportDefinition,
+    *,
+    run_id: str,
+    artifacts: tuple[ReportArtifact, ...],
+    runtime_root: Path,
+    enabled: bool,
+) -> dict[str, Any]:
+    markdown = next(
+        (item.content for item in artifacts if item.name == "report.md"),
+        artifacts[0].content if artifacts else "",
+    )
+    try:
+        return deliver_report(
+            report_id=definition.report_id,
+            run_id=run_id,
+            channel=definition.delivery,
+            markdown=markdown,
+            base=runtime_root,
+            enabled=enabled,
+        )
+    except Exception as exc:  # pragma: no cover - delivery code must not fail the report
+        return {
+            "schema_version": "report_delivery.v1",
+            "channel": definition.delivery,
+            "status": "failed",
+            "ok": False,
+            "reason": "delivery_failed",
+            "message": f"{type(exc).__name__}: {exc}",
+        }
 
 
 def _record_failure(handle: RunHandle, exc: Exception) -> None:

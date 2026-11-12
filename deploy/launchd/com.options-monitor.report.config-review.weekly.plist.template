@@ -3,9 +3,13 @@
 <!--
   Template for the weekly config review report.
 
-  Replace __OM_BIN__, __RUNTIME_ROOT__, __CONFIGS_ROOT__, and __LOG_DIR__
-  before installing under ~/Library/LaunchAgents/.  This file is a template;
-  the repository never installs it automatically.
+  Replace __OM_BIN__, __RUNTIME_ROOT__, __CONFIGS_ROOT__, __ENV_FILE__,
+  __LOG_DIR__, and __HOME__ before installing under ~/Library/LaunchAgents/.  The report
+  declares Feishu delivery; __ENV_FILE__ must point at the same bot settings
+  the daily brief uses (OM_FEISHU_BOT_*).  When those settings are absent or
+  the optional Feishu plugin is not installed, the report is still written and
+  delivery is recorded as skipped.  This file is a template; the repository
+  never installs it automatically.
 
   The schedule mirrors the registry entry in
   src/application/reports/registry.py (weekly, Monday 08:00 host local time,
@@ -52,6 +56,7 @@
     <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>LANG</key><string>en_US.UTF-8</string>
     <key>PYTHONDONTWRITEBYTECODE</key><string>1</string>
+    <key>OM_ENV_FILE</key><string>__ENV_FILE__</string>
   </dict>
   <key>StandardOutPath</key>
   <string>__LOG_DIR__/config-review.stdout.log</string>

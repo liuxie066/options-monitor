@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.reports.legacy import observe_legacy_last_run
+from src.application.reports.delivery import delivery_failed
 from src.application.reports.registry import (
     REPORT_REGISTRY,
     ReportDefinition,
@@ -40,6 +41,7 @@ def add_report_commands(subparsers: argparse._SubParsersAction) -> None:
     run = report_sub.add_parser("run", help="手动运行一次报告")
     run.add_argument("report_id")
     run.add_argument("--dry-run", action="store_true", help="只生成并打印，不写运行目录或历史")
+    run.add_argument("--no-deliver", action="store_true", help="只生成本地报告，不投递到外部渠道")
     run.add_argument("--runtime-root", default=None)
     run.add_argument("--configs-root", default=None)
     run.add_argument("--prices-file", default=None, help="JSON 价格文件；默认读取 runtime daily brief")
@@ -105,6 +107,7 @@ def _handle_list(*, runtime_root: Path, configs_root: Path, as_json: bool) -> in
                 "description": definition.description,
                 "schedules": [schedule.label for schedule in definition.schedules],
                 "migrated": definition.migrated,
+                "delivery": definition.delivery,
                 "config_keys": list(definition.config_keys),
                 "switches": switches,
                 "state_dir": definition.state_dir,
@@ -128,6 +131,7 @@ def _handle_list(*, runtime_root: Path, configs_root: Path, as_json: bool) -> in
             "；".join(row["schedules"]),
             _switches_text(row),
             "是" if row["migrated"] else "否",
+            row["delivery"],
             row["last_run"]["at_utc"] if row["last_run"] else "—",
             _last_run_text(row["last_run"]),
         ]
@@ -135,7 +139,7 @@ def _handle_list(*, runtime_root: Path, configs_root: Path, as_json: bool) -> in
     ]
     sys.stdout.write(
         _render_table(
-            ["REPORT_ID", "名称", "频率", "开关", "迁移", "上次运行(UTC)", "结果"],
+            ["REPORT_ID", "名称", "频率", "开关", "迁移", "投递", "上次运行(UTC)", "结果"],
             rows,
         )
         + "\n"
@@ -149,6 +153,8 @@ def _handle_run(args: argparse.Namespace, *, runtime_root: Path, configs_root: P
     command = ["om", "report", "run", definition.report_id]
     if args.dry_run:
         command.append("--dry-run")
+    if args.no_deliver:
+        command.append("--no-deliver")
     if prices_file is not None:
         command.extend(["--prices-file", str(prices_file)])
     if args.trigger != "manual":
@@ -164,6 +170,7 @@ def _handle_run(args: argparse.Namespace, *, runtime_root: Path, configs_root: P
         command=command,
         trigger=args.trigger,
         dry_run=bool(args.dry_run),
+        deliver=not args.no_deliver,
     )
     if args.dry_run:
         if args.json:
@@ -177,10 +184,15 @@ def _handle_run(args: argparse.Namespace, *, runtime_root: Path, configs_root: P
         sys.stdout.write(markdown if markdown.endswith("\n") else markdown + "\n")
         return 0
     if args.json:
-        return _print(result)
+        _print(result)
+        if delivery_failed(result.get("delivery")):
+            sys.stderr.write(f"投递失败：{(result.get('delivery') or {}).get('message') or '未知错误'}\n")
+            return 1
+        return 0
     artifacts = "、".join(
         f"{item['name']}（{_human_bytes(int(item.get('bytes') or 0))}）" for item in result.get("artifacts") or []
     )
+    delivery = result.get("delivery")
     sys.stdout.write(
         "\n".join(
             [
@@ -189,10 +201,14 @@ def _handle_run(args: argparse.Namespace, *, runtime_root: Path, configs_root: P
                 f"目录：{result['run_dir']}",
                 f"产物：{artifacts or '无'}",
                 f"摘要：{_summary_text(result.get('summary') or {})}",
+                f"投递：{_delivery_text(delivery)}",
             ]
         )
         + "\n"
     )
+    if delivery_failed(delivery):
+        sys.stderr.write(f"投递失败：{(delivery or {}).get('message') or '未知错误'}\n")
+        return 1
     return 0
 
 
@@ -405,6 +421,21 @@ def _summary_text(summary: dict[str, Any]) -> str:
         f"Combo {summary.get('combo_enabled', 0)}",
     ]
     return "；".join(parts)
+
+
+def _delivery_text(delivery: dict[str, Any] | None) -> str:
+    if not isinstance(delivery, dict):
+        return "未执行"
+    channel = delivery.get("channel") or "none"
+    status = delivery.get("status")
+    if status == "delivered":
+        message_id = delivery.get("message_id")
+        return f"{channel} 已送达" + (f"（message_id={message_id}）" if message_id else "")
+    if status == "skipped":
+        return f"{channel} 已跳过：{delivery.get('message') or delivery.get('reason') or '未知原因'}"
+    if status == "failed":
+        return f"{channel} 投递失败：{delivery.get('message') or delivery.get('reason') or '未知错误'}"
+    return f"{channel} {status or '未执行'}"
 
 
 def _render_table(headers: list[str], rows: list[list[str]]) -> str:
