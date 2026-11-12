@@ -6,6 +6,10 @@ on:
       tag:
         required: true
         type: string
+    outputs:
+      published:
+        description: Outcome of the source publication attempt
+        value: ${{ jobs.release.outputs.published }}
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -91,64 +95,3 @@ jobs:
       - name: Read back publication outcome
         if: ${{ always() && (steps.publish.outcome == 'success' || steps.publish.outcome == 'failure') }}
         run: ./.venv/bin/python .github/ci/release_checks.py readback --defer-runtime-bundles
-
-  bundles:
-    needs: release
-    uses: ./.github/workflows/runtime-bundle.yml
-    with:
-      release-platforms-only: true
-    permissions:
-      contents: read
-
-  publish-bundles:
-    needs: [release, bundles]
-    if: ${{ always() && (needs.release.outputs.published == 'success' || needs.release.outputs.published == 'failure') }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    concurrency:
-      group: release-${{ github.repository }}-${{ inputs.tag }}
-      cancel-in-progress: false
-    env:
-      GH_TOKEN: ${{ github.token }}
-      RELEASE_TAG: ${{ inputs.tag }}
-    permissions:
-      contents: write
-      actions: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
-      - name: Download qualified runtime artifacts
-        if: ${{ needs.bundles.result == 'success' }}
-        uses: actions/download-artifact@v4
-        with:
-          pattern: runtime-bundle-*
-          path: runtime-bundles
-          merge-multiple: true
-
-      - name: Verify complete runtime publication set
-        if: ${{ needs.bundles.result == 'success' }}
-        run: python scripts/release_check.py --tag "$RELEASE_TAG" --bundle-dir runtime-bundles
-
-      - name: Append runtime assets to existing release
-        if: ${{ needs.bundles.result == 'success' }}
-        run: |
-          python .github/ci/release_checks.py runtime-target
-          gh release upload "$RELEASE_TAG" runtime-bundles/* --repo "$GITHUB_REPOSITORY" --clobber
-
-      - name: Read back runtime assets and mark ready
-        id: ready
-        if: ${{ needs.bundles.result == 'success' }}
-        run: python .github/ci/runtime_release.py update --state ready --bundle-dir runtime-bundles
-
-      - name: Mark runtime build or publication failure
-        if: ${{ always() && steps.ready.outcome != 'success' }}
-        run: python .github/ci/runtime_release.py update --state failed

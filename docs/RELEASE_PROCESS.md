@@ -313,8 +313,9 @@ Linux/systemd 的源码安装可使用 `scripts/release_acceptance.py` 固定采
 
 ## 自动发布
 
-合并到 `main` 的版本提交如果修改了顶层 `VERSION`，`Guardrails` workflow 会先完成普通
-`main` push 的完整回归门禁；门禁成功后，下游 release job 会自动：
+合并到 `main` 的版本提交如果修改了顶层 `VERSION`，`Guardrails` workflow 会在 release plan
+确定后，为同一 SHA 启动只读运行包构建与实际迁移资格验证，并与完整回归重叠。源码发布继续等待原有
+完整回归门禁；门禁成功后，下游 release job 会自动：
 
 - 读取 `VERSION` 生成 `v<version>` tag
 - 精确匹配对应的日期化版本段落并严格校验新分类
@@ -322,7 +323,9 @@ Linux/systemd 的源码安装可使用 `scripts/release_acceptance.py` 固定采
 - 渲染只包含目标版本的 Release Notes
 - 重新校验 release metadata / coverage，并验证最终 source archive 中的 Python Bot runtime
 - 先发布对应 GitHub Release：源码 tar.gz、`VERSION`、`om-agent-spec.json`、八个官方插件 wheels 和 `om-plugins.json/md` 可先下载，正文标明运行包 `building`
-- 核心产物发布并回读成功后，异步构建拟发布平台运行包；完成完整资格校验后追加到同一个 Release，再回读资产并更新运行包状态
+- 运行包补挂等待主门禁、源码发布调用和构建结束；完整资格与 tag/SHA 目标校验通过后追加到同一个 Release，再回读资产并更新运行包状态
+
+运行包构建失败不会阻止已通过原有门禁的源码发布；补挂步骤会跳过运行包上传并尝试标记运行包失败。源码发布尝试出现含糊失败时，保留既有目标核验和读回处理。构建只用同 run、同 SHA 的资格产物，不复用其他 revision 的回归证据。实际构建重叠与节省时长需在下一次获授权的发布中观测。
 
 源码归档使用仓库 `.gitattributes` 的 `export-ignore`，排除 `AGENTS.md`、`CLAUDE.md` 和 `.agents/` 等开发指令。升级的 Git cache archive 使用同一规则；只有包含该规则的 tag 才会在归档时排除这些文件，历史 tag 不会被追溯修改。显式 `--source` 安装对新安装目录另行执行排除，覆盖旧 tag，详见 [Install](INSTALL.md)。
 
