@@ -1,0 +1,226 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.32",
+  "base": {
+    "tag": "v4.6.31",
+    "commit": "092098a3551ff3a4cf9fc3a302efb5f6032c3c38"
+  },
+  "reviewed_head": "d26409a4becfcb5f921ef538c54c1e3f34101089",
+  "commits": [
+    {
+      "sha": "9d0be628b11ad7b6874402949d3c7fd1c0306b14",
+      "subject": "docs(release): forbid squash-merging release PRs"
+    },
+    {
+      "sha": "f0197b48951d5fdccc7917b522a86842b1a67eb8",
+      "subject": "fix(feishu): persist recovered reply receipts with delivery settlement (#1136)"
+    },
+    {
+      "sha": "7f401c54da95136225927b63cc2d6201ef006368",
+      "subject": "perf(ci): cache the dev virtualenv across guardrail jobs (#1138)"
+    },
+    {
+      "sha": "7cb0fe2d5cb0bc413c138ddf4c1b953e74d48ec0",
+      "subject": "fix(portfolio): declare account coverage in combined PnL (#1139)"
+    },
+    {
+      "sha": "8c57343b07619080b49b4fa4a87fc1c8dca749a4",
+      "subject": "fix(ledger): route SELL-side zero-price closes through lifecycle inference (#1075) (#1140)"
+    },
+    {
+      "sha": "ca68bb581e12bf2dfdf72c98341b35ddf057128b",
+      "subject": "fix(performance): preserve prev-close price identity in stock evidence (#763) (#1141)"
+    },
+    {
+      "sha": "29d66c6f4f9016fa35c4ae3fb050df9f39d8c54f",
+      "subject": "feat(candidate): split strike-bound rejects into direction reason codes (#1144)"
+    },
+    {
+      "sha": "41fcf91744a32e97482a59760aa26094152a7e28",
+      "subject": "feat(report-center): add report registry and weekly config review (#1145)"
+    },
+    {
+      "sha": "958e2a3caa38a6460d64df9e858d1404db7d832a",
+      "subject": "fix(tick): refresh put roll quote evidence at point of use (#1098) (#1146)"
+    },
+    {
+      "sha": "0844bb12ecf2cfc58cfe4ce20e08d5f2faf9ef54",
+      "subject": "feat(report): deliver weekly config review through Feishu (#1147)"
+    },
+    {
+      "sha": "472b22cc0cce35f529228237535efe5aab33afc7",
+      "subject": "fix(group-query-bot): preserve strike bounds and admit follow-ups (#1148)"
+    },
+    {
+      "sha": "d26409a4becfcb5f921ef538c54c1e3f34101089",
+      "subject": "fix(group-query-bot): inject per-turn timezone context (#1149)"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "新增报告中心，可通过 `om report list/run/history/show` 列出、运行和查看报告；提供周度配置清单周报，并支持通过飞书投递。（#1145、#1147）",
+      "commits": [
+        "41fcf91744a32e97482a59760aa26094152a7e28",
+        "0844bb12ecf2cfc58cfe4ce20e08d5f2faf9ef54"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "群查询bot 首次 @ 后支持同一发送者、群及线程内短时免 @ 续聊，默认窗口为 600 秒，可设为 0 关闭；窗口从已成功回复的用户消息接入时间计算，发送失败或结果未知不延长窗口。（#1148）",
+      "commits": [
+        "472b22cc0cce35f529228237535efe5aab33afc7"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "群查询bot 候选查询支持精确行权价 `strike`、包含端点的下限 `min_strike` 和上限 `max_strike`；精确值与范围互斥，未指定的条件沿用公共策略，后续修改条件时提供最近一次已校验查询的参数摘要。（#1148）",
+      "commits": [
+        "472b22cc0cce35f529228237535efe5aab33afc7"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "候选筛选将低于行权价下限与高于上限的拒绝分别记录方向原因码，便于排查候选未入选的原因。（#1144）",
+      "commits": [
+        "29d66c6f4f9016fa35c4ae3fb050df9f39d8c54f"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "群查询bot 每轮答复补充当前时间和配置时区上下文，使“今天”“现在”等相对时间按该轮实际时间解释。（#1149）",
+      "commits": [
+        "d26409a4becfcb5f921ef538c54c1e3f34101089"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "CI 缓存开发虚拟环境，减少检查任务重复安装依赖的耗时。（#1138）",
+      "commits": [
+        "7f401c54da95136225927b63cc2d6201ef006368"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "群查询bot 的候选答复直接展示实际生效的筛选条件，并从开仓候选的真实字段读取合约、到期日及买卖报价，修复范围查询被表述为精确行权价、报价及合约缺失的问题。（#1148）",
+      "commits": [
+        "472b22cc0cce35f529228237535efe5aab33afc7"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "put 滚仓候选在发送前刷新报价证据与可行动窗口，避免慢轮次因生成时的窗口过期而静默少发。（#1146）",
+      "commits": [
+        "958e2a3caa38a6460d64df9e858d1404db7d832a"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "SELL 侧零价平仓通过 lifecycle 推断生命周期，修复这类成交无法正确识别为平仓的问题。（#1140）",
+      "commits": [
+        "8c57343b07619080b49b4fa4a87fc1c8dca749a4"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "股票证据保留前收盘价的价格身份，避免把前收盘价误当作当前成交价格。（#1141）",
+      "commits": [
+        "ca68bb581e12bf2dfdf72c98341b35ddf057128b"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "组合盈亏声明实际覆盖的账户，避免账户数据不完整时把局部结果展示为完整汇总。（#1139）",
+      "commits": [
+        "7cb0fe2d5cb0bc413c138ddf4c1b953e74d48ec0"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "飞书回复恢复后将回执与投递结算一并持久化，避免已恢复的回复缺少回执记录。（#1136）",
+      "commits": [
+        "f0197b48951d5fdccc7917b522a86842b1a67eb8"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "9d0be628b11ad7b6874402949d3c7fd1c0306b14",
+      "reason": "Internal release runbook clarification requiring non-squash release PR merges; no product behavior or runtime configuration changes."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "9d0be628b11ad7b6874402949d3c7fd1c0306b14",
+      "references": [
+        "docs/RELEASE_PROCESS.md"
+      ]
+    },
+    {
+      "commit": "f0197b48951d5fdccc7917b522a86842b1a67eb8",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1136"
+      ]
+    },
+    {
+      "commit": "7f401c54da95136225927b63cc2d6201ef006368",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1138"
+      ]
+    },
+    {
+      "commit": "7cb0fe2d5cb0bc413c138ddf4c1b953e74d48ec0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1139"
+      ]
+    },
+    {
+      "commit": "8c57343b07619080b49b4fa4a87fc1c8dca749a4",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1140"
+      ]
+    },
+    {
+      "commit": "ca68bb581e12bf2dfdf72c98341b35ddf057128b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1141"
+      ]
+    },
+    {
+      "commit": "29d66c6f4f9016fa35c4ae3fb050df9f39d8c54f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1144"
+      ]
+    },
+    {
+      "commit": "41fcf91744a32e97482a59760aa26094152a7e28",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1145"
+      ]
+    },
+    {
+      "commit": "958e2a3caa38a6460d64df9e858d1404db7d832a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1146"
+      ]
+    },
+    {
+      "commit": "0844bb12ecf2cfc58cfe4ce20e08d5f2faf9ef54",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1147"
+      ]
+    },
+    {
+      "commit": "472b22cc0cce35f529228237535efe5aab33afc7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1148"
+      ]
+    },
+    {
+      "commit": "d26409a4becfcb5f921ef538c54c1e3f34101089",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1149"
+      ]
+    }
+  ]
+}
