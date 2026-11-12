@@ -441,21 +441,30 @@ def effective_filter_line(data: dict[str, Any]) -> str | None:
     return "筛选条件：" + "；".join(bits)
 
 
-def _candidate_facts(candidate: dict[str, Any]) -> str:
+def _candidate_facts(candidate: dict[str, Any], *, opening: bool = False) -> str:
     metrics = candidate.get("metrics")
     if not isinstance(metrics, dict):
         metrics = candidate
-    contract = candidate.get("option_contract")
-    if not isinstance(contract, dict):
-        contract = {}
-    expiration = candidate.get("expiration") or contract.get("expiration")
-    strike = candidate.get("strike") if candidate.get("strike") is not None \
-        else contract.get("strike")
+    if opening:
+        contract_symbol = candidate.get("contract")
+        expiration = candidate.get("expiry")
+        strike = candidate.get("strike")
+        evidence = candidate.get("evidence")
+        quote = evidence if isinstance(evidence, dict) else {}
+    else:
+        contract = candidate.get("option_contract")
+        if not isinstance(contract, dict):
+            contract = {}
+        contract_symbol = candidate.get("contract_symbol")
+        expiration = candidate.get("expiration") or contract.get("expiration")
+        strike = candidate.get("strike") if candidate.get("strike") is not None \
+            else contract.get("strike")
+        quote = candidate
     bits = [
-        _text(candidate.get("contract_symbol")),
+        _text(contract_symbol),
         f"到期 {_text(expiration)}",
         f"行权价 {_number(strike, 2)}",
-        f"买 {_number(candidate.get('bid'), 4)} / 卖 {_number(candidate.get('ask'), 4)}",
+        f"买 {_number(quote.get('bid'), 4)} / 卖 {_number(quote.get('ask'), 4)}",
     ]
     if _is_number(candidate.get("delta")):
         bits.append(f"Delta {_number(candidate['delta'], 3)}")
@@ -473,8 +482,8 @@ def _candidate_facts(candidate: dict[str, Any]) -> str:
     return "；".join(bits)
 
 
-def _candidate_line(index: int, candidate: dict[str, Any]) -> str:
-    return f"{index}. {_candidate_facts(candidate)}"
+def _candidate_line(index: int, candidate: dict[str, Any], *, opening: bool = False) -> str:
+    return f"{index}. {_candidate_facts(candidate, opening=opening)}"
 
 
 def _quality_lines(data: dict[str, Any]) -> list[str]:
@@ -562,7 +571,8 @@ def result_contract_error(method: str, data: dict[str, Any]) -> str | None:
     return None
 
 
-def _candidate_block(data: dict[str, Any], *, card: bool) -> list[str]:
+def _candidate_block(data: dict[str, Any], *, card: bool,
+                     opening: bool = False) -> list[str]:
     candidates = [item for item in (data.get("candidates") or [])
                   if isinstance(item, dict)]
     limit = FACT_CARD_CANDIDATES if card else FALLBACK_CANDIDATES
@@ -570,9 +580,9 @@ def _candidate_block(data: dict[str, Any], *, card: bool) -> list[str]:
     lines: list[str] = []
     for index, candidate in enumerate(shown, start=1):
         if card:
-            lines.append(f"候选 {index}：{_candidate_facts(candidate)}")
+            lines.append(f"候选 {index}：{_candidate_facts(candidate, opening=opening)}")
         else:
-            lines.append(_candidate_line(index, candidate))
+            lines.append(_candidate_line(index, candidate, opening=opening))
     omitted = data.get("omitted")
     omitted_count = (omitted if isinstance(omitted, int)
                      and not isinstance(omitted, bool) and omitted > 0 else 0)
@@ -636,7 +646,7 @@ def _candidates_card(data: dict[str, Any]) -> str:
     filter_line = effective_filter_line(data)
     if filter_line:
         lines.append(filter_line)
-    lines.extend(_candidate_block(data, card=True))
+    lines.extend(_candidate_block(data, card=True, opening=True))
     lines.extend(_reason_lines(data))
     return "\n".join(lines)
 
@@ -736,7 +746,7 @@ def render_candidates(data: dict[str, Any]) -> str:
     filter_line = effective_filter_line(data)
     if filter_line:
         lines.append(filter_line)
-    lines.extend(_candidate_block(data, card=False))
+    lines.extend(_candidate_block(data, card=False, opening=True))
     if not data.get("candidates") and outcome == "found":
         lines.append("没有符合条件的候选。")
     lines.extend(_reason_lines(data))

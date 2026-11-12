@@ -251,12 +251,13 @@ def prepare_public_query(query: dict, public_policy: dict, quote_route: dict, no
     raw_policy = {**(public_policy.get(policy_key) or {}), "max_spread_ratio": liquidity.max_spread_ratio}
     resolver = resolve_sell_put_underwriting_config if policy_key == "sell_put" else resolve_covered_call_underwriting_config
     policy = resolver(raw_policy)
-    strike = query.get("strike")
+    if "strike" in query and ("min_strike" in query or "max_strike" in query):
+        raise AgentToolError(code="INPUT_ERROR", message="strike cannot be combined with min_strike or max_strike")
+    strike = _public_number(query["strike"], name="strike") if "strike" in query else None
     if strike is not None:
-        policy = replace(policy, min_strike=_public_number(strike, name="strike"),
-                         max_strike=_public_number(strike, name="strike"))
+        policy = replace(policy, min_strike=strike, max_strike=strike)
     for name in ("min_strike", "max_strike"):
-        if query.get(name) is not None:
+        if name in query:
             policy = replace(policy, **{name: _public_number(query[name], name=name)})
     dte = _public_range(query.get("dte"), name="dte", low=1, high=365)
     if dte is not None:
@@ -283,7 +284,7 @@ def prepare_public_query(query: dict, public_policy: dict, quote_route: dict, no
         raise AgentToolError(code="INPUT_ERROR", message="limit must be an integer within 1..50")
     provider = provider_by_name(quote_route["market_data_provider"])
     filters = {
-        "strike": query.get("strike"), "min_strike": policy.min_strike, "max_strike": policy.max_strike,
+        "strike": strike, "min_strike": policy.min_strike, "max_strike": policy.max_strike,
         "dte": [policy.min_dte, policy.max_dte],
         "strike_source": "request" if any(query.get(k) is not None for k in ("strike", "min_strike", "max_strike")) else "public_policy",
         "dte_source": "request" if dte is not None else "public_policy",

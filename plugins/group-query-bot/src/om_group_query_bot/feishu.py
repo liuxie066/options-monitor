@@ -25,6 +25,7 @@ class VerifiedGroupEvent:
     thread_id: str | None
     message_id: str
     event_id: str | None
+    bot_mentioned: bool = True
 
     def scope_sha256(self, instance_id: str) -> str:
         fields = [instance_id, self.app_id, self.tenant_key, self.chat_id,
@@ -42,7 +43,8 @@ def _text(value: object) -> str | None:
 
 def normalize_sdk_event(payload: object, expected_app_id: str,
                         expected_bot_open_id: str,
-                        allowed_chat_ids: tuple[str, ...]) -> VerifiedGroupEvent:
+                        allowed_chat_ids: tuple[str, ...], *,
+                        require_mention: bool = True) -> VerifiedGroupEvent:
     """Call only behind the app-authenticated long-connection SDK callback."""
     body = _mapping(payload)
     header = _mapping(body.get("header"))
@@ -70,14 +72,21 @@ def normalize_sdk_event(payload: object, expected_app_id: str,
     if thread not in (None, "") and not _text(thread):
         raise EventRejected("invalid_thread")
     mentions = message.get("mentions")
-    if not expected_bot_open_id or not isinstance(mentions, list) or not any(
+    if mentions is None:
+        mentions = []
+    if not expected_bot_open_id or not isinstance(mentions, list):
+        raise EventRejected("not_mentioned")
+    bot_mentioned = any(
         _mapping(_mapping(mention).get("id")).get("open_id") == expected_bot_open_id
         for mention in mentions
-    ):
+    )
+    # A message directed at someone else is never an implicit follow-up.
+    if not bot_mentioned and (require_mention or mentions):
         raise EventRejected("not_mentioned")
     return VerifiedGroupEvent(expected_app_id, tenant, sender_open_id,
                               _text(sender.get("tenant_key")), chat_id,
-                              thread or None, message_id, _text(header.get("event_id")))
+                              thread or None, message_id, _text(header.get("event_id")),
+                              bot_mentioned=bot_mentioned)
 
 
 def resolve_bot_identity(settings: PreflightSettings, secret: str,

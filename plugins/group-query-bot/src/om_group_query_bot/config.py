@@ -290,6 +290,7 @@ class BotSettings:
     context_turns: int = 10
     context_tokens: int = 4000
     api_timeout_seconds: int = 30
+    followup_window_seconds: int = 600
 
 
 def _loopback_base_url(value: object) -> str:
@@ -345,6 +346,7 @@ def load_bot_settings(path: str | Path) -> BotSettings:
         "user_per_minute", "group_per_minute", "user_concurrency", "bot_concurrency",
         "turn_seconds", "model_calls", "api_calls", "output_tokens", "reserve_tokens",
         "context_turns", "context_tokens", "api_timeout_seconds",
+        "followup_window_seconds",
     })
     if unknown_limits:
         raise ValueError("bot limits contain unsupported fields: " + ", ".join(unknown_limits))
@@ -377,4 +379,6 @@ def load_bot_settings(path: str | Path) -> BotSettings:
                                   "limits.context_tokens", low=1000, high=8000),
         api_timeout_seconds=_int_range(limits.get("api_timeout_seconds", 30),
                                        "limits.api_timeout_seconds", low=1, high=60),
+        followup_window_seconds=_int_range(limits.get("followup_window_seconds", 600),
+                                          "limits.followup_window_seconds", low=0, high=3600),
     )

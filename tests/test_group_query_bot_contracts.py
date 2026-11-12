@@ -66,6 +66,47 @@ def _reject(method, body):
     return caught.value
 
 
+@pytest.mark.parametrize("strategy", ["short_put", "short_call"])
+@pytest.mark.parametrize("bounds", [
+    {}, {"strike": 180}, {"min_strike": 170}, {"max_strike": 190.5},
+    {"min_strike": 170, "max_strike": 190.5},
+    {"min_strike": 180, "max_strike": 180},
+])
+def test_candidates_normalize_exact_or_inclusive_strike_bounds(strategy, bounds):
+    request = normalize_request(
+        "query_candidates", _body({"symbol": "US.NVDA", "strategy": strategy, **bounds}),
+        now=NOW,
+    )
+    assert request.parameters == {
+        "symbol": "NVDA", "strategy": strategy, "limit": 10,
+        **{name: float(value) for name, value in bounds.items()},
+    }
+    assert all(type(request.parameters[name]) is float for name in bounds)
+
+
+@pytest.mark.parametrize("field", ["strike", "min_strike", "max_strike"])
+@pytest.mark.parametrize("value", [
+    None, True, False, "180", 0, -1, math.nan, math.inf, -math.inf, [], {},
+])
+def test_candidates_reject_non_positive_finite_json_strike_numbers(field, value):
+    _reject("query_candidates", _body({
+        "symbol": "NVDA", "strategy": "short_put", field: value,
+    }))
+
+
+@pytest.mark.parametrize("bounds", [
+    {"strike": 180, "min_strike": 180},
+    {"strike": 180, "max_strike": 180},
+    {"strike": 180, "min_strike": 170, "max_strike": 190},
+    {"strike": 180, "min_strike": 180, "max_strike": 180},
+    {"min_strike": 190, "max_strike": 170},
+])
+def test_candidates_reject_mixed_exact_and_range_or_reversed_strikes(bounds):
+    _reject("query_candidates", _body({
+        "symbol": "NVDA", "strategy": "short_put", **bounds,
+    }))
+
+
 def test_routes_are_frozen_to_five_methods():
     assert ROUTES == {
         "query_quotes": ("/quotes", "market:read"),
