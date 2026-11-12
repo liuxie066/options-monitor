@@ -32,8 +32,8 @@ def test_scope_copies_results_binds_identity_and_refreshes_next_request(tmp_path
     scope = repo.DailyBriefReadScope(**args)
     assert repo.read_daily_decision_brief_delivery_state(**args, read_scope=scope)['reason'] == 'not_found'
     _prepare_fixed(tmp_path, _persist(tmp_path))
-    # One observation is stable, even a previously missing one. A new request sees the write.
-    assert repo.read_daily_decision_brief_delivery_state(**args, read_scope=scope)['reason'] == 'not_found'
+    # Reuse never hides a write, including a transition from missing to present.
+    assert repo.read_daily_decision_brief_delivery_state(**args, read_scope=scope)['reason'] == 'ok'
     fresh = repo.DailyBriefReadScope(**args)
     result = repo.read_daily_decision_brief_delivery_state(**args, read_scope=fresh)
     expected = deepcopy(result)
@@ -92,7 +92,7 @@ def test_scoped_exposures_keep_broken_source_unavailable(tmp_path, damage):
     assert actual['complete'] is False
 
 
-def test_exposure_uses_one_revision_read_after_delivery_observation(tmp_path, monkeypatch):
+def test_exposure_reobserves_source_without_repeating_delivery_normalization(tmp_path, monkeypatch):
     _prepare_fixed(tmp_path, _persist(tmp_path))
     args = dict(base=tmp_path, account='lx', market='US')
     scope = repo.DailyBriefReadScope(**args)
@@ -103,8 +103,18 @@ def test_exposure_uses_one_revision_read_after_delivery_observation(tmp_path, mo
         reads.append(kwargs["revision"])
         return original(**kwargs)
     monkeypatch.setattr(repo, "_history_raw", counted)
+    validations = []
+    normalizer = repo._normalize_delivery_state
+
+    def normalized(*a, **kw):
+        validations.append(1)
+        return normalizer(*a, **kw)
+
+    monkeypatch.setattr(repo, "_normalize_delivery_state", normalized)
     repo.read_combo_candidate_exposures(**args, market_trading_date=MARKET_DATE, read_scope=scope)
-    assert reads == [0]
+    # One fresh dependency observation, then the exposure owner's own source read.
+    assert reads == [0, 0]
+    assert validations == []
 
 
 def test_modern_digest_skips_identical_legacy_hash_but_keeps_legacy_fields(monkeypatch):

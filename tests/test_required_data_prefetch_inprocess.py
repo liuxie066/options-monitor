@@ -1774,7 +1774,7 @@ def test_inprocess_multi_spec_executes_each_exact_request_and_finalizes_once(
     assert warmup["fetched_shards"] == 5
     assert warmup["option_contract_snapshot_requested_codes"] == 0
     assert len(gateway.chain_calls) == 5
-    assert all(call.get("option_type") == "PUT" for call in gateway.chain_calls)
+    assert all(call.get("option_type") is None for call in gateway.chain_calls)
     assert gateway.snapshot_calls == []
 
     matching_cfg = mod.build_cross_account_prefetch_config(
@@ -1828,13 +1828,8 @@ def test_inprocess_multi_spec_executes_each_exact_request_and_finalizes_once(
     ]
     assert all(call["fetch_spot_if_missing"] is False for call in fetch_calls)
     assert all(call["gateway"] is gateway for call in fetch_calls)
-    assert len(gateway.chain_calls) == 9
-    assert [call.get("option_type") for call in gateway.chain_calls[5:]] == [
-        None,
-        None,
-        None,
-        None,
-    ]
+    assert len(gateway.chain_calls) == 5
+    assert all(call.get("option_type") is None for call in gateway.chain_calls)
     assert len(gateway.snapshot_calls) == 2
     assert sum(len(codes) for codes in gateway.snapshot_calls) == 9
     assert len(merge_calls) == 1
@@ -3307,7 +3302,7 @@ def test_opening_chain_warmup_supervisor_collects_normal_child_final(
     receive.poll.side_effect = lambda *_args: bool(messages)
     receive.recv.side_effect = lambda: messages.pop(0)
     process = Mock()
-    process.is_alive.side_effect = [True, False, False]
+    process.is_alive.side_effect = lambda: bool(messages)
     context = SimpleNamespace(
         Pipe=Mock(return_value=(receive, Mock())),
         Process=Mock(return_value=process),
@@ -3351,7 +3346,7 @@ def test_opening_chain_warmup_supervisor_accounts_for_child_crash(
     receive.poll.side_effect = lambda *_args: bool(messages)
     receive.recv.side_effect = lambda: messages.pop(0)
     process = Mock()
-    process.is_alive.side_effect = [True, False, False]
+    process.is_alive.side_effect = lambda: bool(messages)
     context = SimpleNamespace(
         Pipe=Mock(return_value=(receive, Mock())),
         Process=Mock(return_value=process),

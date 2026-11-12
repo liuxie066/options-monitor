@@ -49,6 +49,7 @@ from src.application.daily_decision_brief_renderer import (
 )
 from src.application.daily_decision_brief_repository import (
     DailyBriefReadScope,
+    daily_brief_delivery_validation_scope,
     begin_daily_decision_brief_recovery_attempt,
     bind_daily_decision_brief_recovery_report,
     classify_retryable_daily_decision_brief_payload,
@@ -622,6 +623,7 @@ def _deliver_daily_brief_fanouts(request, preparation, complete_tick):
     return int(rc)
 
 
+@daily_brief_delivery_validation_scope()
 def run_tick_notification_flow(request: TickNotificationRequest) -> int:
     process_root = (request.repo_root or request.base).resolve()
     _validate_scheduled_scan_targets(request)

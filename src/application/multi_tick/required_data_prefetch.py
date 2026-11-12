@@ -1739,8 +1739,11 @@ def _warm_required_data_chain_cache_inprocess(
                         expirations=[expiration],
                         host=request.host,
                         port=request.port,
-                        option_types=request.option_types,
-                        strike_windows=request.side_strike_windows,
+                        # The broad day shard is reusable by both merged and
+                        # single-side formal requests. Warming a put-only key
+                        # would be repeated when holdings add a call side.
+                        option_types="put,call",
+                        strike_windows={},
                         base_dir=base,
                         asof_date=request.trading_date,
                         freshness_policy="cache_first",
@@ -1912,24 +1915,41 @@ def warm_required_data_chain_cache(
         )
 
     child_survived_kill = False
+    pipe_closed = False
+
+    def receive_summary() -> None:
+        nonlocal summary, final_received, pipe_closed
+        try:
+            envelope = recv_conn.recv()
+        except (EOFError, OSError):
+            pipe_closed = True
+            return
+        if isinstance(envelope, dict) and isinstance(envelope.get("summary"), dict):
+            summary = dict(envelope["summary"])
+            final_received = bool(envelope.get("final"))
+
     try:
-        while process.is_alive():
+        while process.is_alive() and not final_received and not pipe_closed:
             remaining = stop_monotonic - time.monotonic()
             if remaining <= 0:
                 break
             if recv_conn.poll(min(0.2, remaining)):
-                envelope = recv_conn.recv()
-                if isinstance(envelope, dict) and isinstance(envelope.get("summary"), dict):
-                    summary = dict(envelope["summary"])
-                    final_received = bool(envelope.get("final"))
-        while recv_conn.poll():
-            envelope = recv_conn.recv()
-            if isinstance(envelope, dict) and isinstance(envelope.get("summary"), dict):
-                summary = dict(envelope["summary"])
-                final_received = bool(envelope.get("final"))
-    except (EOFError, OSError):
-        pass
+                receive_summary()
+        while not final_received and not pipe_closed and recv_conn.poll():
+            receive_summary()
+    except OSError:
+        pipe_closed = True
     finally:
+        # Final is sent after gateway cleanup and release of the prefetch lock.
+        # EOF can precede process exit; neither it nor lingering SDK threads is
+        # evidence that the worker exceeded its fetch deadline.
+        deadline_reached = (
+            not final_received
+            and not pipe_closed
+            and time.monotonic() >= stop_monotonic
+        )
+        if final_received or pipe_closed or not process.is_alive():
+            process.join(timeout=0.2)
         if process.is_alive():
             process.terminate()
             process.join(timeout=2.0)
@@ -1938,21 +1958,15 @@ def warm_required_data_chain_cache(
                 process.join(timeout=2.0)
                 child_survived_kill = process.is_alive()
             summary["child_terminated"] = True
-            summary["status"] = "deadline_reached"
-            summary["deadline_skipped_shards"] += unfinished_shard_count()
+        if not final_received:
+            summary["status"] = "deadline_reached" if deadline_reached else "degraded"
+            count_key = "deadline_skipped_shards" if deadline_reached else "failed_shards"
+            summary[count_key] += unfinished_shard_count()
+            reason = "worker_deadline_reached" if deadline_reached else "child_failed"
             reasons = list(summary.get("reason_codes") or [])
-            if "worker_deadline_reached" not in reasons:
-                reasons.append("worker_deadline_reached")
+            if reason not in reasons:
+                reasons.append(reason)
             summary["reason_codes"] = reasons[:8]
-        else:
-            process.join(timeout=0.2)
-            if not final_received:
-                summary["status"] = "degraded"
-                summary["failed_shards"] += unfinished_shard_count()
-                reasons = list(summary.get("reason_codes") or [])
-                if "child_failed" not in reasons:
-                    reasons.append("child_failed")
-                summary["reason_codes"] = reasons[:8]
         recv_conn.close()
     if child_survived_kill:
         raise RuntimeError("opening chain warm-up child survived kill")
