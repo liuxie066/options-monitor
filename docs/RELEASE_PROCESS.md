@@ -373,7 +373,7 @@ PR qualification 构建并校验上述资产；release reusable workflow 构建�
 
 v4.6.9 的正式 `macos-arm64` 产物在 macOS 15.8.2 arm64 完成上述搬迁与自检，回执随 Release 发布。`macos-x86_64`、`linux-x86_64` 未随该版本发布正式运行包；CI 资格任务不能代替正式资产或最低 OS 实机验收。`scripts/runtime_bundle.lock.json` 的 `release_platforms` 当前只列 `macos-arm64`，发布仍需逐次核对实际回执与资产集合。
 
-`.github/workflows/runtime-bundle.yml` 负责不发布的原生构建/搬迁及无用户 Git/Python 的安装验证。`.github/workflows/_release-reusable.yml` 的时序为 `release → bundles → publish-bundles`：`release` 不等待运行包，先发布并回读核心产物；`bundles` 再以 `release-platforms-only: true` 调用资格工作流；`publish-bundles` 下载同次产物，完整校验后通过 `gh release upload` 追加到已有 Release。补挂只查找原 tag 对应的 Release，不创建第二个 Release、不重打 tag，也不改变锁文件中的 `release_platforms`（当前仍只有 `macos-arm64`）。
+`.github/workflows/runtime-bundle.yml` 负责不发布的原生构建/搬迁及无用户 Git/Python 的安装验证。`.github/workflows/guardrails.yml` 在 `plan` 后以 `release-platforms-only: true` 调用 `bundles`，让同次 run、同 SHA 的资格构建与回归并行；源码 `release` 仍只等待原有 `guardrails`，并由 `_release-reusable.yml` 发布和回读核心产物。父工作流的 `publish-bundles` 等待 `guardrails`、`release`、`bundles`；源码发布（含核心产物回读）和资格构建都成功后，才下载同次产物、完整校验并通过 `gh release upload` 追加到已有 Release，再回读并标记 `ready`。失败仍进入收尾。补挂只查找原 tag 对应的 Release，不创建第二个 Release、不重打 tag，也不改变锁文件中的 `release_platforms`（当前仍只有 `macos-arm64`）。
 
 #### 观察运行包状态与重试
 
@@ -382,7 +382,7 @@ Release 正文的 **Runtime bundles** 区段由 `.github/ci/runtime_release.py` 
 | 状态 | 含义与可见资产 |
 |---|---|
 | `building` | 核心产物已发布；运行包仍在排队、构建、资格校验或补挂，尚未确认就绪。此时缺包不表示该版本取消提供运行包，也不能据此宣称运行包校验通过。 |
-| `ready` | 全部拟发布平台的归档、`.sha256`、`.manifest.json`、`.qualification.json` 已通过完整本地校验，远端逐文件大小和 SHA-256 回读一致；正文提供相应下载链接。 |
+| `ready` | 源码发布和核心产物回读成功；全部拟发布平台的归档、`.sha256`、`.manifest.json`、`.qualification.json` 已通过完整本地校验，远端逐文件大小和 SHA-256 回读一致；正文提供相应下载链接。 |
 | `failed` | 构建、资格校验、上传或回读失败（包括资格任务取消）；核心产物仍保留，但本次未确认运行包就绪。可能有部分资产，不能仅凭归档文件存在就判断成功。 |
 
 `publish-bundles` 在资格任务失败或取消后仍尝试更新 `failed`；上传或回读失败也不能写成 `ready`。核心发布 action 已尝试但上传失败时，收尾同样查找绑定原 tag / commit 的公开 Release 并更新 `failed`，避免重发已有 Release 后留下假构建状态；不存在或仍为 draft 的 Release 不会被收尾任务创建或公开。如果整次 workflow 被强制终止，或 GitHub 不可用导致状态更新本身失败，正文可能仍停在 `building`；应查看所链 Actions 的实际终态，不把它当成已就绪。核心发布成功与整条发布 workflow 成功是两个阶段，后者还要求运行包补挂完成。

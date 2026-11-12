@@ -359,7 +359,8 @@ def test_runtime_appender_handles_build_failure_without_upload_and_preserves_tag
     protected = [step for step in steps if step.get('uses') == 'actions/download-artifact@v4'
                  or '--bundle-dir runtime-bundles' in step.get('run', '') or 'gh release upload' in step.get('run', '')]
     assert len(protected) == 4
-    assert all(step['if'] == "${{ needs.bundles.result == 'success' }}" for step in protected)
+    assert all(step['if'] == "${{ needs.release.result == 'success' && needs.bundles.result == 'success' }}"
+               for step in protected)
     assert "always() && steps.ready.outcome != 'success'" in steps[-1]['if']
     assert '--state failed' in steps[-1]['run']
     assert 'inputs.tag' not in str(append)

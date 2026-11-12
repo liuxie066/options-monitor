@@ -353,7 +353,7 @@ jobs:
           python-version: "3.12"
 
       - name: Download qualified runtime artifacts
-        if: ${{ needs.bundles.result == 'success' }}
+        if: ${{ needs.release.result == 'success' && needs.bundles.result == 'success' }}
         uses: actions/download-artifact@v4
         with:
           pattern: runtime-bundle-*
@@ -361,18 +361,18 @@ jobs:
           merge-multiple: true
 
       - name: Verify complete runtime publication set
-        if: ${{ needs.bundles.result == 'success' }}
+        if: ${{ needs.release.result == 'success' && needs.bundles.result == 'success' }}
         run: python scripts/release_check.py --tag "$RELEASE_TAG" --bundle-dir runtime-bundles
 
       - name: Append runtime assets to existing release
-        if: ${{ needs.bundles.result == 'success' }}
+        if: ${{ needs.release.result == 'success' && needs.bundles.result == 'success' }}
         run: |
           python .github/ci/release_checks.py runtime-target
           gh release upload "$RELEASE_TAG" runtime-bundles/* --repo "$GITHUB_REPOSITORY" --clobber
 
       - name: Read back runtime assets and mark ready
         id: ready
-        if: ${{ needs.bundles.result == 'success' }}
+        if: ${{ needs.release.result == 'success' && needs.bundles.result == 'success' }}
         run: python .github/ci/runtime_release.py update --state ready --bundle-dir runtime-bundles
 
       - name: Mark runtime build or publication failure
