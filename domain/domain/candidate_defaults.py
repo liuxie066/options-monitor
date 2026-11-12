@@ -7,7 +7,7 @@ from typing import Any
 
 DEFAULT_MAX_ABS_DELTA = 0.40
 DEFAULT_SELL_PUT_MAX_ABS_DELTA = 0.30
-DEFAULT_SELL_CALL_MAX_ABS_DELTA = 0.30
+DEFAULT_SELL_CALL_MAX_ABS_DELTA = 0.40
 
 
 def default_max_abs_delta(mode: str) -> float:

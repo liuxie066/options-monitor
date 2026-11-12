@@ -198,11 +198,11 @@ sell_limit = ceil(raw_mid / price_tick) * price_tick
 
 ### 3.5 普通 CSP/CC delta 上限
 
-CSP（Put）与 CC（Call）默认均为 `max_abs_delta = 0.30`；旧配置省略此字段也按方向启用默认。symbol 显式配置优先，例如 Put 的 `max_abs_delta = 0.38` 仍使用 `0.38`。显式 `null` 仅关闭本门槛，数字覆盖必须在 `[0,1]` 内且有限，拒绝布尔和字符串。只过滤 `abs(delta) > max_abs_delta`，等于保留；以原始精度判断，不能使用显示舍入值，也不把 `35` 猜成 `0.35`。真实零可以通过本门槛，仍须满足收益、期限、流动性等其他规则。
+CSP（Put）默认 `max_abs_delta = 0.30`，CC（Call）默认 `max_abs_delta = 0.40`；旧配置省略此字段也按方向启用默认。symbol 显式配置优先，例如 Put 的 `max_abs_delta = 0.38` 仍使用 `0.38`。显式 `null` 仅关闭本门槛，数字覆盖必须在 `[0,1]` 内且有限，拒绝布尔和字符串。只过滤 `abs(delta) > max_abs_delta`，等于保留；以原始精度判断，不能使用显示舍入值，也不把 `35` 猜成 `0.35`。真实零可以通过本门槛，仍须满足收益、期限、流动性等其他规则。
 
 启用时，delta 必须来自同一身份匹配的 OpenD snapshot 的 `option_delta`，`delta_source=opend_market_snapshot.option_delta`、`delta_unit=fraction`。使用真实 `snapshot_received_at_utc` 对冻结 `decision_now_utc` 验证 0–300 秒的接收新鲜度。该证据只证明近期获取；提供方未暴露独立 Greek 计算时间，不能宣称计算时间已验证。缺失、陈旧、非有限、错误符号、单位或来源异常均拒绝并保留原因，不补零、不回填历史来源。
 
-超过上限记录 `risk_delta`；不可验证记录 `risk_delta_unavailable` 及具体证据原因。旧 required-data 或快照缺少来源证据时，启用门槛会拒绝这些候选，可能整组无可用候选；不得静默放行或自动采集数据。此规则不改变 Wheel/Combo 自有策略，也不增加 delta 排序，同标的同方向仍允许跨到期日。Put/Call 的 0.30 是用户风险偏好，未经证明为收益或胜率最优值。
+超过上限记录 `risk_delta`；不可验证记录 `risk_delta_unavailable` 及具体证据原因。旧 required-data 或快照缺少来源证据时，启用门槛会拒绝这些候选，可能整组无可用候选；不得静默放行或自动采集数据。此规则不改变 Wheel/Combo 自有策略，也不增加 delta 排序，同标的同方向仍允许跨到期日。Put 的 0.30 与 Call 的 0.40 是用户风险偏好，未经证明为收益或胜率最优值。
 
 新 `csp_baseline` / `cc_baseline` 模板与策略核心版本为 `0.2.0`，effective parameters 将上限（包括显式 `null`）纳入策略身份 hash。已封存的 `0.2.0` / `strategy_identity.v2` 旧默认 `0.40` baseline 仍可校验，并按其自身封存参数评估，不按新默认回填。历史 `0.1.0` 身份仍可读取校验，但当前核心不执行旧模板，也不把旧身份重解释为新默认。离线验证需要对应版本和足够冻结证据；OB 的旧源代码锁不能直接作为本版本的一致性证明，更新由 OB 独立任务负责。
 
