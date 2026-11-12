@@ -851,12 +851,33 @@ notification token around Close Advice.
 
 - Manual compatibility content: `src/application/notify_symbols.py`
 - Scheduled delivery flow: `src/application/tick_notification_flow.py`
+- Delivery integrity and per-flow validation reuse: `src/application/daily_decision_brief_repository.py`
 - Scheduled business renderer: `src/application/daily_decision_brief_renderer.py`
 - Shared System Notice / Receipt presentation shell: `src/application/notification_shells.py`
 - Preview tool: `preview_notification`
 - Perception audit card: `bot_perception` events written by
   `src/application/tick_notification_flow.py`
 - Read tool: `notification_perception_read`
+
+Delivery validation reuse lasts for one `run_tick_notification_flow` invocation.
+Every read still reads the delivery JSON and referenced authoritative SQLite
+sources, including reads under writer locks. Only days with identical delivery
+content hashes and identical, previously validated source content hashes reuse
+their normalized result. Changed days or sources run the original integrity,
+identity and digest checks again; each consumer receives its own copy. The scope
+is isolated by runtime root, account, market and schema, and is discarded on
+success or exception. `DailyBriefReadScope` also observes external writes on each
+read. Provider attempts, confirmation, ambiguous retry and recovery keep their
+existing locking and frozen envelope rules.
+
+Reproduce the offline delivery comparison with
+`python scripts/benchmark_daily_brief_delivery.py --days 35 --repeats 3` using the
+same development interpreter on each revision. The generated fixture contains
+35 days and about 2.7 MB of valid frozen envelopes; the actual scheduled flow uses
+fake assembly and transport, asserts one confirmed send, and reports wall time,
+normalization calls, traversed days, delivery key and message hash. `--profile`
+writes optional cProfile data; compare wall times without profiling. These are
+synthetic local measurements, not production tick latency estimates.
 
 Notification text should remain Markdown-friendly and operationally direct. The
 business renderer owns the shared structured user view and channel presentation.

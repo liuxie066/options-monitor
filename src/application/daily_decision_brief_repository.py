@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -87,24 +88,109 @@ class DailyDecisionBriefStateError(RuntimeError):
     """Raised when persisted Daily Decision Brief state is unsafe to infer from."""
 
 
-class DailyBriefReadScope:
-    """One account/market delivery observation for a bounded read operation.
+class _DeliveryValidation:
+    """Reuse days only when freshly read delivery AND source content match.
 
-    Create a new scope for every operation. Never carry it across a write or
-    provider attempt; mutable delivery writers always read afresh under lock.
+    Every observation reads authoritative history again, including under writer
+    locks. File metadata is never freshness evidence. Cached results are private
+    copies; a write can only reuse unchanged days.
     """
+
+    def __init__(self) -> None:
+        self._states: dict[tuple, dict[str, tuple[str, dict, dict[tuple, str]]]] = {}
+
+    def normalize(self, raw: Any, *, base: Path, path: Path, account: str, market: str) -> dict[str, Any]:
+        raw_days = _delivery_raw_days(raw, path=path, account=account, market=market)
+        identity = (str(base.resolve()), str(path.resolve()), account, market, raw["schema_version"])
+        # Legacy date aliases and nonfinite render metadata are accepted by
+        # the existing persistence contract. Keep their full validation path;
+        # normalized aliases must never borrow a canonical day's content hash.
+        try:
+            canonical_dates = all(_normalize_market_date(day) == day for day in raw_days)
+        except ValueError:
+            canonical_dates = False
+        if not canonical_dates:
+            self._states.pop(identity, None)
+            return _normalize_delivery_state(raw, base=base, path=path, account=account, market=market)
+        previous = self._states.get(identity, {})
+        observed_sources: dict[tuple, str | None] = {}
+        changed: dict[str, Any] = {}
+        current: dict[str, tuple[str, dict, dict[tuple, str]]] = {}
+        for market_date, raw_day in raw_days.items():
+            try:
+                day_hash = content_hash(raw_day)
+            except (TypeError, ValueError):
+                self._states.pop(identity, None)
+                return _normalize_delivery_state(raw, base=base, path=path, account=account, market=market)
+            cached = previous.get(market_date)
+            reusable = cached is not None and cached[0] == day_hash
+            if reusable:
+                for key, digest in cached[2].items():
+                    if key not in observed_sources:
+                        _, _, _, source_date, revision, _ = key
+                        source = _history_raw(
+                            base=base, account=account, market=market,
+                            market_date=source_date, revision=revision,
+                        )
+                        observed_sources[key] = content_hash(source) if isinstance(source, Mapping) else None
+                    if observed_sources[key] != digest:
+                        reusable = False
+            if reusable:
+                current[market_date] = cached
+            else:
+                changed[market_date] = raw_day
+        if changed or identity not in self._states:
+            sources: _SuccessfulRevisionSources = {}
+            normalized = _normalize_delivery_state(
+                {**raw, "days": changed}, base=base, path=path, account=account, market=market,
+                successful_sources=sources,
+            )
+            for market_date, day in normalized["days"].items():
+                dependencies = {key: content_hash(source[1]) for key, source in sources.items()
+                                if key[3] == market_date}
+                current[market_date] = (content_hash(raw_days[market_date]), deepcopy(day), dependencies)
+        self._states[identity] = current
+        return {"schema_version": raw["schema_version"], "account": account, "market": market,
+                "days": {market_date: deepcopy(cached[1]) for market_date, cached in sorted(current.items())}}
+
+
+_DELIVERY_VALIDATION: ContextVar[_DeliveryValidation | None] = ContextVar("daily_brief_delivery_validation", default=None)
+
+
+@contextmanager
+def daily_brief_delivery_validation_scope() -> Iterator[None]:
+    """One notification flow; no normalized delivery state survives this scope."""
+    validation = _DeliveryValidation()
+    token = _DELIVERY_VALIDATION.set(validation)
+    try:
+        yield
+    finally:
+        validation._states.clear()
+        _DELIVERY_VALIDATION.reset(token)
+
+
+class DailyBriefReadScope:
+    """Bound validation reuse to one operation's account/market; always read afresh."""
 
     def __init__(self, *, base: Path, account: str, market: str) -> None:
         self._identity = (Path(base).resolve(), _normalize_account(account), _normalize_market(market))
-        self._delivery: dict[str, Any] | None = None
+        self._validation = _DeliveryValidation()
 
     def delivery_state(self, *, base: Path, account: str, market: str) -> dict[str, Any]:
         identity = (Path(base).resolve(), _normalize_account(account), _normalize_market(market))
         if identity != self._identity:
             raise ValueError("daily brief read scope identity mismatch")
-        if self._delivery is None:
-            self._delivery = read_daily_decision_brief_delivery_state(base=identity[0], account=identity[1], market=identity[2])
-        return deepcopy(self._delivery)
+        token = _DELIVERY_VALIDATION.set(_DELIVERY_VALIDATION.get() or self._validation)
+        try:
+            return read_daily_decision_brief_delivery_state(base=identity[0], account=identity[1], market=identity[2])
+        finally:
+            _DELIVERY_VALIDATION.reset(token)
+
+
+def _observe_delivery_state(raw: Any, *, base: Path, path: Path, account: str, market: str) -> dict[str, Any]:
+    validation = _DELIVERY_VALIDATION.get()
+    normalize = validation.normalize if validation is not None else _normalize_delivery_state
+    return normalize(raw, base=base, path=path, account=account, market=market)
 
 
 @contextmanager
@@ -447,7 +533,7 @@ def record_daily_decision_brief_fixed_recovery(
     with _exclusive_lock(lock_path):
         delivery_raw = _read_json_strict(delivery_path)
         if delivery_raw is not _MISSING:
-            delivery = _normalize_delivery_state(
+            delivery = _observe_delivery_state(
                 delivery_raw,
                 base=base_path,
                 path=delivery_path,
@@ -847,7 +933,7 @@ def read_daily_decision_brief_delivery_state(
     if raw is _MISSING:
         return {"available": False, "reason": "not_found", "state": None, "path": path}
     try:
-        state = _normalize_delivery_state(
+        state = _observe_delivery_state(
             raw,
             base=base_path,
             path=path,
@@ -1384,7 +1470,7 @@ def expire_daily_decision_brief_delivery_day(
         raw = _read_json_strict(delivery_path)
         if raw is _MISSING:
             return {"updated": False, "reason": "not_found", "path": delivery_path}
-        state = _normalize_delivery_state(
+        state = _observe_delivery_state(
             raw,
             base=base_path,
             path=delivery_path,
@@ -1767,7 +1853,7 @@ def _load_or_create_delivery_state(
     raw = _read_json_strict(path)
     if raw is _MISSING:
         return _empty_delivery_state(account=account, market=market)
-    return _normalize_delivery_state(
+    return _observe_delivery_state(
         raw,
         base=base,
         path=path,
@@ -1928,15 +2014,7 @@ def _delivery_day(state: dict[str, Any], market_date: str) -> dict[str, Any]:
     )
 
 
-@daily_brief_phase("history_validate", operation="normalize_delivery_state")
-def _normalize_delivery_state(
-    raw: Any,
-    *,
-    base: Path,
-    path: Path,
-    account: str,
-    market: str,
-) -> dict[str, Any]:
+def _delivery_raw_days(raw: Any, *, path: Path, account: str, market: str) -> Mapping[str, Any]:
     if not isinstance(raw, Mapping):
         raise DailyDecisionBriefStateError(f"daily brief delivery state is not an object: {path}")
     if raw.get("schema_version") not in {DELIVERY_STATE_SCHEMA_VERSION, DELIVERY_STATE_V3}:
@@ -1952,9 +2030,24 @@ def _normalize_delivery_state(
     if not isinstance(raw_days, Mapping):
         raise DailyDecisionBriefStateError(f"daily brief delivery days are invalid: {path}")
 
-    # One normalization observes each immutable source key once. Independent
-    # reads and all writer/readback operations create a fresh map.
-    successful_sources: _SuccessfulRevisionSources = {}
+    return raw_days
+
+
+@daily_brief_phase("history_validate", operation="normalize_delivery_state")
+def _normalize_delivery_state(
+    raw: Any,
+    *,
+    base: Path,
+    path: Path,
+    account: str,
+    market: str,
+    successful_sources: _SuccessfulRevisionSources | None = None,
+) -> dict[str, Any]:
+    raw_days = _delivery_raw_days(raw, path=path, account=account, market=market)
+    # Each normalization observes its sources once; the caller may retain the
+    # content hashes as dependencies, but must read those sources again on reuse.
+    if successful_sources is None:
+        successful_sources = {}
     days: dict[str, Any] = {}
     for raw_date, raw_day in sorted(raw_days.items()):
         try:
@@ -2396,7 +2489,7 @@ def _locked_delivery_envelope(
         raw = _read_json_strict(delivery_path)
         if raw is _MISSING:
             raise DailyDecisionBriefStateError(f"daily brief delivery state is missing: {delivery_path}")
-        state = _normalize_delivery_state(
+        state = _observe_delivery_state(
             raw,
             base=base_path,
             path=delivery_path,

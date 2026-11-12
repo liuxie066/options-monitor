@@ -527,8 +527,39 @@ planning reason or failed shard keeps the summary `degraded`; later successful
 symbols must not overwrite an earlier failure with `ready`.
 
 No new summary field, state, retry, thread, process, or persistent artifact is
-needed. Shard fetch failures and the supervisor deadline retain their current
-behavior.
+needed. Warmup still derives its symbols and expiration targets from the existing
+account/config union and executable merged specs. It has no prepared holdings
+context, so it does not independently add covered-call-only targets. Each planned
+expiration warms the broad `put,call` day shard without strike filtering. The
+cache owner permits formal single-side requests to reuse this broad shard, and
+formal execution applies its own side/strike filters after reading it. This
+avoids a duplicate chain request when formal holdings add a call side to a warmed
+put target. It adds no symbols, expiration targets, contract snapshots, or chain
+calls to the warmup plan, but broad responses and cache files can contain more
+rows than a single-side response. Trading-date cache boundaries remain intact.
+
+The child sends its final summary after gateway cleanup and release of the
+prefetch lock. The supervisor distinguishes this final result from process exit:
+EOF can arrive before the process exits, and provider threads can outlive the
+finished worker. It reaps the child, terminating it if necessary, while preserving
+the final status and shard counts. Only an unfinished worker reaching its
+existing deadline is classified as `deadline_reached`; EOF without a final result
+is `degraded` with `child_failed`. Previously completed shards remain counted.
+The existing wait, terminate, and kill budgets are unchanged.
+
+`python -m scripts.benchmark_opening_chain_warmup` compares initially cold HK and
+US cases using the same real formal plans, absolute modeled opening time, disk
+cache and file rate limits. Provider transport and elapsed waiting are simulated;
+these seconds describe the required-data portion, not production or full-Tick
+timings. Totals count provider data calls (chain, expiration, snapshot and
+market-state); real SDK readiness probes and connection/shutdown costs are not
+modeled, and fixture connections use a synthetic 0.1-second cost. Count both
+phases: extra underlier snapshot/market-state setup calls and larger broad-chain
+payloads are costs even when the total chain-call budget is unchanged. The shared
+provider trace must contain zero forbidden network attempts, including attempts
+whose raised error is caught by application code. Regression coverage lives in
+`tests/test_opening_chain_warmup.py`, including formal output equality, side/strike
+filtering, date rollover, final/EOF handling, and lingering-thread cleanup.
 
 #### 2. Batch run-scoped underlier observations by physical binding
 
