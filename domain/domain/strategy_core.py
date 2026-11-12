@@ -6,12 +6,14 @@ only rows reaching underwriting; prior-stage rejects stay with the caller.
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 import math
 from typing import Any, Callable
 
-from domain.domain.candidate_defaults import DEFAULT_SELL_CALL_WINDOW, DEFAULT_SELL_PUT_WINDOW, default_max_abs_delta
+from domain.domain.candidate_defaults import (
+    DEFAULT_MAX_ABS_DELTA, DEFAULT_SELL_CALL_WINDOW, DEFAULT_SELL_PUT_WINDOW, default_max_abs_delta,
+)
 from domain.domain.currency_conversion import (
     CurrencyConverter, ExchangeRates, covered_notional_cny, enrich_short_vol_contract_cny_fields,
 )
@@ -199,7 +201,16 @@ def validate_strategy_identity(
     except (KeyError, TypeError) as exc:
         raise ValueError("invalid strategy policy identity") from exc
     if identity.get("identity_format"):
-        if {key: identity[key] for key in strategy.identity} != strategy.identity:
+        expected = strategy.identity
+        # Older v2 baselines sealed 0.40. Accept that provenance label only
+        # when delta is the sole difference from today's baseline parameters.
+        if identity["policy_kind"] == "baseline" and strategy.config.max_abs_delta == DEFAULT_MAX_ABS_DELTA:
+            current_defaults = replace(strategy, config=replace(
+                strategy.config, max_abs_delta=default_max_abs_delta(mode),
+            ))
+            if current_defaults.identity["policy_kind"] == "baseline":
+                expected["policy_kind"] = "baseline"
+        if {key: identity[key] for key in expected} != expected:
             raise ValueError("strategy identity does not match effective policy")
     else:
         legacy = strategy.identity
