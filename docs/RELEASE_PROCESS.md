@@ -36,6 +36,31 @@
 发布说明以人工确认的 `Unreleased` 为语义真源，不从 commit message 自动猜测或改写。
 纯内部重构如果没有用户或运营价值，可以只保留在提交历史中。
 
+## 产品包内容边界
+
+`.gitattributes` 持有源码交付清单。正式源码资产和自动升级的 Git 缓存取包均使用
+`git archive`，因此应用同一组 `export-ignore` 规则；新增仓库顶层目录不会自动进入产品包。
+运行包构建器在原有解释器、依赖和源码白名单之外，也遵守这组导出规则。
+
+保留业务源码、八个官方插件的源码项目、运行及服务端依赖清单、约束、配置示例、服务和部署
+资源、许可、版本记录及用户文档。`docs/architecture/` 下供程序读取的资源一并保留。
+源码包的 `scripts/` 只保留 `install.sh`、`install_agent_plugin.sh`、`python_runtime.sh`、
+`auto_close_schedule.sh` 和 `release_check.py`；最后一项是源码自动升级切换前的实际校验依赖。
+运行包继续依赖自身的 manifest 和资格校验，不包含该脚本，
+插件仍通过独立 wheel 提供。
+
+测试、CI、Git hooks、开发依赖、代码巡检、审查和计划材料，以及纯开发发布工具不进入安装包。
+`release_acceptance.py`、`release_environment.py` 和 `release_preflight.sh` 留在维护仓库；
+独立升级验收按本文流程从已审查源码暂存 collector，再使用目标 release 的解释器运行。
+这组规则只控制分发，完整仓库仍供开发和 CI 使用。
+
+发布前必须从实际源码归档解包，运行 `om --help`、`om-agent spec`、目标 tag 的版本元数据
+校验及 Bot 导入检查。回归测试另用真实本地 Git 镜像和归档覆盖自动升级取包，检查依赖清单
+引用、插件项目和程序读取资源齐全；运行包测试验证导出规则与原有包清单边界共同生效。
+源码包和运行包均保留决策历史的用户指南与产品合同，逐份检查所有随包 Markdown 的本地文档
+链接；对未分发的维护文档和测试说明，保留标题与锚点，改为指向维护仓库。
+标准发布测试计划还必须选中 workflow 结构测试，覆盖发布门禁、资产清单和失败收尾。
+
 ## 版本规则
 
 - 稳定版：`MAJOR.MINOR.PATCH`
@@ -229,11 +254,14 @@ make release-preflight ARGS="--full"
 
 - 当前 Python 解释器和 git 工作区状态
 - 即将运行 full 或 focused 测试时，确认当前环境允许在 `127.0.0.1` 绑定临时监听端口
+- 即将运行 full 或 focused 测试时，核对所选 Python 实际定位的全部本地开发插件：分发版本、加载路径、全部 `.py` 的文件集合和字节必须与当前 checkout 一致
 - `VERSION` / `CHANGELOG.md` / tag metadata
 - 上一稳定 tag 到当前版本的 commit-to-release-note coverage
 - `docs/DEPENDENCY_GRAPH.md` 是否过期
 - agent plugin focused tests
-- 完整 pytest（传 `--full` 时），固定使用两个 worker、按文件分配；worker 崩溃不自动重启
+- 完整 pytest（传 `--full` 时），固定使用四个 worker、按文件分配；worker 崩溃不自动重启
+
+插件环境检查复用现有解释器选择（包括显式 `OM_PYTHON`），只读，不自动安装依赖；失败时先按已经确认的 checkout 在该解释器环境重新安装对应本地插件，再重新预检。允许本 checkout 的 editable 安装，拒绝其他 checkout 的 editable 路径，即使当时字节相同。此检查仅绑定 Python 源文件，不证明 package data。可用所选解释器单独执行 `scripts/release_environment.py`，JSON 会记录 Git HEAD、解释器、实际 package 路径和摘要。只检查 metadata/dependency graph 的现有 `--skip-focused` 路径（不传 `--full`）不会要求全部开发插件，也不会执行新环境探针。
 
 回环探针在依赖安装和 pytest 之前执行。如果 `socket.bind()` 返回
 `PermissionError: [Errno 1] Operation not permitted`，preflight 会明确停止并提示使用允许本机
@@ -285,10 +313,34 @@ VERSION="$(cat VERSION)"
 
 ---
 
+## 升级独立验收与证据收尾
+
+Linux/systemd 的源码安装可使用 `scripts/release_acceptance.py` 固定采集入口。先从已审查的 checkout 将脚本暂存到目标机器，再用目标 release 的 `.venv/bin/python -I` 执行；旧版本无需已经包含此脚本。传入稳定代码 symlink 和实际 runtime root，profile 固定读取该 runtime 下的 `service.profile.json`。此入口只读，不升级、不重启、不 reconcile，不提供 SSH 传输或凭据安装。
+
+升级前，以当时 release 的解释器建立基线；升级完成后，改用新 release 的解释器验收：
+
+```bash
+"$OLD_RELEASE/.venv/bin/python" -I "$STAGED_SCRIPT" baseline \
+  --repo-root "$STABLE_LINK" --runtime-root "$RUNTIME_ROOT" --output-dir "$BEFORE_DIR"
+
+"$NEW_RELEASE/.venv/bin/python" -I "$STAGED_SCRIPT" accept \
+  --repo-root "$STABLE_LINK" --runtime-root "$RUNTIME_ROOT" \
+  --expected-version "$VERSION" --baseline "$BEFORE_DIR/baseline.json" --output-dir "$AFTER_DIR"
+```
+
+这些变量由本次交付确定；`OLD_RELEASE` / `NEW_RELEASE` 分别为切换前后的真实 release 目录，`STABLE_LINK` 保留服务安装时的 symlink 拼写。输出目录须不存在或为空，已有证据不会被覆盖。baseline 非零时不得把它用作有效基线。
+
+采集复用目标 release 的插件清单、版本和服务健康 owner；记录 fresh health checks、pip check、当前服务属性及进程 cwd、带精确身份/结果校验的 `update verify --no-check-latest` 与只读 `service drift`、全部 installed timers、failed units，以及执行 verify 前保存的当前 upgrade status 指标。空 profile、空健康检查、坏 JSON 和缺行均不能通过。插件保留安装及 managed 选择；timer 保留基线中的 UnitFileState/ActiveState，包括故意 disabled 的已退役 timer。drift 的 warning 可保留，零 error 不授权丢失基线 timer。
+
+一次采集产生 `acceptance-evidence.json`、`acceptance-summary.json`、`upgrade-comparison.json` 与带大小/SHA-256 的 `evidence-index.json`；摘要与对比不会重跑探针。凭据字段和 URL 查询参数在写盘前脱敏，不收集 journal 或保存原始 profile/env。基线旧指标未知时保持 null，不把两个未知 hash 视为相同；当前目标指标缺失会阻止通过。结果为 `passed` / `failed` / `missing_data`，退出码分别为 0 / 1 / 2；失败优先于缺少证据。超时属于失败，取消时尽可能保留脱敏的 incomplete 证据，须使用新目录重试。
+
+首轮支持带升级基线及默认 profile 的 Linux/systemd 源码安装；launchd、完整 runtime bundle、自定义 profile 路径和首次安装仍沿用原交付验收。此工具不改变发布/升级授权，也不替代 apply 的退出结果。健康路径三分钟收尾仅为后续实际交付的观测目标，不是全局超时或已验证收益。
+
 ## 自动发布
 
-合并到 `main` 的版本提交如果修改了顶层 `VERSION`，`Guardrails` workflow 会先完成普通
-`main` push 的完整回归门禁；门禁成功后，下游 release job 会自动：
+合并到 `main` 的版本提交如果修改了顶层 `VERSION`，`Guardrails` workflow 会在 release plan
+确定后，为同一 SHA 启动只读运行包构建与实际迁移资格验证，并与完整回归重叠。源码发布继续等待原有
+完整回归门禁；门禁成功后，下游 release job 会自动：
 
 - 读取 `VERSION` 生成 `v<version>` tag
 - 精确匹配对应的日期化版本段落并严格校验新分类
@@ -296,7 +348,9 @@ VERSION="$(cat VERSION)"
 - 渲染只包含目标版本的 Release Notes
 - 重新校验 release metadata / coverage，并验证最终 source archive 中的 Python Bot runtime
 - 先发布对应 GitHub Release：源码 tar.gz、`VERSION`、`om-agent-spec.json`、八个官方插件 wheels 和 `om-plugins.json/md` 可先下载，正文标明运行包 `building`
-- 核心产物发布并回读成功后，异步构建拟发布平台运行包；完成完整资格校验后追加到同一个 Release，再回读资产并更新运行包状态
+- 运行包补挂等待主门禁、源码发布调用和构建结束；完整资格与 tag/SHA 目标校验通过后追加到同一个 Release，再回读资产并更新运行包状态
+
+运行包构建失败不会阻止已通过原有门禁的源码发布；补挂步骤会跳过运行包上传并尝试标记运行包失败。源码发布尝试出现含糊失败时，保留既有目标核验和读回处理。构建只用同 run、同 SHA 的资格产物，不复用其他 revision 的回归证据。实际构建重叠与节省时长需在下一次获授权的发布中观测。
 
 源码归档使用仓库 `.gitattributes` 的 `export-ignore`，排除 `AGENTS.md`、`CLAUDE.md` 和 `.agents/` 等开发指令。升级的 Git cache archive 使用同一规则；只有包含该规则的 tag 才会在归档时排除这些文件，历史 tag 不会被追溯修改。显式 `--source` 安装对新安装目录另行执行排除，覆盖旧 tag，详见 [Install](INSTALL.md)。
 
@@ -344,7 +398,7 @@ PR qualification 构建并校验上述资产；release reusable workflow 构建�
 
 v4.6.9 的正式 `macos-arm64` 产物在 macOS 15.8.2 arm64 完成上述搬迁与自检，回执随 Release 发布。`macos-x86_64`、`linux-x86_64` 未随该版本发布正式运行包；CI 资格任务不能代替正式资产或最低 OS 实机验收。`scripts/runtime_bundle.lock.json` 的 `release_platforms` 当前只列 `macos-arm64`，发布仍需逐次核对实际回执与资产集合。
 
-`.github/workflows/runtime-bundle.yml` 负责不发布的原生构建/搬迁及无用户 Git/Python 的安装验证。`.github/workflows/_release-reusable.yml` 的时序为 `release → bundles → publish-bundles`：`release` 不等待运行包，先发布并回读核心产物；`bundles` 再以 `release-platforms-only: true` 调用资格工作流；`publish-bundles` 下载同次产物，完整校验后通过 `gh release upload` 追加到已有 Release。补挂只查找原 tag 对应的 Release，不创建第二个 Release、不重打 tag，也不改变锁文件中的 `release_platforms`（当前仍只有 `macos-arm64`）。
+`.github/workflows/runtime-bundle.yml` 负责不发布的原生构建/搬迁及无用户 Git/Python 的安装验证。`.github/workflows/guardrails.yml` 在 `plan` 后以 `release-platforms-only: true` 调用 `bundles`，让同次 run、同 SHA 的资格构建与回归并行；源码 `release` 仍只等待原有 `guardrails`，并由 `_release-reusable.yml` 发布和回读核心产物。父工作流的 `publish-bundles` 等待 `guardrails`、`release`、`bundles`；源码发布（含核心产物回读）和资格构建都成功后，才下载同次产物、完整校验并通过 `gh release upload` 追加到已有 Release，再回读并标记 `ready`。失败仍进入收尾。补挂只查找原 tag 对应的 Release，不创建第二个 Release、不重打 tag，也不改变锁文件中的 `release_platforms`（当前仍只有 `macos-arm64`）。
 
 #### 观察运行包状态与重试
 
@@ -353,7 +407,7 @@ Release 正文的 **Runtime bundles** 区段由 `.github/ci/runtime_release.py` 
 | 状态 | 含义与可见资产 |
 |---|---|
 | `building` | 核心产物已发布；运行包仍在排队、构建、资格校验或补挂，尚未确认就绪。此时缺包不表示该版本取消提供运行包，也不能据此宣称运行包校验通过。 |
-| `ready` | 全部拟发布平台的归档、`.sha256`、`.manifest.json`、`.qualification.json` 已通过完整本地校验，远端逐文件大小和 SHA-256 回读一致；正文提供相应下载链接。 |
+| `ready` | 源码发布和核心产物回读成功；全部拟发布平台的归档、`.sha256`、`.manifest.json`、`.qualification.json` 已通过完整本地校验，远端逐文件大小和 SHA-256 回读一致；正文提供相应下载链接。 |
 | `failed` | 构建、资格校验、上传或回读失败（包括资格任务取消）；核心产物仍保留，但本次未确认运行包就绪。可能有部分资产，不能仅凭归档文件存在就判断成功。 |
 
 `publish-bundles` 在资格任务失败或取消后仍尝试更新 `failed`；上传或回读失败也不能写成 `ready`。核心发布 action 已尝试但上传失败时，收尾同样查找绑定原 tag / commit 的公开 Release 并更新 `failed`，避免重发已有 Release 后留下假构建状态；不存在或仍为 draft 的 Release 不会被收尾任务创建或公开。如果整次 workflow 被强制终止，或 GitHub 不可用导致状态更新本身失败，正文可能仍停在 `building`；应查看所链 Actions 的实际终态，不把它当成已就绪。核心发布成功与整条发布 workflow 成功是两个阶段，后者还要求运行包补挂完成。

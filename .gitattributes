@@ -1,10 +1,64 @@
-# Repository development instructions are not part of the installed OM product.
+# Installed source payload. New repository roots require an explicit product decision.
+# Both release assets and source upgrades use git archive; runtime builds also
+# honor export-ignore, in addition to their interpreter/wheel-specific allowlist.
+/* export-ignore
+
+/om -export-ignore
+/om-agent -export-ignore
+/VERSION -export-ignore
+/LICENSE -export-ignore
+/README.md -export-ignore
+/CHANGELOG.md -export-ignore
+/CONFIGS.md -export-ignore
+/CONFIGURATION_GUIDE.md -export-ignore
+/DEPLOY.md -export-ignore
+/RUNBOOK.md -export-ignore
+/SECURITY.md -export-ignore
+/pyproject.toml -export-ignore
+/requirements.txt -export-ignore
+/constraints.txt -export-ignore
+
+/src -export-ignore
+/domain -export-ignore
+/om_strategy_core -export-ignore
+/configs -export-ignore
+/contracts -export-ignore
+/deploy -export-ignore
+/services -export-ignore
+/plugins -export-ignore
+/requirements -export-ignore
+/constraints -export-ignore
+/docs -export-ignore
+
+# Source installation and automatic upgrade dependencies only. New maintainer
+# tools remain in Git but are not implicitly installed on users' machines.
+/scripts -export-ignore
+/scripts/* export-ignore
+/scripts/install.sh -export-ignore
+/scripts/install_agent_plugin.sh -export-ignore
+/scripts/python_runtime.sh -export-ignore
+/scripts/auto_close_schedule.sh -export-ignore
+/scripts/release_check.py -export-ignore
+
+# User documentation and programmatic docs/architecture resources remain.
+/requirements/dev.txt export-ignore
+/constraints/dev.txt export-ignore
+/docs/AGENT_* export-ignore
+/docs/CODE_* export-ignore
+/docs/RELEASE_PROCESS.md export-ignore
+/docs/GUARDRAILS.md export-ignore
+/docs/DEPENDENCY_GRAPH.md export-ignore
+/docs/dependency_graph.mmd export-ignore
+/docs/reviews export-ignore
+/docs/plans export-ignore
+/docs/gateflow export-ignore
+
+# Development-only resources can also occur inside product directories.
 AGENTS.md export-ignore
 CLAUDE.md export-ignore
 .agents export-ignore
-
-# Maintainer measurements are not part of release archives.
-docs/reviews/bot-tool-definition-size-20261105.md export-ignore
-docs/reviews/bot-tool-discovery-20261105.md export-ignore
-docs/reviews/bot-tool-discovery-20261105.py export-ignore
-docs/reviews/bot-tool-discovery-20261105.json export-ignore
+.github export-ignore
+tests export-ignore
+__pycache__ export-ignore
+*.pyc export-ignore
+*.pyo export-ignore

@@ -242,9 +242,11 @@ def test_all_entrances_share_native_gate_and_only_publisher_has_actions_read():
     assert guard['jobs']['regression']['strategy']['matrix']['shard'] == list(map(str, range(8)))
     for filename, workflow in files.items():
         assert 'actions' not in workflow.get('permissions', {})
-        for job in workflow['jobs'].values():
+        for job_name, job in workflow['jobs'].items():
             if 'runs-on' in job:
-                expected = {'contents': 'write', 'actions': 'read'} if filename == '_release-reusable.yml' else {'contents': 'read'}
+                publishes = (filename, job_name) in {
+                    ('_release-reusable.yml', 'release'), ('guardrails.yml', 'publish-bundles')}
+                expected = {'contents': 'write', 'actions': 'read'} if publishes else {'contents': 'read'}
                 assert job['permissions'] == expected
             for step in job.get('steps', []):
                 if step.get('uses') == 'actions/checkout@v5':
@@ -297,15 +299,17 @@ def test_runtime_candidate_workflow_never_publishes_and_release_waits_for_qualif
     workflow = yaml.load((ROOT / '.github/workflows/runtime-bundle.yml').read_text(), Loader=yaml.BaseLoader)
     assert workflow['permissions'] == {'contents': 'read'}
     assert set(workflow['on']) == {'workflow_call', 'workflow_dispatch', 'pull_request'}
+    assert '.gitattributes' in workflow['on']['pull_request']['paths']
     text = str(workflow)
     assert 'softprops/action-gh-release' not in text and 'gh release' not in text
     assert 'release_platforms' in text and 'runtime_bundle.lock.json' in text
     assert '--require-clean' in text and 'OM_TEST_RUNTIME_BUNDLE' in text
-    release = workflows()['_release-reusable.yml']['jobs']
-    assert release['bundles']['needs'] == 'release'
+    release = workflows()['guardrails.yml']['jobs']
+    assert release['bundles']['needs'] == 'plan'
     assert release['bundles']['with']['release-platforms-only'] == 'true'
+    assert release['bundles']['permissions'] == {'contents': 'read'}
     append = release['publish-bundles']
-    assert append['needs'] == ['release', 'bundles']
+    assert append['needs'] == ['guardrails', 'release', 'bundles']
     assert "always()" in append['if'] and "outputs.published == 'success'" in append['if']
     assert "outputs.published == 'failure'" in append['if']
     steps = append['steps']
@@ -319,6 +323,49 @@ def test_runtime_candidate_workflow_never_publishes_and_release_waits_for_qualif
     assert "always() && steps.ready.outcome != 'success'" in failure['if']
     assert '--state failed' in failure['run']
     assert 'gh release create' not in str(append) and 'git tag' not in str(append)
+
+
+def test_runtime_build_overlaps_native_gate_without_gating_source_publication():
+    files = workflows()
+    jobs = files['guardrails.yml']['jobs']
+    def ancestors(name, visiting=()):
+        assert name not in visiting, f'cyclic workflow dependency: {visiting + (name,)}'
+        needs = jobs[name].get('needs', [])
+        needs = [needs] if isinstance(needs, str) else needs
+        return set(needs).union(*(ancestors(parent, visiting + (name,)) for parent in needs))
+    assert ancestors('bundles') == {'plan'}
+    assert 'bundles' not in ancestors('release')
+    assert {'guardrails', 'release', 'bundles'} <= ancestors('publish-bundles')
+    builder = jobs['bundles']
+    assert "github.event_name != 'pull_request'" in builder['if']
+    assert "needs.plan.outputs.release_tag != ''" in builder['if']
+    assert builder['uses'] == './.github/workflows/runtime-bundle.yml'
+    assert sum(job.get('uses') == './.github/workflows/runtime-bundle.yml'
+               for workflow in files.values() for job in workflow['jobs'].values()) == 1
+    assert set(files['_release-reusable.yml']['jobs']) == {'release'}
+    output = files['_release-reusable.yml']['on']['workflow_call']['outputs']['published']
+    assert output['value'] == '${{ jobs.release.outputs.published }}'
+    assert files['_release-reusable.yml']['jobs']['release']['outputs']['published'] == '${{ steps.publish.outcome }}'
+
+
+def test_runtime_appender_handles_build_failure_without_upload_and_preserves_tag_identity():
+    jobs = workflows()['guardrails.yml']['jobs']
+    append = jobs['publish-bundles']
+    assert 'needs.bundles.result' not in append['if']  # failure still updates existing release status
+    assert append['env']['RELEASE_TAG'] == '${{ needs.guardrails.outputs.release_tag }}'
+    assert append['concurrency'] == {'group': 'release-${{ github.repository }}-${{ needs.guardrails.outputs.release_tag }}',
+                                     'cancel-in-progress': 'false'}
+    assert append['permissions'] == {'contents': 'write', 'actions': 'read'}
+    steps = append['steps']
+    protected = [step for step in steps if step.get('uses') == 'actions/download-artifact@v4'
+                 or '--bundle-dir runtime-bundles' in step.get('run', '') or 'gh release upload' in step.get('run', '')]
+    assert len(protected) == 4
+    assert all(step['if'] == "${{ needs.release.result == 'success' && needs.bundles.result == 'success' }}"
+               for step in protected)
+    assert "always() && steps.ready.outcome != 'success'" in steps[-1]['if']
+    assert '--state failed' in steps[-1]['run']
+    assert 'inputs.tag' not in str(append)
+    assert jobs['release']['with']['tag'] == '${{ needs.guardrails.outputs.release_tag }}'
 
 
 def test_core_publication_is_independent_and_explicitly_defers_runtime_bundles():

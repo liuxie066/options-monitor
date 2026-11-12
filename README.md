@@ -30,7 +30,7 @@ OM 面向自己做交易决策的期权投资者，支持富途账户及长桥�
 | 期权账本 | 查询开仓、平仓、指派和行权记录；写入与修复需要预览和确认 | [账本架构](docs/LEDGER_ARCHITECTURE.md)、[修账指南](docs/OPTION_POSITIONS_REPAIR.md) |
 | 期权现金流与绩效 | 查询期间期权净现金流及开仓批次现金结果；两种口径不能相加，也不能当作包含股票盈亏的账户总回报 | [绩效说明](docs/OPTION_PERFORMANCE_DESIGN.md) |
 | 指派压力测试 | 模拟所选账户仅卖出 Put、仅卖出 Call 或全部未平仓卖出期权被指派（默认全部），查看资产、资金覆盖和潜在负债；不执行实际交易，也不修改账本 | [指派情景](docs/PORTFOLIO_ASSIGNMENT_SCENARIO_DESIGN.md) |
-| 离线研究与归档 | 收集证据、复核已有样本，支持独立名单范围、日终及附属资料持续采集和压缩交付；写入归档需显式授权 | [研究采集](docs/RESEARCH_WATCHLIST_SCOPE.md)、[Agent Handbook](docs/AGENT_WIKI.md) |
+| 离线研究与归档 | 收集证据、复核已有样本，支持独立名单范围、日终及附属资料持续采集和压缩交付；写入归档需显式授权 | [研究采集](docs/RESEARCH_WATCHLIST_SCOPE.md)、[Agent Handbook](https://github.com/liuxie066/options-monitor/blob/main/docs/AGENT_WIKI.md) |
 
 账户相关功能需要对应券商的数据与权限；行情、券商、消息渠道及可选扩展的安装选择见[插件与接入](#插件与接入)。
 
@@ -236,7 +236,7 @@ om plugins uninstall position-advice         # 预览移除；加 --confirm 才�
 |---|---|
 | 官方插件安装、SDK 依赖和版本兼容 | [官方插件指南](docs/INSTALL.md#官方可选插件) |
 | 消息渠道的安装与配置 | [安装消息渠道](docs/INSTALL.md#可选消息渠道)、[渠道配置](CONFIGS.md#消息渠道) |
-| 升级时保留插件选择与回滚 | [发布与升级流程](docs/RELEASE_PROCESS.md) |
+| 升级时保留插件选择与回滚 | [发布与升级流程（仓库文档）](https://github.com/liuxie066/options-monitor/blob/main/docs/RELEASE_PROCESS.md) |
 
 ## 日常使用
 
@@ -402,7 +402,7 @@ om bot run --text "评价一下我的持仓"
 | 想了解什么 | 文档 |
 |---|---|
 | 工具分类、输入输出与风险声明 | [工具参考](docs/TOOL_REFERENCE.md) |
-| Agent 和脚本的结构化接入约定 | [集成指南](docs/AGENT_INTEGRATION.md) |
+| Agent 和脚本的结构化接入约定 | [集成指南](https://github.com/liuxie066/options-monitor/blob/main/docs/AGENT_INTEGRATION.md) |
 | 产品范围、模块职责与调用链 | [产品架构](docs/PRODUCT_ARCHITECTURE.md)、[系统架构](docs/ARCHITECTURE.md) |
 | 共享入口与事实归属 | [共享 API 索引](docs/API_INDEX.md) |
 | 可复用策略核心与样本复核 | [策略核心与离线验收](docs/candidate_strategy.md)；设计目标不应直接当作已发布能力 |
@@ -446,10 +446,10 @@ om bot run --text "评价一下我的持仓"
 | 管理账户、策略、通知与密钥 | [配置指南](CONFIGURATION_GUIDE.md)、[配置生成规则](CONFIGS.md)、[密钥管理](docs/SECRET_STORAGE.md) |
 | 部署后台服务和确认运行目录 | [部署指南](DEPLOY.md)、[Linux / Mac 部署](docs/DEPLOY_LINUX_MAC.md) |
 | 查看状态、排错与恢复 | [运行手册](RUNBOOK.md) |
-| 了解已发布版本的升级条件与回滚边界 | [发布与升级流程](docs/RELEASE_PROCESS.md) |
+| 了解已发布版本的升级条件与回滚边界 | [发布与升级流程（仓库文档）](https://github.com/liuxie066/options-monitor/blob/main/docs/RELEASE_PROCESS.md) |
 | 查找其他主题 | [完整文档索引](docs/INDEX.md) |
 
-旧配置升级前，先阅读[开关迁移说明](CONFIGURATION_GUIDE.md#配置开关迁移)，预览迁移并核对通知意图，不要直接套用新配置覆盖旧数据。运行包及 macOS 服务升级的源码能力不等于目标平台已经验收；发布资格和实际环境验证见[发布与升级流程](docs/RELEASE_PROCESS.md)。
+旧配置升级前，先阅读[开关迁移说明](CONFIGURATION_GUIDE.md#配置开关迁移)，预览迁移并核对通知意图，不要直接套用新配置覆盖旧数据。运行包及 macOS 服务升级的源码能力不等于目标平台已经验收；发布资格和实际环境验证见[发布与升级流程（仓库文档）](https://github.com/liuxie066/options-monitor/blob/main/docs/RELEASE_PROCESS.md)。
 
 ## 风险提示
 

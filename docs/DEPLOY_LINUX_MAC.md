@@ -214,7 +214,7 @@ cd "$REPO"
 
 `--no-restart-services` 只控制长期 service restart。若升级前已为维护显式暂停 systemd timer，同时传 `--preserve-activation-state`；控制面会在 release 切换前记录既有 timer 状态，并让 inactive、disabled 或 masked timer 在升级、失败补偿和 rollback 中保持暂停。定义文件仍会更新和 `daemon-reload`，但保留的 timer 不会被 `enable --now` 或 `restart`，避免 Persistent timer 在升级过程中补跑。
 
-Drift 的 `status=warn` 可以与 `summary.ok=true` 同时成立：兼容提示和需人工审阅的自定义额外 unit 不阻断成功，自定义 unit 也不会被自动删除。真实漂移仍会失败，完整判据见 [Release Process](RELEASE_PROCESS.md)。
+Drift 的 `status=warn` 可以与 `summary.ok=true` 同时成立：兼容提示和需人工审阅的自定义额外 unit 不阻断成功，自定义 unit 也不会被自动删除。真实漂移仍会失败，完整判据见 [Release Process](https://github.com/liuxie066/options-monitor/blob/main/docs/RELEASE_PROCESS.md)。
 
 已查询的 activation/active 状态若为 `unknown`，drift 会在 `activation_unknown_units` 和 `summary.activation_unknown_count` 中报告，并返回失败。此时先按只读指导检查状态；即使同一 unit 的另一项已知为 disabled/inactive，也不会将它列入 activation 修复，其他状态完整的 unit 仍按原合同处理。自定义 unit root 未查询宿主、launchd 或缺失 unit 等未查询情况不会被补成 unknown。
 

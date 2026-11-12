@@ -35,6 +35,20 @@ def test_release_test_plan_maps_service_changes_without_retired_event_suite() ->
     assert {rule["name"] for rule in plan["matched_rules"]} >= {"service_release"}
 
 
+@pytest.mark.parametrize("path", [
+    ".gitattributes", "scripts/build_runtime_bundle.py", "tests/test_source_distribution.py",
+    ".github/workflows/_release-reusable.yml",
+])
+def test_release_test_plan_covers_product_distribution_changes(path: str) -> None:
+    from src.application.release_test_plan import build_release_test_plan
+
+    plan = build_release_test_plan(changed_files=[path], mode="standard")
+
+    assert "service_release" in {rule["name"] for rule in plan["matched_rules"]}
+    assert any("tests/test_source_distribution.py tests/test_runtime_bundle_excludes.py" in command
+               and "tests/test_release_workflow.py" in command for command in plan["commands"])
+
+
 def test_release_test_plan_maps_service_deploy_support_to_both_runtime_gates() -> None:
     from src.application.release_test_plan import build_release_test_plan
 
@@ -409,6 +423,10 @@ def test_release_workflow_verifies_extracted_archive_before_publish() -> None:
     assert 'ARCHIVE_ROOT="$(mktemp -d "${RUNNER_TEMP}/options-monitor-archive.XXXXXX")"' in verify
     assert 'tar -xzf "options-monitor-${{ inputs.tag }}.tar.gz" -C "${ARCHIVE_ROOT}"' in verify
     assert 'cd "${ARCHIVE_ROOT}"' in verify
+    assert 'export OM_PYTHON="${CHECKOUT_PYTHON}"' in verify
+    assert './om --help >/dev/null' in verify
+    assert './om-agent spec >/dev/null' in verify
+    assert '"${CHECKOUT_PYTHON}" scripts/release_check.py --tag "${{ inputs.tag }}"' in verify
     assert '"${CHECKOUT_PYTHON}" -c' in verify
     assert "import src.application.bot.runtime" in verify
     assert "--prefix agent-runtime" not in verify
@@ -439,6 +457,7 @@ def _run_release_preflight_with_fake_python(
     *args: str,
     node_version: str = "v22.19.0",
     loopback_bind_denied: bool = False,
+    environment_denied: bool = False,
     cwd: Path | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     root = Path(__file__).resolve().parents[1]
@@ -463,6 +482,9 @@ if [[ "${1:-}" == "--version" ]]; then
   exit 0
 fi
 printf '%s\\n' "$*" >> "${OM_TEST_PYTHON_LOG}"
+if [[ "${1:-}" == "scripts/release_environment.py" && "${OM_TEST_ENVIRONMENT_DENIED:-0}" == "1" ]]; then
+  exit 73
+fi
 """,
         encoding="utf-8",
     )
@@ -494,6 +516,7 @@ printf 'npm %s\\n' "$*" >> "${OM_TEST_PYTHON_LOG}"
             "OM_TEST_PYTHON_LOG": str(log_path),
             "OM_TEST_NODE_VERSION": node_version,
             "OM_TEST_LOOPBACK_BIND_DENIED": "1" if loopback_bind_denied else "0",
+            "OM_TEST_ENVIRONMENT_DENIED": "1" if environment_denied else "0",
             "PATH": f"{tmp_path}{os.pathsep}{env['PATH']}",
         }
     )
@@ -521,6 +544,28 @@ def test_release_preflight_full_mode_runs_pytest_once(tmp_path: Path) -> None:
         "-m pytest -n 4 --dist loadfile --max-worker-restart=0 -o tmp_path_retention_policy=failed"
     ]
     assert not any(command.startswith("npm ") for command in commands)
+
+
+def test_release_preflight_environment_failure_stops_before_pytest(tmp_path: Path) -> None:
+    proc, commands = _run_release_preflight_with_fake_python(tmp_path, "--full", environment_denied=True)
+    assert proc.returncode == 73
+    assert commands and commands[0].startswith("scripts/release_environment.py --repo-root ")
+    assert not any(command.startswith("-m pytest") for command in commands)
+
+
+def test_release_preflight_environment_precedes_pytest(tmp_path: Path) -> None:
+    proc, commands = _run_release_preflight_with_fake_python(tmp_path)
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    assert commands[0].startswith("scripts/release_environment.py --repo-root ")
+    assert any(command.startswith("-m pytest") for command in commands)
+
+
+def test_release_preflight_without_tests_does_not_require_plugin_environment(tmp_path: Path) -> None:
+    proc, commands = _run_release_preflight_with_fake_python(
+        tmp_path, "--skip-focused", "--skip-deps", environment_denied=True)
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    assert not any("release_environment.py" in command for command in commands)
+    assert not any(command.startswith("-m pytest") for command in commands)
 
 
 def test_release_preflight_exports_selected_python_to_nested_entrypoints() -> None:

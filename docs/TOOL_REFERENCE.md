@@ -549,7 +549,7 @@ JSON 请求必填 `account`、已有 short call 的 `lot_id`、`max_new_expirati
 4. 不把 missing / partial / stale 转成零或成功；
 5. 不根据自然语言 description 猜 schema。
 
-完整 envelope 与 launcher 合同见 [Agent Integration](AGENT_INTEGRATION.md)。
+完整 envelope 与 launcher 合同见 [Agent Integration](https://github.com/liuxie066/options-monitor/blob/main/docs/AGENT_INTEGRATION.md)。
 
 ## 权限与副作用
 

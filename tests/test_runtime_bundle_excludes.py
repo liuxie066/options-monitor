@@ -21,8 +21,6 @@ RUNTIME_SCRIPTS = {
 }
 INTERNAL_DOCS = {
     "docs/CODE_HEALTH_REVIEW.md",
-    "docs/DECISION_HISTORY.md",
-    "docs/DECISION_HISTORY_PRD.md",
     "docs/AGENT_GETTING_STARTED.md",
     "docs/AGENT_INTEGRATION.md",
     "docs/AGENT_WIKI.md",
@@ -48,7 +46,7 @@ PRODUCT_FILES = RUNTIME_SCRIPTS | {
     "src/application/example.py", "domain/example.py",
     "docs/INSTALL.md", "docs/STRATEGY_ARCHITECTURE.md",
     "docs/TOOL_REFERENCE.md", "docs/WHEEL_STRATEGY_PRD.md",
-    "docs/future_user_guide.md",
+    "docs/future_user_guide.md", "docs/DECISION_HISTORY.md", "docs/DECISION_HISTORY_PRD.md",
 }
 
 

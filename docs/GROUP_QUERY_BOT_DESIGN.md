@@ -1,6 +1,6 @@
 # 群查询bot 设计方案
 
-状态：已确认设计。按 2026-11-10 用户确认的修订顺序，S1 最小接入预检和 S2 五方法 API 已完成本地实现、离线验证与复审；S3 自然语言、会话存储和可选服务生命周期已完成本地实现并进入离线审查。真实个人群接入、模型/行情真实联调、发布和部署均未验证；真实 G2 是最终联调和实际使用的前置。入口见[插件说明](../plugins/group-query-bot/README.md)。
+状态：已确认设计。按 2026-11-10 用户确认的修订顺序，S1 最小接入预检和 S2 五方法 API 已完成本地实现、离线验证与复审；S3 自然语言、会话存储和可选服务生命周期已完成本地实现并进入离线审查。真实个人群接入、模型/行情真实联调、发布和部署均未验证；真实 G2 是最终联调和实际使用的前置。入口见[插件说明](https://github.com/liuxie066/options-monitor/blob/main/plugins/group-query-bot/README.md)。
 
 整理日期：2026-11-09。
 
@@ -869,7 +869,7 @@ bot 端另保存必要的脱敏审计和投递状态。审计按第 10.2 节保�
 - [Docs Index](INDEX.md)、[Architecture](ARCHITECTURE.md)、[API Index](API_INDEX.md)。
 - [插件安装](INSTALL.md#官方可选插件)、[Secret Storage](SECRET_STORAGE.md)。
 - [Close Advice / Position Advice 合同](CLOSE_ADVICE_CONTRACT.md)、[候选策略](candidate_strategy.md)。
-- [现有 Bot 设计](BOT_DESIGN.md)、[Tool Gateway 集成合同](AGENT_INTEGRATION.md)。
+- [现有 Bot 设计](BOT_DESIGN.md)、[Tool Gateway 集成合同](https://github.com/liuxie066/options-monitor/blob/main/docs/AGENT_INTEGRATION.md)。
 - [飞书长连接接收事件](https://open.feishu.cn/document/server-side-sdk/python--sdk/handle-events)。
 - [飞书机器人加入外部群](https://open.feishu.cn/document/develop-robots/add-bot-to-external-group?lang=zh-CN)。
 - [飞书自定义机器人说明](https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot)、[消息接收事件](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive)：应用机器人与 webhook 的能力区别，以及事件身份字段；个人群具体能力仍需目标群联调。
