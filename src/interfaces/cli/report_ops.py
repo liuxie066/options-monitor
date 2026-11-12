@@ -35,7 +35,7 @@ def add_report_commands(subparsers: argparse._SubParsersAction) -> None:
 
     listing = report_sub.add_parser("list", help="列出报告类型、频率、开关状态与上次运行")
     listing.add_argument("--runtime-root", default=None)
-    listing.add_argument("--configs-root", default=None)
+    listing.add_argument("--configs-root", default=None, help="显式使用本地 user.*.json；默认读取 runtime config")
     listing.add_argument("--json", action="store_true")
 
     run = report_sub.add_parser("run", help="手动运行一次报告")
@@ -43,8 +43,8 @@ def add_report_commands(subparsers: argparse._SubParsersAction) -> None:
     run.add_argument("--dry-run", action="store_true", help="只生成并打印，不写运行目录或历史")
     run.add_argument("--no-deliver", action="store_true", help="只生成本地报告，不投递到外部渠道")
     run.add_argument("--runtime-root", default=None)
-    run.add_argument("--configs-root", default=None)
-    run.add_argument("--prices-file", default=None, help="JSON 价格文件；默认读取 runtime daily brief")
+    run.add_argument("--configs-root", default=None, help="显式使用本地 user.*.json；默认读取 runtime config")
+    run.add_argument("--prices-file", default=None, help="显式 JSON 价格文件；默认读取 output_runs 最近成功扫描的冻结行情")
     run.add_argument("--candidate-evidence-file", default=None, help="本期候选拒绝证据投影；默认读取 runtime 封存快照")
     run.add_argument("--trigger", choices=("manual", "schedule"), default="manual", help=argparse.SUPPRESS)
     run.add_argument("--json", action="store_true")
@@ -95,7 +95,7 @@ def handle_report_command(
     raise AgentToolError(code="INPUT_ERROR", message=f"unsupported report command: {command}")
 
 
-def _handle_list(*, runtime_root: Path, configs_root: Path, as_json: bool) -> int:
+def _handle_list(*, runtime_root: Path, configs_root: Path | None, as_json: bool) -> int:
     system_config = _load_system_config(configs_root)
     report_rows: list[dict[str, Any]] = []
     for definition in REPORT_REGISTRY:
@@ -148,7 +148,7 @@ def _handle_list(*, runtime_root: Path, configs_root: Path, as_json: bool) -> in
     return 0
 
 
-def _handle_run(args: argparse.Namespace, *, runtime_root: Path, configs_root: Path) -> int:
+def _handle_run(args: argparse.Namespace, *, runtime_root: Path, configs_root: Path | None) -> int:
     definition = _definition_or_raise(args.report_id)
     prices_file = Path(args.prices_file).expanduser().resolve() if args.prices_file else None
     evidence_arg = getattr(args, "candidate_evidence_file", None)
@@ -307,14 +307,14 @@ def _definition_or_raise(report_id: str) -> ReportDefinition:
     return definition
 
 
-def _configs_root(args: argparse.Namespace, repo_root: Path) -> Path:
+def _configs_root(args: argparse.Namespace, repo_root: Path) -> Path | None:
     raw = getattr(args, "configs_root", None)
-    if raw:
-        return Path(raw).expanduser().resolve()
-    return (repo_root / "configs").resolve()
+    return Path(raw).expanduser().resolve() if raw else None
 
 
-def _load_system_config(configs_root: Path) -> dict[str, Any] | None:
+def _load_system_config(configs_root: Path | None) -> dict[str, Any] | None:
+    if configs_root is None:
+        return None
     path = configs_root / "system.json"
     if not path.is_file():
         return None

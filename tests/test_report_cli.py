@@ -142,7 +142,12 @@ def test_report_cli_run_history_show_list_and_schedule(tmp_path: Path, capsys: p
     report_ids = [item["report_id"] for item in schedule_payload["reports"]]
     assert report_ids == ["daily_brief", "close_advice", "code_health", "code_entropy", "config_review"]
     config_review = schedule_payload["reports"][-1]
-    assert config_review["entries"][0]["launchd"]["label"] == "com.options-monitor.report.config-review.weekly"
+    entry = config_review["entries"][0]
+    assert entry["trigger"] == "systemd"
+    assert entry["weekday"] == 7
+    assert (entry["hour"], entry["minute"], entry["timezone"]) == (20, 0, "Asia/Shanghai")
+    assert "options-monitor-report-config-review.timer" in entry["note"]
+    assert "launchd" not in entry
 
 
 def test_report_cli_dry_run_does_not_create_history(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

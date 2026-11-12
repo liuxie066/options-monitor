@@ -24,7 +24,7 @@ from src.application.reports.store import (
 @dataclass(frozen=True)
 class ReportRunContext:
     runtime_root: Path
-    configs_root: Path
+    configs_root: Path | None
     prices_file: Path | None
     now: datetime
     candidate_evidence_file: Path | None = None

@@ -1,9 +1,8 @@
 """Underlier price observations for reports that need a current reference price.
 
-Two sources are supported:
-
-* an explicit JSON file passed with ``--prices-file`` (tests, manual snapshots);
-* the latest daily decision briefs under ``output_accounts/*/state``.
+The default source is a committed successful scan under ``output_runs``.
+An explicit JSON ``--prices-file`` remains available for tests/manual snapshots.
+The legacy brief reader is retained as a public helper, not a default fallback.
 
 A missing price is never treated as zero.  Consumers must render it as
 unavailable and keep the boundary rows visible.
@@ -11,8 +10,10 @@ unavailable and keep the boundary rows visible.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import csv
+import io
 import json
 import math
 from pathlib import Path
@@ -20,6 +21,10 @@ from typing import Any, Iterable
 
 from domain.domain.symbol_identity import canonical_symbol
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.required_data_snapshot import (
+    FrozenRequiredDataUnavailable,
+    resolve_frozen_required_data_csv_bytes_batch,
+)
 
 
 RUNTIME_BRIEF_SOURCE = "runtime_daily_brief"
@@ -40,6 +45,9 @@ class PriceSnapshot:
     observations: dict[str, PriceObservation]
     source: str
     observed_at_utc: str | None = None
+    runs: dict[str, str] = field(default_factory=dict)
+    data_gaps: tuple[str, ...] = ()
+    diagnostics: tuple[str, ...] = ()
 
     def get(self, symbol: str) -> PriceObservation | None:
         return self.observations.get(canonical_symbol(symbol))
@@ -50,10 +58,11 @@ def resolve_price_snapshot(
     runtime_root: str | Path,
     prices_file: str | Path | None = None,
     markets: Iterable[str] = ("HK", "US"),
+    now: datetime | None = None,
 ) -> PriceSnapshot:
     if prices_file:
         return load_prices_file(prices_file)
-    return load_runtime_brief_prices(Path(runtime_root), markets=markets)
+    return load_runtime_scan_prices(runtime_root, markets=markets, now=now)
 
 
 def load_prices_file(path: str | Path) -> PriceSnapshot:
@@ -118,6 +127,114 @@ def load_prices_file(path: str | Path) -> PriceSnapshot:
             details={"path": str(source_path)},
         )
     return PriceSnapshot(observations=observations, source=f"{PRICES_FILE_SOURCE}:{source_path}", observed_at_utc=generated_at)
+
+
+def load_runtime_scan_prices(
+    runtime_root: str | Path,
+    *,
+    markets: Iterable[str] = ("HK", "US"),
+    now: datetime | None = None,
+) -> PriceSnapshot:
+    """Read one committed successful scan per market using the frozen-data owner.
+
+    Intraday receipt TTL is intentionally disabled for historical decoding; the
+    report's existing age policy still applies to each actual quote timestamp.
+    """
+    root = Path(runtime_root).expanduser().resolve()
+    generated_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    candidates: list[tuple[datetime, str, Path, dict[str, Any], dict[str, Any]]] = []
+    diagnostics: list[str] = []
+    for path in (root / "output_runs").glob("*/state/required_data_snapshot_manifest.json"):
+        run = path.parent.parent
+        try:
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+            metrics = json.loads((path.parent / "tick_metrics.json").read_text(encoding="utf-8"))
+            if not isinstance(manifest, dict) or not isinstance(metrics, dict):
+                raise ValueError("manifest and tick metrics must be objects")
+            if manifest.get("run_id") != run.name:
+                raise ValueError("manifest run identity mismatch")
+            sealed_at = _scan_timestamp(manifest.get("sealed_at_utc"))
+            if sealed_at > generated_at:
+                raise ValueError("scan seal is in the future")
+            candidates.append((sealed_at, run.name, path, manifest, metrics))
+        except (OSError, ValueError, TypeError) as exc:
+            diagnostics.append(f"{run.name}: {exc}")
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    observations: dict[str, PriceObservation] = {}
+    runs: dict[str, str] = {}
+    gaps: list[str] = []
+    for market in dict.fromkeys(str(value).upper() for value in markets):
+        skipped: list[str] = []
+        for _sealed, run_id, path, manifest, metrics in candidates:
+            market_scope = metrics.get("markets_to_run")
+            if not isinstance(market_scope, list) or market not in market_scope:
+                continue
+            accounts = metrics.get("accounts")
+            outcomes = metrics.get("scan_outcomes")
+            successful = isinstance(accounts, list) and isinstance(outcomes, dict) and any(
+                isinstance(row, dict) and row.get("ran_scan") is True
+                and outcomes.get(str(row.get("account") or "").strip().lower()) is True
+                for row in accounts
+            )
+            if manifest.get("status") != "complete" or not successful:
+                skipped.append(f"{run_id}: incomplete or unsuccessful scan")
+                continue
+            try:
+                batch = resolve_frozen_required_data_csv_bytes_batch(
+                    manifest_path=path, expected_run_id=run_id,
+                    required_data_root=path.parent.parent / "required_data",
+                    require_fresh=False,
+                )
+            except (FrozenRequiredDataUnavailable, OSError, ValueError) as exc:
+                skipped.append(f"{run_id}: {exc}")
+                continue
+            runs[market] = run_id
+            for symbol in batch.manifest["symbols"]:
+                key = canonical_symbol(symbol)
+                if ("HK" if key.endswith(".HK") else "US") != market:
+                    continue
+                try:
+                    _entry, content = batch.resolve(symbol)
+                    price, observed_at = _scan_csv_price(content, generated_at)
+                except (FrozenRequiredDataUnavailable, ValueError, csv.Error, UnicodeError) as exc:
+                    gaps.append(f"{market} {key} 扫描行情不可用（{run_id}）：{exc}")
+                    continue
+                observations[key] = PriceObservation(
+                    symbol=key, price=price, source="runtime_scan",
+                    observed_at_utc=observed_at.isoformat(), source_path=str(path),
+                )
+            if skipped:
+                gaps.append(f"{market} 最近扫描不可用，采用 {run_id}；" + "；".join(skipped[:3]))
+            break
+        if market not in runs:
+            gaps.append(f"{market} 没有可用的成功扫描行情" + ("：" + "；".join(skipped[:3]) if skipped else ""))
+    newest = max((item.observed_at_utc for item in observations.values() if item.observed_at_utc), default=None)
+    return PriceSnapshot(
+        observations=observations, source="runtime_scan", observed_at_utc=newest,
+        runs=runs, data_gaps=tuple(gaps), diagnostics=tuple(diagnostics[:10]),
+    )
+
+
+def _scan_timestamp(value: Any) -> datetime:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("quote/scan timestamp is missing")
+    parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("quote/scan timestamp must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def _scan_csv_price(content: bytes, now: datetime) -> tuple[float, datetime]:
+    quotes: set[tuple[float, datetime]] = set()
+    for row in csv.DictReader(io.StringIO(content.decode("utf-8-sig"))):
+        price = _finite_positive(row.get("spot"))
+        observed_at = _scan_timestamp(row.get("spot_observed_at_utc"))
+        if price is None or observed_at > now or row.get("underlier_observation_status") != "ready":
+            raise ValueError("invalid or unavailable underlier observation")
+        quotes.add((price, observed_at))
+    if len(quotes) != 1:
+        raise ValueError("scan must contain one consistent underlier price and quote timestamp")
+    return quotes.pop()
 
 
 def load_runtime_brief_prices(

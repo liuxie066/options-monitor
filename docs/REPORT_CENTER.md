@@ -35,7 +35,7 @@
 | `close_advice` | 平仓建议报告 | tick 触发 | 否 |
 | `code_health` | 代码健康每日巡检 | 每日 09:17（本机 launchd） | 否 |
 | `code_entropy` | 代码熵评分卡 | 每日 04:20 + 每周日 01:20（本机 launchd） | 否 |
-| `config_review` | 周度配置清单报告 | 每周一 08:00（Asia/Shanghai） | 是 |
+| `config_review` | 周度配置清单报告 | 每周日 20:00（Asia/Shanghai，远端 systemd） | 是 |
 
 ## CLI
 
@@ -47,7 +47,7 @@ om report show <report_id> <run_id> [--artifact NAME] [--json]
 om report schedule [--format text|json]
 ```
 
-- `list`：报告类型、频率、配置开关状态（从 `<configs-root>/system.json` 的 `defaults` / `markets` 读取）、上次运行与结果。未迁移报告用 `legacy_probe` 做只读探测。
+- `list`：报告类型、频率、配置开关状态、上次运行与结果。默认不读本机配置副本；显式指定 `--configs-root` 时才从该目录的 `system.json` 的 `defaults` / `markets` 读取开关。未迁移报告用 `legacy_probe` 做只读探测。
 - `run`：只对 `migrated: true` 的报告生效。`--dry-run` 只生成并打印，不创建运行目录，不写历史；`--no-deliver` 只在本地生成报告，跳过外部投递。
 - `history`：按 UTC 时间倒序读取 `<runtime_root>/reports/<report_id>/*/run.json`。
 - `show`：默认显示 markdown 产物；`--artifact report.json` 可查看结构化产物。
@@ -77,49 +77,21 @@ om report schedule [--format text|json]
 
 失败运行也会落 `run.json`，便于 `history` 复盘；生成失败不会留下半份 `report.md`。
 
-## 调度描述与 plist 模板
+## 调度描述与模板
 
-`om report schedule --format json` 是调度事实的导出面，示例字段：
+`om report schedule --format json` 导出注册表声明，不代替目标主机的真实调度状态。`config_review` 的条目为 `frequency=weekly`、`trigger=systemd`、`weekday=7`、`hour=20`、`minute=0`、`timezone=Asia/Shanghai`。ISO weekday 是 `1=Monday .. 7=Sunday`。
 
-```json
-{
-  "schema_version": "report_schedule.v1",
-  "timezone": "Asia/Shanghai",
-  "reports": [
-    {
-      "report_id": "config_review",
-      "migrated": true,
-      "entries": [
-        {
-          "frequency": "weekly",
-          "trigger": "launchd",
-          "weekday": 1,
-          "hour": 8,
-          "minute": 0,
-          "launchd": {
-            "label": "com.options-monitor.report.config-review.weekly",
-            "plist_present": false,
-            "start_calendar_interval": {"Weekday": 1, "Hour": 8, "Minute": 0}
-          },
-          "command": ["om", "report", "run", "config_review", "--trigger", "schedule"]
-        }
-      ]
-    }
-  ]
-}
-```
+周报模板位于 `deploy/systemd/options-monitor-report-config-review.service.template` 和 `deploy/systemd/options-monitor-report-config-review.timer.template`。timer 使用 `OnCalendar=Sun *-*-* 20:00:00 Asia/Shanghai`、`Persistent=true`；真实下次运行时间以目标机 `systemctl list-timers` 读回为准。持久 timer 补跑前先核对本次投递回执，避免重复手动触发。
 
-- ISO weekday：`1=Monday .. 7=Sunday`；launchd 的 `StartCalendarInterval` 输出时把周日写成 `0`。
-- `plist_present` 只检查 `~/Library/LaunchAgents/<label>.plist` 是否存在，不加载、不修改。
-- `config_review` 的模板在 `deploy/launchd/com.options-monitor.report.config-review.weekly.plist.template`。仓库不自动安装；安装需明确授权，并按下述步骤预览、备份和读回。
+其他报告继续使用原调度。旧周报 launchd 模板仅供显式本地兼容使用；生产迁移步骤见下文。`plist_present` 对仍声明 launchd 的报告只检查文件，不加载、不修改。
 
-新增报告时，注册表加一条 + 补一个 plist 模板即可；不需要重新设计调度。
+新增报告需登记注册表并补充相应调度入口与验证，不自动安装服务。
 
 ## 保留策略
 
 `output_runs` 的现有默认清理策略是 **14 天 / 200 次**（`service_cleanup.py` 的 `output_runs_keep_days` / `output_runs_keep_count`）。周报套用这个策略只能留下约 2 份，无法做跨月/跨季对比，因此报告中心使用**按报告类型声明的独立策略**：
 
-- `config_review`：`keep_count = 52`（每周一份，约一年）。
+- `config_review`：`keep_count = null`，追加保留全部周报与投递回执，不自动清理。每周一份，定期检查 `<runtime_root>/reports/config_review/` 大小；容量预算或删除策略需另行安排。
 - 未迁移报告：继续由各自现有目录/清理策略管理，报告中心不接管。
 
 本期只**声明**策略，不实现自动删除：删除属于需要单独授权的操作，且旧报告尚未迁移。后续若要执行，应在 `service_cleanup` 增加 `reports/` 类别并沿用 `run.json` 身份校验，而不是在每次 `run` 后静默删除。
@@ -144,31 +116,27 @@ om report schedule [--format text|json]
 
 任一启用边界达到建议条件，报告为“建议调整”；全部启用边界均合格且无数据缺口才是“无需调整”；其余为“观察”。停用边界展示但不驱动整体结论。阈值比较使用未四舍五入的值。
 
-## 本机周度包装入口
+## 配置与价格来源（`config_review`）
 
-`run-config-review-weekly.sh.template` 进入稳定安装源码，再执行 `run-config-review-weekly.py`。两次只读 SSH 分别传入共享候选 exporter 与 `fetch-config-review-prices.py`；后者复用 canonical symbol/Futu code owner，从远端 OpenD 取 market snapshot。每次 SSH 限 480 秒，报告限 600 秒，总预算 26 分钟。报告 core 不联网取数。
+默认读取 `<runtime_root>/config.hk.json`、`config.us.json`，经 `src/application/agent_tool_config.py::load_runtime_config` 校验 generated identity 与市场。`config.yaml` 是人工权威源，runtime JSON 是 build 后扫描实际消费的快照；报告读取后者，避免重新构建 YAML 或叠加另一份本机默认值。线上运行使用 `/var/lib/options-monitor`，不读取本机 `configs/user.*.json`。
 
-每次使用新的 `<OM_REPORT_INPUTS_ROOT>/<UTC时间>-<随机后缀>/`，保留 `prefetch.json`、本次候选投影和成功获取的价格输入。预取失败写明确原因，候选证据降级为未知；价格失败不传旧 prices 文件，回到带来源和时间戳的 runtime brief 观察，再由报告新鲜度门槛判定。旧的 `prices.current.json` 不作为成功输入。
+显式 `--configs-root PATH` 仍可审阅该目录的 `user.hk.json` / `user.us.json` 和本地 system defaults，供开发或测试；runtime 缺失/损坏不会自动切回此模式。
 
-安装操作顺序：
+默认价格来自 `output_runs/<run_id>/state/required_data_snapshot_manifest.json`：每市场按有效 `sealed_at_utc` 从新到旧选一个完整扫描；tick metrics 必须包含该市场，且至少一个 `accounts` 项 `ran_scan=true` 与同账户的 `scan_outcomes=true` 正向匹配。失败、缺少成功证据、不完整或未来清单不算成功扫描。
 
-1. 先核对本机时区与注册表 Asia/Shanghai 一致，记录配置文件及 health/entropy plist 的校验和。
-2. 将审查通过的 commit 安装到独立稳定版本目录，使用已有获外置卷读取权限的 venv Python；不能依赖临时 worktree。
-3. 渲染 shell 的 `__SOURCE_ROOT__` / `__PYTHON__`；渲染 plist 中的 `__OM_BIN__` 为该 shell，填写 runtime/config/env/log/home/inputs 及远端 host/repo/runtime 占位符。env 只引用现有文件，不写凭证值。
-4. 完整展示最终 plist，lint 后备份现有报告 job 和包装文件，只更新相同 label。调度仍为周一 08:00，不触碰其他 job。
-5. bootstrap/reload 后 kickstart **一次**；读回新 `run_id` 的三个报告产物、`run.json`、`prefetch.json` 和 launchd 退出状态，再比对受保护校验和。不要以已有报告或进程退出代替新运行证据。
+通过 `src/application/required_data_snapshot.py::resolve_frozen_required_data_csv_bytes_batch` 读取校验后的冻结 CSV/共享 blob，不依赖可能已退役的 raw/CSV 副本。行情值取 `spot`，时点取 `spot_observed_at_utc`，不使用目录 mtime、报告时间或封存时间冒充行情时间。历史解码关闭日内 receipt TTL，但仍按既有 **96 小时**报告政策判断过期；长假期间可能全部进入“观察”。缺价、无时区、未来时间和过期都不会当作 0 或新鲜价格。所选市场运行中缺失的标的不再从更老运行拼补。
 
-`prefetch.json` 的 `fetched` 仅表示获得 JSON；指标完整性仍由报告证据 owner 判断。报告生成与投递结果分别记录；失败重试需先核对已有回执，避免因不确定结果重复 kickstart。回退可恢复已备份的报告 plist/包装文件并重新加载同 label，仍需操作授权。
+`report.json` 的 `config_source` / `config_files` / `price_runs` / `price_diagnostics` 与每标的 `source_path` 记录来源。较新扫描不可用而改用旧扫描时显示缺口；完全缺失时保留边界行并标注不可用。默认不读取 daily brief 或另建线上价格文件，也不额外调用 OpenD。
 
-## 现价来源（`config_review`）
+人工固定价格只在显式 `--prices-file PATH` 时生效。接受 `{"prices": {"NVDA": 173.73}}` 或 `{"NVDA": {"price": 173.73, "observed_at_utc": "..."}}`；没有可验证时间的输入仍会被新鲜度规则判为“观察”。
 
-边界来自本地用户配置（`user.hk.json` / `user.us.json`，位于 `configs/` 目录，不入库）。现价按以下顺序解析：
+## 远端周度任务安装与切换（需明确授权）
 
-1. `--prices-file` 指定的 JSON（测试、人工快照、离线复算）；
-2. `<runtime_root>/output_accounts/*/state/daily_decision_brief.<MARKET>.current.json` 中 `candidate_index[].representative.metrics.spot` 的最新观察；
-3. 没有可用价格时标注“现价不可用”，边界仍完整展示，不阻断报告。
-
-`--prices-file` 接受 `{"prices": {"NVDA": 173.73}}` 或 `{"NVDA": {"price": 173.73, "observed_at_utc": "..."}}`。
+1. 从审查通过的提交安装稳定报告源码，替换 service 模板的 `@DEPLOY_USER@`、`@SOURCE_ROOT@`、`@RUNTIME_ROOT@`、`@PYTHON@`；源码和解释器必须独立于开发 worktree 和主程序 release 清理。保持主程序 symlink、配置、tick 调度不变。可复制现役依赖环境到报告专属目录，只调用其 Python，验证 `sys.prefix` 和插件导入路径；不修改共享缓存环境。
+2. service 读取 `/etc/options-monitor/options-monitor.env`；沿现役 materialize helper 从 `/etc/credstore.encrypted` 加载同一组飞书 credential IDs 到该服务专属 `CREDENTIALS_DIRECTORY`，结束时 cleanup。该模板用于已部署 helper 的 Linux 环境；不依赖本机 Keychain，不复制 secret 到源码或日志。[凭证契约](SECRET_STORAGE.md)。
+3. 审阅已渲染单元及目标文件，运行 `systemd-analyze verify`，安装 service/timer 后 reload、启用 timer；读回下次触发时间。独立单元不加入通用 service profile 或 managed allowlist，旧版本 drift 可显示 `extra_installed` 警告；确认 `ok=true`、error=0 且没有退役计划。它们的源码更新由独立报告部署维护，不随主程序自动升级。
+4. 手动 `systemctl start options-monitor-report-config-review.service`，读回终止码和 `/var/lib/options-monitor/reports/config_review/<run_id>/`。`deploy/systemd/run-config-review-weekly.py` 仅调用公共 report CLI 一次；`delivered` 且有 `message_id` 才允许服务成功。`skipped`、失败或无确认均保留报告/回执并使服务失败；不自动重发。结果不明确时先查消息和回执，再决定重跑，新命令会生成新 run。
+5. 核对实际报告配置值、价格时间、飞书消息读回及 timer 后，才 `launchctl bootout` 本机 `com.options-monitor.report.config-review.weekly`，把原 plist 移到 LaunchAgents 之外的时间戳备份；确认 job 查不到、配置文件哈希未变。保留旧源码、输入、用户 `configs/user.*.json` 和报告。远端验收失败时先保留本机调度；需回退时恢复备份 plist 并读回本机运行状态后再停远端 timer。
 
 ## 投递
 

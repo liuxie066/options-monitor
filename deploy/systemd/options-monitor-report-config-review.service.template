@@ -1,0 +1,19 @@
+[Unit]
+Description=Options Monitor weekly configuration review
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=@DEPLOY_USER@
+WorkingDirectory=@RUNTIME_ROOT@
+UMask=0077
+EnvironmentFile=/etc/options-monitor/options-monitor.env
+Environment="OM_RUNTIME_ROOT=@RUNTIME_ROOT@"
+Environment="OM_PYTHON=@PYTHON@"
+Environment=OM_SECRET_BACKEND=systemd
+Environment=CREDENTIALS_DIRECTORY=/run/options-monitor/credentials/options-monitor-report-config-review.service
+ExecStartPre=+/usr/local/libexec/options-monitor-materialize-service-credentials materialize --unit %n --deploy-user @DEPLOY_USER@ --store-root /etc/credstore.encrypted --credential-id om-feishu-holdings-app-secret --credential-id om-feishu-bot-app-secret
+ExecStart="@PYTHON@" "@SOURCE_ROOT@/deploy/systemd/run-config-review-weekly.py" --source-root "@SOURCE_ROOT@" --runtime-root "@RUNTIME_ROOT@"
+ExecStopPost=+/usr/local/libexec/options-monitor-materialize-service-credentials cleanup --unit %n --credential-id om-feishu-holdings-app-secret --credential-id om-feishu-bot-app-secret
+TimeoutStartSec=15min
