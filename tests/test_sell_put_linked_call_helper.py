@@ -735,6 +735,42 @@ def test_combo_yield_aggregates_call_prefilter_rejections(tmp_path: Path) -> Non
     assert put_join_reject["reject_reasons"] == "call_expiration_unavailable"
 
 
+@pytest.mark.parametrize(
+    ("put_strike", "sell_put_overrides", "reason"),
+    [
+        (95.0, {"min_strike": 96.0}, "put_strike_below_min"),
+        (101.0, {}, "put_strike_above_max"),
+    ],
+)
+def test_combo_yield_put_leg_strike_rejects_name_violated_bound(
+    tmp_path: Path,
+    put_strike: float,
+    sell_put_overrides: dict[str, object],
+    reason: str,
+) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
+
+    puts = _nvda_put_frame(
+        strike=put_strike,
+        contract_symbol=f"NVDA_P{int(put_strike)}",
+    )
+    calls = _nvda_call_frame()
+    _write_nvda_pair_csv(tmp_path, puts=puts, calls=calls)
+    pairs = find_sell_put_combo_yield_pairs(
+        df_candidates=puts,
+        symbol="NVDA",
+        input_root=tmp_path,
+        combo_yield_cfg=_combo_yield_cfg(),
+        sell_put_cfg=_sell_put_cfg(**sell_put_overrides),
+    )
+
+    assert pairs.empty
+    assert pairs.attrs["reject_counts"] == {reason: 1}
+    diagnostics = pairs.attrs["pair_diagnostics"]
+    put_reject = diagnostics.loc[diagnostics["diagnostic_scope"] == "put"].iloc[0]
+    assert put_reject["reject_reasons"] == reason
+
+
 def test_combo_yield_pair_filter_inherits_sell_put_dte(tmp_path: Path) -> None:
     from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
 
