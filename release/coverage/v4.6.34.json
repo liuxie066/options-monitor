@@ -1,0 +1,254 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.34",
+  "base": {
+    "tag": "v4.6.33",
+    "commit": "f27a9588ab4b1441a3f3ba002482216d467166eb"
+  },
+  "reviewed_head": "a809387eaa3ba4258038279241aa85748ec48787",
+  "commits": [
+    {
+      "sha": "6a58d4a25fe527e4562d6d0755572aaef3c5886c",
+      "subject": "fix(group-query-bot): show suggested sell limits for candidates (#1155)"
+    },
+    {
+      "sha": "b8afcfc77331c04043a31159e79cc2d851ef8a64",
+      "subject": "fix(config): reject conflicting strategy field prefixes (#1157)"
+    },
+    {
+      "sha": "711ab324b2355a1f9a632c77f043f50bb170d349",
+      "subject": "fix(service): normalize planned operation objects (#1158)"
+    },
+    {
+      "sha": "c880c8cc0c51e2c1092331e8bfe046397221d9a3",
+      "subject": "docs(gateflow): accept plan for config-review-remote"
+    },
+    {
+      "sha": "c8e6c30898fd21aabed9599512d3cf9254b38eb8",
+      "subject": "feat(reports): accept config-review-remote S1 runtime migration"
+    },
+    {
+      "sha": "dc22f5f18cbf42b65589f87dbeaf156091dba078",
+      "subject": "fix(reports): accept deepreview for config-review-remote"
+    },
+    {
+      "sha": "5fe5745a8b08acb52e6fc5d941842c7c5f1a8781",
+      "subject": "fix(reports): accept PR review support for runtime symbol lists"
+    },
+    {
+      "sha": "78177f56d9306d4cec2db4fe5a10ee92fd832e59",
+      "subject": "feat(reports): move weekly config review to production"
+    },
+    {
+      "sha": "e549044d5f723724455111abf7341b928341120a",
+      "subject": "fix(ledger): freeze projection diagnostic read inputs (#1160)"
+    },
+    {
+      "sha": "d6786546dfa91057ce4bf26499a737889e0c7a29",
+      "subject": "fix(service): recognize systemd load states without bypassing ownership (#1161)"
+    },
+    {
+      "sha": "84587300c362d549867651d8472788bbf66556e0",
+      "subject": "fix(candidates): lower CSP and CC default delta caps to 0.30 (#1162)"
+    },
+    {
+      "sha": "f505b1971f3cc8e0a56eb9dad959be80fb6cc2a8",
+      "subject": "fix(covered-call): restore default delta cap to 0.40 (#1164)"
+    },
+    {
+      "sha": "38b3e9bdb3e19044bc58f8013fbea505cd40d125",
+      "subject": "fix(covered-call): set default delta cap to 0.30 (#1165)"
+    },
+    {
+      "sha": "12b754254c2b5774bb37caa21ceeca0dd1dcc326",
+      "subject": "perf(release): streamline delivery and trim product archives (#1156)"
+    },
+    {
+      "sha": "a809387eaa3ba4258038279241aa85748ec48787",
+      "subject": "fix(opend): bound SDK queries and capture tick hang stacks (#1166)"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "提供可复用的源码部署升级验收入口，按目标 release 核对插件、服务、timer 与升级指标，一次采集生成脱敏证据、摘要、耗时对比及索引。",
+      "commits": [
+        "12b754254c2b5774bb37caa21ceeca0dd1dcc326"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "周度配置清单周报支持生产环境调度及实际运行标的清单，使用扫描冻结价格生成报告。（#1159）",
+      "commits": [
+        "c8e6c30898fd21aabed9599512d3cf9254b38eb8",
+        "dc22f5f18cbf42b65589f87dbeaf156091dba078",
+        "5fe5745a8b08acb52e6fc5d941842c7c5f1a8781",
+        "78177f56d9306d4cec2db4fe5a10ee92fd832e59"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "精简源码包和运行包，排除仅用于开发、CI、审查和发版的文件，保留安装、运行、升级及排障所需资源。",
+      "commits": [
+        "12b754254c2b5774bb37caa21ceeca0dd1dcc326"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "本地发布预检在测试前核对实际加载插件与当前 checkout 的路径、版本和 Python 源码，提前发现旧环境或残留文件。",
+      "commits": [
+        "12b754254c2b5774bb37caa21ceeca0dd1dcc326"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "运行包资格构建与发布回归重叠，源码发布保留原有门禁与独立性，运行包补挂继续验证完整产物、目标身份和读回结果。",
+      "commits": [
+        "12b754254c2b5774bb37caa21ceeca0dd1dcc326"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "群查询候选回复展示建议卖出限价。（#1155）",
+      "commits": [
+        "6a58d4a25fe527e4562d6d0755572aaef3c5886c"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "CSP 和 Covered Call 的默认最大绝对 delta 统一为 0.30。（#1162、#1164、#1165）",
+      "commits": [
+        "84587300c362d549867651d8472788bbf66556e0",
+        "f505b1971f3cc8e0a56eb9dad959be80fb6cc2a8",
+        "38b3e9bdb3e19044bc58f8013fbea505cd40d125"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "OpenD 同步查询增加 15 秒上限，超时后废弃上下文并沿用现有重试和策略不可用路径，避免单次 SDK 等待拖住整轮；tick 在超时前保留线程栈，600 秒外层兜底不变。（#1166）",
+      "commits": [
+        "a809387eaa3ba4258038279241aa85748ec48787"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "配置工具拒绝冲突的策略字段前缀，避免配置更新目标出现歧义。（#1157）",
+      "commits": [
+        "b8afcfc77331c04043a31159e79cc2d851ef8a64"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "服务管理统一计划操作的对象格式，正确识别 systemd 加载状态并保留服务归属校验。（#1158、#1161）",
+      "commits": [
+        "711ab324b2355a1f9a632c77f043f50bb170d349",
+        "d6786546dfa91057ce4bf26499a737889e0c7a29"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "持仓投影诊断使用冻结的只读输入，避免多次读取产生不一致。（#1160）",
+      "commits": [
+        "e549044d5f723724455111abf7341b928341120a"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "c880c8cc0c51e2c1092331e8bfe046397221d9a3",
+      "reason": "接纳周报迁移的阶段性计划；没有独立运行时变化，实际功能由同批次 #1159 的周报发布说明覆盖。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "6a58d4a25fe527e4562d6d0755572aaef3c5886c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1155"
+      ]
+    },
+    {
+      "commit": "b8afcfc77331c04043a31159e79cc2d851ef8a64",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1157"
+      ]
+    },
+    {
+      "commit": "711ab324b2355a1f9a632c77f043f50bb170d349",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1158"
+      ]
+    },
+    {
+      "commit": "c880c8cc0c51e2c1092331e8bfe046397221d9a3",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1159"
+      ]
+    },
+    {
+      "commit": "c8e6c30898fd21aabed9599512d3cf9254b38eb8",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1159"
+      ]
+    },
+    {
+      "commit": "dc22f5f18cbf42b65589f87dbeaf156091dba078",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1159"
+      ]
+    },
+    {
+      "commit": "5fe5745a8b08acb52e6fc5d941842c7c5f1a8781",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1159"
+      ]
+    },
+    {
+      "commit": "78177f56d9306d4cec2db4fe5a10ee92fd832e59",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1159"
+      ]
+    },
+    {
+      "commit": "e549044d5f723724455111abf7341b928341120a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1160"
+      ]
+    },
+    {
+      "commit": "d6786546dfa91057ce4bf26499a737889e0c7a29",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1161"
+      ]
+    },
+    {
+      "commit": "84587300c362d549867651d8472788bbf66556e0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1162"
+      ]
+    },
+    {
+      "commit": "f505b1971f3cc8e0a56eb9dad959be80fb6cc2a8",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1164"
+      ]
+    },
+    {
+      "commit": "38b3e9bdb3e19044bc58f8013fbea505cd40d125",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1165"
+      ]
+    },
+    {
+      "commit": "12b754254c2b5774bb37caa21ceeca0dd1dcc326",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1156"
+      ]
+    },
+    {
+      "commit": "a809387eaa3ba4258038279241aa85748ec48787",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1166"
+      ]
+    }
+  ]
+}
