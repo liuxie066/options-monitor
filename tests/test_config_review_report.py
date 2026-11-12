@@ -180,7 +180,7 @@ def test_config_review_marks_missing_market_file_as_data_gap(tmp_path: Path) -> 
     result = build_config_review(configs_root=configs, runtime_root=tmp_path)
     assert any("US" in gap for gap in result.payload["data_gaps"])
     assert result.payload["summary"]["market_counts"] == {"HK": 1}
-    assert result.payload["price_source"] == "runtime_daily_brief"
+    assert result.payload["price_source"] == "runtime_scan"
 
 
 def test_config_review_requires_at_least_one_market_config(tmp_path: Path) -> None:
@@ -249,10 +249,13 @@ def test_runtime_brief_prices_use_newest_observation(tmp_path: Path) -> None:
     assert snapshot.get("9992.HK") is None
 
     result = build_config_review(configs_root=configs, runtime_root=tmp_path)
-    assert result.payload["price_source"] == "runtime_daily_brief"
-    assert result.payload["price_observed_at_utc"] == "2026-11-11T07:55:03Z"
-    assert result.payload["summary"]["price_available"] == 1
-    assert "| 0700.HK | 403.20 |" in result.markdown
+    assert snapshot.source == "runtime_daily_brief"
+    assert snapshot.observed_at_utc == "2026-11-11T07:55:03Z"
+    assert result.payload["price_source"] == "runtime_scan"
+    assert result.payload["price_observed_at_utc"] is None
+    assert result.payload["summary"]["price_available"] == 0
+    assert "| 0700.HK | — |" in result.markdown
+    assert any("成功扫描" in gap for gap in result.payload["data_gaps"])
 
 
 def test_prices_file_rejects_missing_and_invalid_entries(tmp_path: Path) -> None:
