@@ -36,9 +36,10 @@ def row(mode='put', **changes):
     ('put', -1, .35, False),
     ('call', 1, 0, True),
     ('call', 1, .30, True),
-    ('call', 1, math.nextafter(.30, math.inf), False),
-    ('call', 1, .35, False),
-    ('call', 1, .40, False),
+    ('call', 1, .35, True),
+    ('call', 1, .40, True),
+    ('call', 1, math.nextafter(.40, math.inf), False),
+    ('call', 1, .4001, False),
 ])
 def test_default_exact_boundary(mode,sign,value,accepted):
     original=row(mode,delta=sign*value); frozen=deepcopy(original)
@@ -88,13 +89,24 @@ def test_invalid_policy_never_disables(invalid):
 
 @pytest.mark.parametrize('resolver,default', [
     (resolve_sell_put_underwriting_config, .30),
-    (resolve_covered_call_underwriting_config, .30),
+    (resolve_covered_call_underwriting_config, .40),
 ])
 @pytest.mark.parametrize('value',[None,0,.35,.38,.4,1])
 def test_resolvers_and_config_validate_same_contract(resolver,default,value):
     assert resolver({}).max_abs_delta==default
     assert resolver({'max_abs_delta':value}).max_abs_delta==value
     _validate_opening_strategy_config({'max_abs_delta':value},'sell_call')
+
+
+@pytest.mark.parametrize('mode,delta,accepted', [('put', -.35, True), ('call', .39, False)])
+def test_explicit_symbol_delta_cap_overrides_each_side_default(mode, delta, accepted):
+    resolver = resolve_sell_put_underwriting_config if mode == 'put' else resolve_covered_call_underwriting_config
+    configured = resolver({'max_abs_delta': .38})
+    candidate = row(mode, delta=delta)
+    assert configured.max_abs_delta == .38
+    assert evaluate_opening_candidate_policy(candidate, mode=mode,
+        max_abs_delta=configured.max_abs_delta)['accepted'] is accepted
+    assert evaluate_opening_candidate_policy(candidate, mode=mode)['accepted'] is not accepted
 
 
 @pytest.mark.parametrize('check_capacity', [True, False])
@@ -119,7 +131,7 @@ def test_hk_put_candidates_use_tighter_default(check_capacity, symbol, strike, s
     assert evaluate_opening_candidate_policy({**candidate, 'policy_max_abs_delta': .38}, mode='put')['accepted']
 
 
-@pytest.mark.parametrize('mode,cap', [('put', .30), ('call', .30)])
+@pytest.mark.parametrize('mode,cap', [('put', .30), ('call', .40)])
 def test_constraints_without_strategy_use_side_default(mode, cap):
     from om_strategy_core import CurrencyConverter, ExchangeRates, ShortVolPortfolioContext, calculate_constraints
 
@@ -130,7 +142,7 @@ def test_constraints_without_strategy_use_side_default(mode, cap):
     )
     assert 'policy_max_abs_delta' not in constrained
     decision = evaluate_opening_candidate_policy(constrained, mode=mode)
-    assert 'risk_delta' in [item['reason'] for item in decision['rejects']]
+    assert ('risk_delta' in [item['reason'] for item in decision['rejects']]) is (mode == 'put')
     strategy = resolve_strategy(mode=mode, config=InsuranceUnderwritingConfig(
         min_dte=7, max_dte=60, max_abs_delta=cap,
     ))
@@ -155,7 +167,7 @@ def test_custom_template_cannot_bypass_delta(monkeypatch):
 
 @pytest.mark.parametrize('mode', ['put', 'call'])
 def test_sealed_v2_baseline_keeps_its_original_delta_policy(mode):
-    # Before the default changed, 0.40 was sealed as a baseline in both modes.
+    # Historical v2 baselines sealed 0.40; preserve their original policy.
     old_identity = resolve_strategy(mode=mode, account='lx', market='us',
         config=InsuranceUnderwritingConfig(min_dte=7, max_dte=60, max_abs_delta=.40)).identity
     old_identity['policy_kind'] = 'baseline'
@@ -229,7 +241,7 @@ def test_yaml_put_default_and_symbol_override(tmp_path, override, expected):
     config, _ = resolve_yaml_runtime_config(repo_root=REPO_ROOT, market='hk', config_path=path)
     effective = apply_profiles(config['symbols'][0], config['templates'])
     assert resolve_sell_put_underwriting_config(effective['sell_put']).max_abs_delta == expected
-    assert resolve_covered_call_underwriting_config(effective['sell_call']).max_abs_delta == .30
+    assert resolve_covered_call_underwriting_config(effective['sell_call']).max_abs_delta == .40
 
 
 def test_yaml_build_covered_call_override_and_null_template(tmp_path):
