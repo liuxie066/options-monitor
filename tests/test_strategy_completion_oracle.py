@@ -49,7 +49,7 @@ def _checked_current_projection(value, *, clock, delta):
         "delta_source": "opend_market_snapshot.option_delta",
         "delta_unit": "fraction",
         "delta_reason_code": None,
-        "policy_max_abs_delta": 0.3 if delta < 0 else 0.4,
+        "policy_max_abs_delta": 0.3,
     }
     if isinstance(value, dict):
         if value.get("position_sizing_basis") is not None:
@@ -131,14 +131,14 @@ def _historical_strike_reject_variant(rejects, *, mode, delta):
 
 
 @pytest.mark.parametrize("change", [
-    {"delta": 0.4001}, {"delta_source": None}, {"delta_unit": "percent"},
+    {"delta": 0.3001}, {"delta_source": None}, {"delta_unit": "percent"},
     {"delta_reason_code": "delta_source_unverified"}, {"policy_max_abs_delta": None},
-    {"policy_max_abs_delta": 0.3},
+    {"policy_max_abs_delta": 0.4},
     {"position_sizing_basis": "non_option_net_assets_before_assignment_fees.v2"},
 ])
 def test_oracle_projection_does_not_hide_contract_regressions(change):
     row = {"delta": 0.3, "delta_source": "opend_market_snapshot.option_delta",
-           "delta_unit": "fraction", "delta_reason_code": None, "policy_max_abs_delta": 0.4,
+           "delta_unit": "fraction", "delta_reason_code": None, "policy_max_abs_delta": 0.3,
            "decision_now_utc": oracle.old.NOW.isoformat(), **change}
     with pytest.raises(AssertionError):
         _checked_current_projection(row, clock=oracle.old.NOW.isoformat(), delta=0.3)

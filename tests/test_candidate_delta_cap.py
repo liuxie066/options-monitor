@@ -35,10 +35,12 @@ def row(mode='put', **changes):
     ('put', -1, math.nextafter(.30, math.inf), False),
     ('put', -1, .35, False),
     ('call', 1, 0, True),
+    ('call', 1, .2640, True),
     ('call', 1, .30, True),
-    ('call', 1, .35, True),
-    ('call', 1, .40, True),
-    ('call', 1, math.nextafter(.40, math.inf), False),
+    ('call', 1, math.nextafter(.30, math.inf), False),
+    ('call', 1, .3001, False),
+    ('call', 1, .35, False),
+    ('call', 1, .40, False),
     ('call', 1, .4001, False),
 ])
 def test_default_exact_boundary(mode,sign,value,accepted):
@@ -77,6 +79,17 @@ def test_config_override_null_zero_and_precedence():
         assert not evaluate_opening_candidate_policy(bad,mode='put')['accepted']
 
 
+def test_call_explicit_delta_cap_null_zero_and_row_precedence():
+    candidate = row('call', delta=.35)
+    assert evaluate_opening_candidate_policy(candidate, mode='call', max_abs_delta=.38)['accepted']
+    assert evaluate_opening_candidate_policy({**candidate, 'policy_max_abs_delta': .38}, mode='call')['accepted']
+    assert evaluate_opening_candidate_policy({**candidate, 'policy_max_abs_delta': None}, mode='call')['accepted']
+    assert not evaluate_opening_candidate_policy({**candidate, 'policy_max_abs_delta': None}, mode='call', max_abs_delta=.30)['accepted']
+    assert evaluate_opening_candidate_policy({**candidate, 'policy_max_abs_delta': 0}, mode='call', max_abs_delta=None)['accepted']
+    assert not evaluate_opening_candidate_policy(row('call', delta=.0001), mode='call', max_abs_delta=0)['accepted']
+    assert evaluate_opening_candidate_policy(row('call', delta=0), mode='call', max_abs_delta=0)['accepted']
+
+
 @pytest.mark.parametrize('invalid',[True,False,'0.4',float('nan'),float('inf'),-.01,1.01,10**400])
 def test_invalid_policy_never_disables(invalid):
     with pytest.raises(ValueError): InsuranceUnderwritingConfig(max_abs_delta=invalid)
@@ -89,7 +102,7 @@ def test_invalid_policy_never_disables(invalid):
 
 @pytest.mark.parametrize('resolver,default', [
     (resolve_sell_put_underwriting_config, .30),
-    (resolve_covered_call_underwriting_config, .40),
+    (resolve_covered_call_underwriting_config, .30),
 ])
 @pytest.mark.parametrize('value',[None,0,.35,.38,.4,1])
 def test_resolvers_and_config_validate_same_contract(resolver,default,value):
@@ -98,7 +111,7 @@ def test_resolvers_and_config_validate_same_contract(resolver,default,value):
     _validate_opening_strategy_config({'max_abs_delta':value},'sell_call')
 
 
-@pytest.mark.parametrize('mode,delta,accepted', [('put', -.35, True), ('call', .39, False)])
+@pytest.mark.parametrize('mode,delta,accepted', [('put', -.35, True), ('call', .35, True)])
 def test_explicit_symbol_delta_cap_overrides_each_side_default(mode, delta, accepted):
     resolver = resolve_sell_put_underwriting_config if mode == 'put' else resolve_covered_call_underwriting_config
     configured = resolver({'max_abs_delta': .38})
@@ -131,7 +144,7 @@ def test_hk_put_candidates_use_tighter_default(check_capacity, symbol, strike, s
     assert evaluate_opening_candidate_policy({**candidate, 'policy_max_abs_delta': .38}, mode='put')['accepted']
 
 
-@pytest.mark.parametrize('mode,cap', [('put', .30), ('call', .40)])
+@pytest.mark.parametrize('mode,cap', [('put', .30), ('call', .30)])
 def test_constraints_without_strategy_use_side_default(mode, cap):
     from om_strategy_core import CurrencyConverter, ExchangeRates, ShortVolPortfolioContext, calculate_constraints
 
@@ -142,7 +155,7 @@ def test_constraints_without_strategy_use_side_default(mode, cap):
     )
     assert 'policy_max_abs_delta' not in constrained
     decision = evaluate_opening_candidate_policy(constrained, mode=mode)
-    assert ('risk_delta' in [item['reason'] for item in decision['rejects']]) is (mode == 'put')
+    assert 'risk_delta' in [item['reason'] for item in decision['rejects']]
     strategy = resolve_strategy(mode=mode, config=InsuranceUnderwritingConfig(
         min_dte=7, max_dte=60, max_abs_delta=cap,
     ))
@@ -241,7 +254,7 @@ def test_yaml_put_default_and_symbol_override(tmp_path, override, expected):
     config, _ = resolve_yaml_runtime_config(repo_root=REPO_ROOT, market='hk', config_path=path)
     effective = apply_profiles(config['symbols'][0], config['templates'])
     assert resolve_sell_put_underwriting_config(effective['sell_put']).max_abs_delta == expected
-    assert resolve_covered_call_underwriting_config(effective['sell_call']).max_abs_delta == .40
+    assert resolve_covered_call_underwriting_config(effective['sell_call']).max_abs_delta == .30
 
 
 def test_yaml_build_covered_call_override_and_null_template(tmp_path):
