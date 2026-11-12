@@ -191,6 +191,44 @@ def _daily_brief_deliverable_candidates(
     return [identity for identity in ordered if identity not in rolls or identity in current]
 
 
+def _record_expired_roll_candidates(
+    request, *, brief: Mapping[str, Any], account: str, market: str,
+    requested: list[str], delivered: list[str],
+) -> None:
+    """Leave an audit trail for roll candidates dropped by the closed window."""
+    kept = set(delivered)
+    dropped = [identity for identity in requested if identity not in kept]
+    if not dropped:
+        return
+    windows: dict[str, Any] = {}
+    for row in brief.get("positions") or []:
+        if not isinstance(row, Mapping):
+            continue
+        identity = daily_brief_position_roll_identity(
+            row, account=brief.get("account"), market=brief.get("market"))
+        if identity:
+            roll = row.get("roll_advice")
+            windows[identity] = (
+                roll.get("actionable_until_utc") if isinstance(roll, Mapping) else None
+            )
+    try:
+        request.runlog.safe_event(
+            "daily_brief", "roll_window_expired",
+            message=f"{len(dropped)} roll candidate(s) expired before delivery",
+            data={
+                "account": account,
+                "market": market,
+                "run_id": brief.get("run_id"),
+                "expired": [
+                    {"identity": identity, "actionable_until_utc": windows.get(identity)}
+                    for identity in dropped
+                ],
+            },
+        )
+    except Exception:
+        pass
+
+
 def _select_daily_brief_delivery(
     brief, *, kind, identities, diff, limits, context, card, open_id, preserve_context=False,
 ):
@@ -310,7 +348,12 @@ def _prepare_daily_brief_fanout(request, account, market, scheduler, brief, pers
                 if child["identity_key"] == route["identity_key"]:
                     owned.update(_daily_brief_represented_identities(child["spec"]["metadata"]))
             identities = [identity for identity in identities if identity not in owned]
+            requested_identities = list(identities)
             identities = _daily_brief_deliverable_candidates(brief, identities)
+            _record_expired_roll_candidates(
+                request, brief=brief, account=account, market=market,
+                requested=requested_identities, delivered=identities,
+            )
             if not identities:
                 continue
             kind = "candidate_alert"
@@ -2219,7 +2262,12 @@ def _rebuild_daily_brief_delivery(
         if expired_source:
             return {"envelope": None, "reason": "recovery_window_expired"}
     pending = sorted((day.get("pending_candidates") or {}).keys()) if isinstance(day, dict) else []
+    requested_pending = list(pending)
     pending = _daily_brief_deliverable_candidates(brief, pending)
+    _record_expired_roll_candidates(
+        request, brief=brief, account=account, market=market,
+        requested=requested_pending, delivered=pending,
+    )
     recovery = supplement.get("recovery") if recovering_report else recovery_result.get("recovery")
     fixed_target = (
         str(recovery.get("scheduled_target_market") or "").strip()

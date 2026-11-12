@@ -349,6 +349,7 @@ def evaluate_frozen_position_roll(
     portfolio_context: Mapping[str, Any] | None, requirement: Mapping[str, Any],
     quotes: list[dict[str, Any]], provenance: Mapping[str, Any],
     config: dict[str, Any], now: datetime, unavailable_reason: str | None = None,
+    quote_evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Evaluate a Tick lot using only the already validated same-run inputs.
 
@@ -449,16 +450,27 @@ def evaluate_frozen_position_roll(
             required_data_coverage=required_data_coverage,
         )
         if result["candidates"]:
-            expiry_times = [datetime.fromisoformat(str(provenance["expires_at"]).replace("Z", "+00:00"))]
+            anchors = [(datetime.fromisoformat(str(provenance["expires_at"]).replace("Z", "+00:00")), "required_data_expiry")]
+            observations = []
             for candidate in result["candidates"]:
                 evidence = candidate["evidence"]
                 for field in ("old_snapshot_received_at_utc", "old_spot_observed_at_utc", "snapshot_received_at_utc", "spot_observed_at_utc"):
                     observed = datetime.fromisoformat(str(evidence[field]).replace("Z", "+00:00"))
-                    expiry_times.append(observed + timedelta(seconds=OPENING_QUOTE_MAX_AGE_SECONDS))
+                    observations.append(observed)
+                    anchors.append((observed + timedelta(seconds=OPENING_QUOTE_MAX_AGE_SECONDS), "quote_observation"))
             if covered_call:
                 observed = datetime.fromisoformat(str(portfolio_context["position_snapshot_input"]["observed_at_utc"]).replace("Z", "+00:00"))
-                expiry_times.append(observed + timedelta(seconds=300))
-            result["actionable_until_utc"] = min(expiry_times).isoformat()
+                observations.append(observed)
+                anchors.append((observed + timedelta(seconds=300), "portfolio_snapshot"))
+            window_end, window_anchor = min(anchors, key=lambda item: item[0])
+            result["actionable_until_utc"] = window_end.isoformat()
+            evidence_out = dict(quote_evidence) if isinstance(quote_evidence, Mapping) else {"source": "sealed_scan"}
+            evidence_out["earliest_observation_utc"] = min(observations).isoformat()
+            evidence_out["window_anchor"] = window_anchor
+            result["quote_evidence"] = evidence_out
+        elif isinstance(quote_evidence, Mapping) and quote_evidence:
+            # Keep a failed refresh visible even when no candidate survives.
+            result["quote_evidence"] = dict(quote_evidence)
         return result
     except PositionAdviceUnavailableError:
         result.update(status="unavailable", outcome="unable", candidates=[], displayed=0,
