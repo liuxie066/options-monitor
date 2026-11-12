@@ -61,7 +61,8 @@ def _run_close_advice(
     _, provider, _ = pipeline
     cfg = config()
     cfg["market_data"] = {"provider": provider.name}
-    scan_at = datetime.now(timezone.utc)
+    # Exercise quote age without also crossing a New York session date.
+    scan_at = datetime.now(timezone.utc).replace(hour=15, minute=0, second=0, microsecond=0)
     evaluation_now = scan_at + timedelta(seconds=sealed_age_seconds)
     now = scan_at
     old_expiry = provider.payload["expirations"][0]
@@ -89,6 +90,18 @@ def _run_close_advice(
     monkeypatch.setattr(short_put_roll, "resolve_market_data_provider", forbidden)
 
     state = {"phase": "sealed"}
+
+    class EvidenceClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            observed = scan_at if state["phase"] == "sealed" else evaluation_now
+            return observed.astimezone(tz) if tz is not None else observed.replace(tzinfo=None)
+
+    # Keep post-snapshot rights/state receipts on the same clock as the rows.
+    monkeypatch.setattr("src.application.close_advice_required_data.datetime", EvidenceClock)
+    monkeypatch.setattr("src.application.roll_quote_refresh.datetime", EvidenceClock)
+    monkeypatch.setattr("src.application.required_data_snapshot.datetime", EvidenceClock)
+    monkeypatch.setattr("src.application.opend_symbol_outputs.datetime", EvidenceClock)
 
     def fetch(self, request, **kwargs):
         self.calls.append(("fetch", request))
@@ -118,6 +131,8 @@ def _run_close_advice(
         return _strict_success_rows_payload(
             request.symbol, rows, trading_date=request.trading_date,
             host=request.host, port=request.port, meta={"source": self.name,
+                "source_observed_at": received.isoformat(),
+                "completed_at_utc": received.isoformat(),
                 "underlier_observation": request.underlier_observation},
         )
 
@@ -154,6 +169,7 @@ def _run_close_advice(
             manifest_path=manifest_path, required_data_root=required_root,
             run_id=run_id, prefetch_summary=summary,
             close_advice_required_data_plan_path=plan_path,
+            sealed_at=scan_at,
         )
         context = build_position_risk_context(
             records, broker="富途", account="sample", observed_at=now)
