@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 1516 (`src`: 621, `domain`: 99, `scripts`: 28, `tests`: 764)
-- Internal import edges: 13644 total, 4621 production/script edges excluding tests
+- Internal import edges: 13648 total, 4622 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|744| domain
+  application -->|745| domain
   application -->|4| domain_services
   application -->|213| infrastructure
   application -->|2| om_strategy_core
@@ -51,12 +51,12 @@ flowchart LR
   scripts -->|1| tests
   src -->|1| application
   storage -->|1| domain
-  tests -->|6819| application
+  tests -->|6821| application
   tests -->|747| domain
   tests -->|2| domain_services
   tests -->|464| infrastructure
   tests -->|524| interfaces
-  tests -->|13| om_strategy_core
+  tests -->|14| om_strategy_core
   tests -->|85| scripts
   tests -->|77| storage
 ```
@@ -65,7 +65,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 744 |
+| application | domain | 745 |
 | interfaces | application | 249 |
 | application | infrastructure | 213 |
 | scripts | application | 90 |
@@ -90,13 +90,13 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 6819 |
+| tests | application | 6821 |
 | tests | domain | 747 |
 | tests | interfaces | 524 |
 | tests | infrastructure | 464 |
 | tests | scripts | 85 |
 | tests | storage | 77 |
-| tests | om_strategy_core | 13 |
+| tests | om_strategy_core | 14 |
 | tests | domain_services | 2 |
 
 ## Compressed Production Package Graph
@@ -105,7 +105,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 
 | from | to | imports |
 |---|---|---|
-| src.application | domain.domain | 321 |
+| src.application | domain.domain | 322 |
 | src.interfaces | src.application | 198 |
 | src.application.ledger | domain.domain | 184 |
 | src.application | src.infrastructure | 147 |

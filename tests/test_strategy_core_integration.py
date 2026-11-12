@@ -29,8 +29,9 @@ CONVERTER = CurrencyConverter(ExchangeRates(.14, .920000046))
 
 
 def _strategy(mode="put", **changes):
-    return resolve_strategy(mode=mode, config=InsuranceUnderwritingConfig(min_dte=7, max_dte=60),
-                            account="lx", market="us", **changes)
+    return resolve_strategy(mode=mode, config=InsuranceUnderwritingConfig(
+        min_dte=7, max_dte=60, max_abs_delta=.30 if mode == "put" else .40),
+        account="lx", market="us", **changes)
 
 
 def _without_identity(value):
@@ -443,14 +444,23 @@ def test_empty_underwriting_preserves_legacy_return_but_checks_injected_scope(mo
         adapter(**kwargs, resolved_strategy=replace(_strategy(mode), account="sy"))
 
 
-@pytest.mark.parametrize("mode", ["put", "call"])
-@pytest.mark.parametrize("value,source,disabled,accepted,reason", [
-    (.40, "canonical", False, True, None),
-    (.4001, "canonical", False, False, "risk_delta"),
-    (0.0, "canonical", False, True, None),
-    (None, "canonical", False, False, "risk_delta_unavailable"),
-    (.30, "alias", False, False, "risk_delta_unavailable"),
-    (.4001, "alias", True, True, None),
+@pytest.mark.parametrize("mode,value,source,disabled,accepted,reason", [
+    ("put", .30, "canonical", False, True, None),
+    ("put", .3001, "canonical", False, False, "risk_delta"),
+    ("put", .40, "canonical", False, False, "risk_delta"),
+    ("put", .4001, "canonical", False, False, "risk_delta"),
+    ("put", 0.0, "canonical", False, True, None),
+    ("put", None, "canonical", False, False, "risk_delta_unavailable"),
+    ("put", .30, "alias", False, False, "risk_delta_unavailable"),
+    ("put", .4001, "alias", True, True, None),
+    ("call", .30, "canonical", False, True, None),
+    ("call", .35, "canonical", False, True, None),
+    ("call", .40, "canonical", False, True, None),
+    ("call", .4001, "canonical", False, False, "risk_delta"),
+    ("call", 0.0, "canonical", False, True, None),
+    ("call", None, "canonical", False, False, "risk_delta_unavailable"),
+    ("call", .30, "alias", False, False, "risk_delta_unavailable"),
+    ("call", .4001, "alias", True, True, None),
 ])
 def test_provider_normalization_to_scan_underwriting_and_sealed_delta(
     frozen_scan, mode, value, source, disabled, accepted, reason,
@@ -506,11 +516,11 @@ def test_provider_normalization_to_scan_underwriting_and_sealed_delta(
     facts = decision["normalized_input"]
     assert facts["delta"] == signed_delta
     assert facts["delta_source"] == observed.delta_source
-    assert facts["policy_max_abs_delta"] == (None if disabled else .4)
+    assert facts["policy_max_abs_delta"] == (None if disabled else .30 if mode == "put" else .40)
     if reason:
         rejects = decision["opening_decision"]["rejects"]
         assert [item["reason"] for item in rejects] == [reason]
-        assert rejects[0]["threshold"] == .4
+        assert rejects[0]["threshold"] == (.30 if mode == "put" else .40)
     sealed = _seal_snapshot(
         frozen_scan, run_id="delta-chain", scan_statuses=[_scan_status("NVDA", mode, "completed")],
         final_candidates={mode: finals}, candidate_evaluations={mode: decisions},

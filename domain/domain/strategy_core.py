@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 import math
 from typing import Any, Callable
 
-from domain.domain.candidate_defaults import DEFAULT_SELL_CALL_WINDOW, DEFAULT_SELL_PUT_WINDOW
+from domain.domain.candidate_defaults import DEFAULT_SELL_CALL_WINDOW, DEFAULT_SELL_PUT_WINDOW, default_max_abs_delta
 from domain.domain.currency_conversion import (
     CurrencyConverter, ExchangeRates, covered_notional_cny, enrich_short_vol_contract_cny_fields,
 )
@@ -144,7 +144,9 @@ class ResolvedStrategy:
     @property
     def identity(self) -> dict[str, Any]:
         window = DEFAULT_SELL_PUT_WINDOW if self.mode == "put" else DEFAULT_SELL_CALL_WINDOW
-        baseline = InsuranceUnderwritingConfig(min_dte=window.min_dte, max_dte=window.max_dte)
+        baseline = InsuranceUnderwritingConfig(
+            min_dte=window.min_dte, max_dte=window.max_dte, max_abs_delta=default_max_abs_delta(self.mode),
+        )
         parameters = asdict(self.config)
         strike_inputs = {key: parameters.pop(key) for key in ("min_strike", "max_strike")}
         baseline_parameters = asdict(baseline)

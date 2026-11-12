@@ -67,7 +67,7 @@ def test_accepted_query_exposes_effective_numeric_gates_without_account_evidence
         "spread_ratio": (0.08, "lte", 0.40),
         "iv_rv_ratio": (1.50, "gte", 1.10),
         "iv_minus_rv": (0.12, "gte", 0.05),
-        "abs_delta": (0.30, "lte", 0.40),
+        "abs_delta": (0.30, "lte", 0.30 if mode == "put" else 0.40),
     }
     for name, (actual, operator, value) in expected.items():
         assert conditions[name]["actual"] == actual
@@ -150,9 +150,10 @@ def test_capacity_switch_does_not_disable_earnings_gates():
     assert all(item["status"] == "pass" for item in decision["conditions"])
 
 
-@pytest.mark.parametrize("mode", ["put", "call"])
-@pytest.mark.parametrize("value,status", [(0.4, "pass"), (0.4001, "fail"), (None, "unknown")])
-def test_contract_only_retains_delta_qualification(mode, value, status):
+@pytest.mark.parametrize("mode,cap", [("put", 0.30), ("call", 0.40)])
+@pytest.mark.parametrize("offset,status", [(0, "pass"), (0.0001, "fail"), (None, "unknown")])
+def test_contract_only_retains_delta_qualification(mode, cap, offset, status):
+    value = None if offset is None else cap + offset
     delta = None if value is None else (-value if mode == "put" else value)
     row = _policy_row(mode=mode, delta=delta, max_new_contracts=0, covered_contracts_available=0)
     decision = _query(row, mode=mode)
@@ -160,7 +161,7 @@ def test_contract_only_retains_delta_qualification(mode, value, status):
     assert decision["accepted"] is (status == "pass")
     assert condition["status"] == status
     assert condition["actual"] == value
-    assert condition["required"] == {"operator": "lte", "value": 0.4}
+    assert condition["required"] == {"operator": "lte", "value": cap}
     if status != "pass":
         assert condition["reason_code"] == ("risk_delta_unavailable" if value is None else "risk_delta")
         assert [item["reason"] for item in decision["rejects"]] == [condition["reason_code"]]
