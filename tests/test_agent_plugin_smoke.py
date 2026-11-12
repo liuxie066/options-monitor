@@ -4787,6 +4787,48 @@ def test_manage_symbols_validates_current_yaml_membership(monkeypatch, tmp_path:
     assert forbidden_calls == []
 
 
+@pytest.mark.parametrize("strategy,field,expected_strategy,expected_value", [
+    ("csp", "cc.min_strike", None, None),
+    ("cc", "csp.min_strike", None, None),
+    ("sell_put", "covered_call.min_strike", None, None),
+    ("covered_call", "sell_put.min_strike", None, None),
+    ("csp", "csp.min_strike", "sell_put", 100),
+    ("sell_put", "CSP.min_strike", "sell_put", 100),
+    ("cc", "cc.min_strike", "sell_call", 190),
+    ("covered_call", "sell_call.min_strike", "sell_call", 190),
+    (None, "csp.min_strike", "sell_put", 100),
+    (None, "cc.min_strike", "sell_call", 190),
+    ("csp", "min_strike", "sell_put", 100),
+    ("cc", "min_strike", "sell_call", 190),
+])
+def test_symbol_config_read_validates_strategy_field_prefix(
+    tmp_path: Path, strategy, field, expected_strategy, expected_value,
+) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    cfg = _minimal_cfg()
+    cfg["symbols"][0]["sell_call"] = {"enabled": True, "min_strike": 190}
+    config_path = tmp_path / "config.us.json"
+    config_path.write_text(json.dumps(cfg), encoding="utf-8")
+    before = config_path.read_bytes()
+    payload = {"config_path": str(config_path), "symbol": "NVDA", "field": field}
+    if strategy is not None:
+        payload["strategy"] = strategy
+    response = run_tool("symbol_config_read", payload)
+
+    assert config_path.read_bytes() == before
+    if expected_strategy is None:
+        assert response["ok"] is False, response
+        assert response["error"]["code"] == "INPUT_ERROR"
+        assert "strategy" in response["error"]["message"]
+        assert "field" in response["error"]["message"]
+    else:
+        assert response["ok"] is True, response
+        assert response["data"]["strategy"] == expected_strategy
+        assert response["data"]["path"] == f"{expected_strategy}.min_strike"
+        assert response["data"]["value"] == expected_value
+
+
 def test_symbol_config_read_routes_to_calibrated_symbol_market(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
