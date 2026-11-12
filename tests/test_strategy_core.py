@@ -140,8 +140,12 @@ def test_cc_cost_multiplier_identity_is_frozen_custom_and_restorable():
 
 
 def test_policy_identity_and_immutability():
-    strategy = resolve_strategy(mode="put", config=InsuranceUnderwritingConfig(min_dte=7, max_dte=60), account="lx", market="us")
+    strategy = resolve_strategy(mode="put", config=InsuranceUnderwritingConfig(
+        min_dte=7, max_dte=60, max_abs_delta=.30), account="lx", market="us")
     assert strategy.identity["policy_kind"] == "baseline"
+    wider_delta = replace(strategy, config=replace(strategy.config, max_abs_delta=.40))
+    assert wider_delta.identity["policy_kind"] == "custom"
+    assert wider_delta.identity["effective_policy_hash"] != strategy.identity["effective_policy_hash"]
     assert strategy.identity["template_version"] == __version__
     assert strategy.identity["scope"] == {"account": "lx", "market": "us", "mode": "put"}
     with pytest.raises(FrozenInstanceError):
@@ -242,7 +246,7 @@ def test_metrics_reject_missing_fees_or_evidence(update, remove, reason):
     assert exc.value.to_payload()["rule"] == reason
 
 def test_zero_dte_and_per_symbol_willingness_are_compatible():
-    config = InsuranceUnderwritingConfig(min_dte=0, max_dte=60)
+    config = InsuranceUnderwritingConfig(min_dte=0, max_dte=60, max_abs_delta=.30)
     assert resolve_strategy(mode="put", config=config).config.min_dte == 0
     baseline = resolve_strategy(mode="put", config=replace(config, min_dte=7))
     bounded = replace(baseline, config=replace(baseline.config, max_strike=100))
