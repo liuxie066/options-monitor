@@ -81,6 +81,10 @@ def test_config_review_renders_boundaries_prices_and_distances(tmp_path: Path) -
     markdown = result.markdown
     assert markdown.index("**结论：观察**") < markdown.index("## 指标 A")
     assert "该期无数据" in markdown
+    assert "上一完整周的边界拒绝观测与数据覆盖" in markdown
+    assert "距离定义：(现价 − 边界) ÷ 边界 × 100%" in markdown
+    assert "候选数暂不统计" not in markdown
+    assert "÷ 现价" not in markdown
     assert "| 0700.HK | 403.20 | 450 | 低于 10.4% | 550 | 低于 26.7% | 启用 |" in markdown
     assert "上限 450（低于 10.4%；现价成为实际边界）" in markdown
     assert "下限 550（低于 26.7%；配置边界生效）" in markdown
