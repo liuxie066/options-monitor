@@ -131,7 +131,7 @@ om report schedule [--format text|json]
 - A 读取 `output_runs/<run_id>/accounts/<account>/state/opening_candidate_snapshot.json`，按封存时间选取 **Asia/Shanghai 上一完整自然周**（周一 00:00 含，到下周一 00:00 不含）。只消费封存决定，不重跑策略。显式 `--candidate-evidence-file` 使用该文件独立的数据集，不与本机记录混合。
 - 四种方向码为 `put_strike_below_min`、`put_strike_above_max`、`call_strike_below_min`、`call_strike_above_max`。同一观测同一方向去重，总量取观测并集。观测身份是 run/account/market/candidate；不同 tick 或账户重复扫描仍是不同观测，不是独立交易机会。
 - A 展示市场、标的、方向、独立合约和日期；另按当前配置的同值边界统计。策略的有效阈值也可能来自价格窗口或成本，“同值”不能证明用户配置是唯一原因。
-- 新快照的可选哈希字段 `strike_boundary_reason_codes_version: 1` 声明方向码能力。无能力标记、遗留 `hard_strike`、失败/未知 scope、缺失或不兼容文件不能证明零；未知计数为 `null`，正文写“该期无数据”或部分覆盖。只有完整、有标记的数据能报告真实 0。覆盖仅指留存记录，不证明每个历史 tick 都已保留。
+- 新快照的可选哈希字段 `strike_boundary_reason_codes_version: 1` 声明方向码能力。无能力标记、遗留 `hard_strike`、失败/未知 scope、缺失或不兼容文件不能证明零；未知计数为 `null`，正文写“该期无数据”或部分覆盖。无标记且没有方向码的文件提前记录为不支持，不计入已验证观测；无标记但有方向码的文件仍走原 loader，合格时保留部分观测。所有被采纳记录继续验证原始快照及依赖。只有完整、有标记的数据能报告真实 0。覆盖仅指留存记录，不证明每个历史 tick 都已保留。
 - B 的 signed distance 为 `(spot - boundary) / boundary * 100`；max 边界压力等于此值，min 边界压力取相反数。v1 以现价为分母，v2 明确改为边界分母。缺价仍保留边界行。
 
 规则常量随版本固定。N 是有效封存 policy 与当前边界同值的可比较观测；R 是方向与 threshold 同值的拒绝；C 是 R 中只因四种 strike 方向码拒绝的观测。多原因含非 strike 拒绝的不计入 C。共同门槛：启用且边界有效，价格有效、时间有时区且不在未来/不超过 96 小时，相关 A 完整，N ≥ 30，观测日期 ≥ 3。

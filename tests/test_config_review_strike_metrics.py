@@ -310,3 +310,46 @@ def test_seal_selection_falls_back_for_nested_keys_and_unusual_json(tmp_path):
     path.write_text("invalid JSON")
     with pytest.raises(ValueError):
         _snapshot_sealed_at(path)
+
+
+@pytest.mark.parametrize("reasons", [[], [{"reason": "hard_strike"}]])
+def test_unmarked_nondirectional_history_is_unknown_without_expensive_admission(tmp_path, monkeypatch, reasons):
+    from src.application import opening_candidate_snapshot as owner
+    from src.application.reports.strike_metrics import collect_candidate_evidence
+
+    path = tmp_path / "output_runs/old-run/accounts/fixture/state/opening_candidate_snapshot.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"sealed_at_utc": "2026-11-03T04:00:00Z", "scan_mode": "standard",
+                                "candidate_decisions": [{"opening_decision": {"rejects": reasons}}]}, sort_keys=True))
+    calls = []
+
+    def forbidden(**kwargs):
+        calls.append(kwargs)
+        raise AssertionError("unusable history must not require full admission")
+
+    monkeypatch.setattr(owner, "load_opening_candidate_snapshot", forbidden)
+    evidence = collect_candidate_evidence(tmp_path, NOW)
+    assert calls == [] and evidence["snapshots"] == []
+    assert "directional history capability is unavailable" in evidence["errors"][0]["detail"]
+    assert summarize_rejections(evidence)["count"] is None
+
+
+def test_unmarked_positive_direction_still_requires_canonical_validation(tmp_path, monkeypatch):
+    from src.application import opening_candidate_snapshot as owner
+    from src.application.reports.strike_metrics import collect_candidate_evidence
+
+    path = tmp_path / "output_runs/old-run/accounts/fixture/state/opening_candidate_snapshot.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"sealed_at_utc": "2026-11-03T04:00:00Z", "scan_mode": "standard",
+                                "candidate_decisions": [{"opening_decision": {"rejects": [{"reason": "put_strike_above_max"}]}}]}, sort_keys=True))
+    calls = []
+
+    def canonical(**kwargs):
+        calls.append(kwargs)
+        raise owner.OpeningCandidateSnapshotError("canonical admission remains mandatory")
+
+    monkeypatch.setattr(owner, "load_opening_candidate_snapshot", canonical)
+    evidence = collect_candidate_evidence(tmp_path, NOW)
+    assert len(calls) == 1 and calls[0]["require_current_contract"] is False
+    assert evidence["snapshots"] == []
+    assert "canonical admission remains mandatory" in evidence["errors"][0]["detail"]

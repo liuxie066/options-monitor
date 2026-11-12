@@ -114,6 +114,14 @@ def collect_candidate_evidence(runtime_root: str | Path, now: datetime) -> dict[
                 continue
             if envelope.get("scan_mode") != "standard":
                 raise ValueError("snapshot scan mode is missing or unsupported")
+            if envelope.get("strike_boundary_reason_codes_version") is None and not any(
+                reject.get("reason") in DIRECTIONS
+                for row in envelope.get("candidate_decisions") or []
+                for reject in (row.get("opening_decision") or {}).get("rejects") or []
+            ):
+                # No usable directional fact can be admitted from this history.
+                # Reject cheaply; never count unvalidated legacy data as zero.
+                raise ValueError("directional history capability is unavailable")
             run_id, account = path.parts[-5], path.parts[-3]
             snapshot = load_opening_candidate_snapshot(
                 base=root, run_id=run_id, account=account, require_current_contract=False,

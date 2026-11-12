@@ -453,7 +453,7 @@ def _render_review_sections(payload: dict[str, Any]) -> str:
                   "## 指标 A：strike 边界拒绝", "",
                   f"数据覆盖：**{coverage_text[metric['coverage']]}**；快照 {metric['snapshot_count']} 份，"
                   f"决策 {metric['decision_count']} 次，日期 {len(metric['dates'])} 个。",
-                  f"旧 hard_strike：{metric['legacy_hard_strike_count']} 次，方向不可恢复；缺失不能当作0。",
+                  f"已验证观测中的旧 hard_strike：{metric['legacy_hard_strike_count']} 次；未验证历史不计入，方向不可恢复，缺失不能当作0。",
                   f"快照读取/验证缺口：{len(metric['errors'])}；封存范围：{metric['sealed_at_min'] or '无'} ～ {metric['sealed_at_max'] or '无'}。", "",
                   "计数是账户扫描观测；同一合约会重复出现，不等于独立交易机会。完整性仅指已取得的留存快照。", "",
                   "| 市场 | 快照 | 方向拒绝观测 | 覆盖 |", "| --- | ---: | ---: | --- |"])
