@@ -432,6 +432,9 @@ def service_lifecycle(
 ) -> dict[str, Any]:
     """Preview, then apply using the returned preview_sha256 and identical scope.
 
+    planned_operations contains single-key objects: write/remove map to a path,
+    and command maps to an argv list, for every action and provider.
+
     system/unit_root/euid/run_cmd are dependency-injection points for fixtures.
     Nonstandard roots require an injected runner and cannot call the host manager.
     """
@@ -652,7 +655,9 @@ def service_lifecycle(
     out = {"ok": True, "action": action, "status": "preview", "scope": scope, "preview_sha256": token,
            "files": public_files, "input_files": inputs, "tasks": [unit["name"] for unit in units], "side_effects": _SIDE_EFFECTS,
            "required_credentials": required, "missing_credentials": missing, "unreadable_credential_metadata": inaccessible, "credential_readiness": "encrypted_store_metadata_only" if provider == "systemd" else "keychain_runtime_not_checked",
-           "planned_operations": ([{"remove" if item.get("remove") else "write": item["path"]} for item in changed_files] + ([["systemctl", "daemon-reload"]] if provider == "systemd" else []) if action == "install" else commands),
+           "planned_operations": ([{"remove" if item.get("remove") else "write": item["path"]} for item in changed_files]
+                                  + ([{"command": ["systemctl", "daemon-reload"]}] if provider == "systemd" else [])
+                                  if action == "install" else [{"command": command} for command in commands]),
            "before": before, "operations": [], "changed": False, "files_changed": False, "confirmed": bool(confirm)}
     if not confirm:
         return attach_write_contract(out, dry_run=True, write_applied=False, generate_audit_id=False)

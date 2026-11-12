@@ -516,6 +516,46 @@ def test_install_start_and_stop_share_profile_and_idempotent_state(instance, tmp
     assert (instance / 'service.profile.json').exists()
 
 
+@pytest.mark.parametrize('target', ['systemd', 'launchd'])
+@pytest.mark.parametrize('action', ['install', 'start', 'stop'])
+def test_cli_planned_operations_use_objects_for_every_action(instance, tmp_path, target, action):
+    from functools import partial
+    from src.interfaces.cli.main import parse_args
+    from src.interfaces.cli.service_ops import handle_service_update_command
+
+    ctx, manager = context(instance, tmp_path, target)
+    if action != 'install':
+        apply('install', ctx)
+    if action == 'stop':
+        apply('start', ctx)
+    manager.calls.clear()
+    lifecycle = partial(service_lifecycle, unit_root=ctx['unit_root'], system=ctx['system'],
+                        run_cmd=manager, credential_store_root=ctx['credential_store_root'])
+    command = ['service', action, '--runtime-root', str(instance), '--target', target]
+    preview = handle_service_update_command(parse_args(command), service_lifecycle_fn=lifecycle,
+                                            repo_base_fn=lambda: REPO)
+    planned = preview['data']['planned_operations']
+    assert planned
+    assert not any(item.get('remove') == '/not-planned' for item in planned)
+    assert all(isinstance(item, dict) and len(item) == 1 for item in planned)
+    commands = [item['command'] for item in planned if 'command' in item]
+    if action == 'install':
+        assert commands == ([['systemctl', 'daemon-reload']] if target == 'systemd' else [])
+        assert all(set(item) <= {'write', 'remove', 'command'} for item in planned)
+    else:
+        assert len(commands) == len(planned)
+    assert not any(call[1] not in {'show', 'print', 'print-disabled'} for call in manager.calls)
+
+    confirmed = handle_service_update_command(
+        parse_args(command + ['--confirm', '--expected-preview-sha256', preview['data']['preview_sha256']]),
+        service_lifecycle_fn=lifecycle, repo_base_fn=lambda: REPO,
+    )
+    assert confirmed['data']['ok'], confirmed
+    assert confirmed['data']['planned_operations'] == planned
+    actual_commands = [call for call in manager.calls if call[1] not in {'show', 'print', 'print-disabled'}]
+    assert actual_commands == commands
+
+
 def test_stale_preview_rejected_before_writes(instance, tmp_path):
     ctx, manager = context(instance, tmp_path, 'systemd')
     preview = service_lifecycle('install', **ctx)
