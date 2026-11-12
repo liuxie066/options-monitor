@@ -1137,6 +1137,7 @@ def test_run_one_account_reuses_validated_close_inputs_without_legacy_text_proje
         "account": "lx",
         "gate": False,
         "refreshed": False,
+        "quote_refresh_gate": False,
     }
     assert all(
         isinstance(event["duration_ms"], int)
@@ -1275,6 +1276,7 @@ def test_run_one_account_passes_a_datetime_to_roll_portfolio_refresh(
         "account": "lx",
         "gate": True,
         "refreshed": True,
+        "quote_refresh_gate": False,
     }
 
 
@@ -1406,3 +1408,26 @@ def test_roll_portfolio_refresh_gate_requires_an_open_short_call() -> None:
         ],
     })
     assert not module._has_open_short_call(None)
+
+
+def test_roll_quote_refresh_gate_requires_an_open_short_put() -> None:
+    from src.application import account_run as module
+
+    assert module._has_open_short_put({
+        "open_positions_min": [
+            {"option_type": "put", "side": "short", "contracts_open": 1},
+            {"option_type": "call", "side": "short", "contracts_open": 1},
+        ],
+    })
+    assert not module._has_open_short_put({
+        "open_positions_min": [
+            {"option_type": "put", "side": "long", "contracts_open": 1},
+            {"option_type": "call", "side": "short", "contracts_open": 1},
+        ],
+    })
+    assert not module._has_open_short_put({
+        "open_positions_min": [
+            {"option_type": "put", "side": "short", "contracts_open": 0},
+        ],
+    })
+    assert not module._has_open_short_put(None)

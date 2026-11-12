@@ -25,6 +25,7 @@ from src.application.config_sections import (
     resolve_watchlist_config,
 )
 from src.application.close_advice_runner import run_close_advice
+from src.application.roll_quote_refresh import refresh_roll_quote_evidence
 from src.application.futu_portfolio_context import fetch_futu_portfolio_context
 from src.application.portfolio_context_service import load_account_portfolio_context
 from src.application.prepared_portfolio_context import (
@@ -136,6 +137,27 @@ def _has_open_short_call(context: Mapping[str, Any] | None) -> bool:
         if not isinstance(row, Mapping):
             continue
         if row.get("option_type") != "call" or row.get("side") != "short":
+            continue
+        try:
+            contracts = int(row.get("contracts_open") or 0)
+        except (TypeError, ValueError):
+            continue
+        if contracts > 0:
+            return True
+    return False
+
+
+def _has_open_short_put(context: Mapping[str, Any] | None) -> bool:
+    """Short-put roll advice anchors its window on the sealed option quotes."""
+    if not isinstance(context, Mapping):
+        return False
+    rows = context.get("open_positions_min")
+    if not isinstance(rows, list):
+        return False
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        if row.get("option_type") != "put" or row.get("side") != "short":
             continue
         try:
             contracts = int(row.get("contracts_open") or 0)
@@ -703,6 +725,7 @@ def run_one_account(
             roll_refresh_gate = prepared_portfolio is not None and _has_open_short_call(
                 prepared_option_context
             )
+            quote_refresh_gate = _has_open_short_put(prepared_option_context)
             roll_refresh_used = False
             if roll_refresh_gate:
                 sealed_portfolio = prepared_portfolio
@@ -722,6 +745,7 @@ def run_one_account(
                     "account": acct,
                     "gate": roll_refresh_gate,
                     "refreshed": roll_refresh_used,
+                    "quote_refresh_gate": quote_refresh_gate,
                 },
             )
             t_stage = monotonic()
@@ -742,6 +766,9 @@ def run_one_account(
                 account=acct,
                 context_override=prepared_option_context,
                 portfolio_context_override=prepared_portfolio,
+                roll_quote_refresh_fn=(
+                    refresh_roll_quote_evidence if quote_refresh_gate else None
+                ),
                 required_data_snapshot_manifest_sha256=(
                     request.required_data_snapshot_sha256
                 ),

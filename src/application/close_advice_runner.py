@@ -63,6 +63,8 @@ from src.application.position_advice_evidence import current_position_advice_evi
 from src.application.position_advice_plugin import evaluate_close_advice, position_advice_plugin_status, require_position_advice_plugin, PositionAdviceUnavailableError
 from src.application.source_receipts import sha256_bytes
 from src.application.short_put_roll import evaluate_frozen_position_roll
+from src.application.roll_quote_refresh import ROLL_QUOTE_REFRESH_MIN_AGE_SECONDS
+from src.application.opening_quote_evidence import OPENING_QUOTE_MAX_AGE_SECONDS
 from src.application.market_data_provider import resolve_market_data_provider
 from src.application.required_data_snapshot import assert_required_data_source
 from src.application.required_data_snapshot import (
@@ -1128,6 +1130,211 @@ def _load_frozen_required_data_quotes(
     return quotes
 
 
+def _roll_quote_refresh(
+    *,
+    refresh_fn: Any,
+    quotes: dict[tuple[str, str, str, str], dict[str, Any]],
+    positions: list[dict[str, Any]],
+    requirements: Mapping[str, Mapping[str, Any]],
+    provenance: Mapping[str, Mapping[str, Any]],
+    market_dates: Mapping[str, date],
+    config: Mapping[str, Any],
+    base_dir: Path,
+    now: datetime,
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Re-observe open short-put roll contracts through the plan's fetch route.
+
+    The window re-anchored here is the same one ``evaluate_frozen_position_roll``
+    consumes: overlaying a fresh row for an existing sealed identity changes
+    only its observation timestamps, never the frozen candidate set. Symbols
+    whose sealed evidence is still inside the refresh threshold keep their
+    sealed rows and say so in the returned audit block. Fresh market-state and
+    quote-rights receipts follow the refreshed snapshots so the evidence
+    coherence rules still hold.
+    """
+    scopes: dict[str, list[tuple[str, str]]] = {}
+    for position in positions:
+        if str(position.get("option_type") or "").strip().lower() != "put":
+            continue
+        try:
+            contracts = int(position.get("contracts_open") or 0)
+        except (TypeError, ValueError):
+            continue
+        if contracts <= 0:
+            continue
+        scope = (requirements.get(advice_position_key(position)) or {}).get("roll_scope")
+        if not isinstance(scope, Mapping):
+            continue
+        old_expiry = _position_expiration(position)
+        max_expiry = str(scope.get("max_new_expiration") or "").strip()
+        if not old_expiry or not max_expiry:
+            continue
+        symbol = _quote_key(
+            position.get("symbol"), "put", old_expiry, position.get("strike"),
+            base_dir=base_dir,
+        )[0]
+        if symbol:
+            scopes.setdefault(symbol, []).append((old_expiry, max_expiry))
+    if not scopes:
+        return {}, {}
+    evidence: dict[str, dict[str, Any]] = {}
+    receipts: dict[str, dict[str, Any]] = {}
+    pending: list[tuple[dict[str, Any], set[tuple[str, str, str, str]], float | None]] = []
+    for symbol, ranges in sorted(scopes.items()):
+        keys = {
+            key
+            for key in quotes
+            if key[0] == symbol
+            and key[1] == "put"
+            and any(start <= key[2] <= end for start, end in ranges)
+        }
+        if not keys:
+            evidence[symbol] = {
+                "source": "point_of_use_refresh",
+                "status": "unavailable",
+                "reason_codes": ["quote_refresh_scope_missing"],
+                "refreshed_at_utc": now.isoformat(),
+            }
+            continue
+        sealed_observations = [
+            value
+            for key in keys
+            for field in ("snapshot_received_at_utc", "spot_observed_at_utc")
+            if (value := aware_time((quotes.get(key) or {}).get(field))) is not None
+        ]
+        sealed_observed = min(sealed_observations) if sealed_observations else None
+        age = (now - sealed_observed).total_seconds() if sealed_observed else None
+        if age is not None and age < ROLL_QUOTE_REFRESH_MIN_AGE_SECONDS:
+            evidence[symbol] = {
+                "source": "sealed_scan",
+                "status": "not_needed",
+                "observed_at_utc": sealed_observed.isoformat(),
+                "sealed_age_seconds": round(age, 3),
+            }
+            continue
+        binding = (
+            (
+                (provenance.get(symbol) or {}).get("expected_fetch_contract")
+                or {}
+            ).get("fetch_binding")
+            or {}
+        )
+        host, port = binding.get("host"), binding.get("port")
+        if not host or port in (None, ""):
+            evidence[symbol] = {
+                "source": "point_of_use_refresh",
+                "status": "unavailable",
+                "reason_codes": ["quote_refresh_binding_unavailable"],
+                "observed_at_utc": (
+                    sealed_observed.isoformat() if sealed_observed else None
+                ),
+                "sealed_age_seconds": round(age, 3) if age is not None else None,
+            }
+            continue
+        strikes = [value for key in keys if (value := safe_float(key[3])) is not None]
+        trading_date = market_dates.get(_market_for_symbol(symbol))
+        pending.append((
+            {
+                "symbol": symbol,
+                "host": str(host),
+                "port": int(port),
+                "expirations": sorted({key[2] for key in keys}),
+                "min_strike": min(strikes) if strikes else None,
+                "max_strike": max(strikes) if strikes else None,
+                "trading_date": trading_date.isoformat() if trading_date else None,
+            },
+            keys,
+            age,
+        ))
+    if not pending:
+        return evidence, receipts
+    try:
+        refreshed = refresh_fn(
+            targets=[target for target, _keys, _age in pending],
+            config=config,
+            base_dir=Path(base_dir),
+        )
+    except Exception:
+        refreshed = {
+            "status": "unavailable",
+            "reason_codes": ["quote_refresh_failed"],
+            "rows": {},
+        }
+    refreshed = refreshed if isinstance(refreshed, Mapping) else {}
+    rows_by_symbol = (
+        refreshed.get("rows") if isinstance(refreshed.get("rows"), Mapping) else {}
+    )
+    market_state_by_symbol = (
+        refreshed.get("market_state")
+        if isinstance(refreshed.get("market_state"), Mapping)
+        else {}
+    )
+    quote_rights_by_market = (
+        refreshed.get("quote_rights")
+        if isinstance(refreshed.get("quote_rights"), Mapping)
+        else {}
+    )
+    refresh_reasons = [
+        str(reason) for reason in refreshed.get("reason_codes") or [] if str(reason)
+    ]
+    for target, keys, age in pending:
+        symbol = str(target["symbol"])
+        overlaid = 0
+        observations: list[datetime] = []
+        for row in rows_by_symbol.get(symbol) or []:
+            if not isinstance(row, Mapping):
+                continue
+            quote_key = _quote_key(
+                row.get("symbol") or symbol,
+                row.get("option_type"),
+                row.get("expiration"),
+                row.get("strike"),
+                base_dir=base_dir,
+            )
+            if quote_key not in keys:
+                continue
+            quotes[quote_key] = dict(row)
+            overlaid += 1
+            for field in ("snapshot_received_at_utc", "spot_observed_at_utc"):
+                value = aware_time(row.get(field))
+                if value is not None:
+                    observations.append(value)
+        if overlaid == 0:
+            status = "unavailable"
+            reasons = [*refresh_reasons, "quote_refresh_unmatched_contracts"]
+        elif overlaid < len(keys):
+            status = "partial"
+            reasons = [*refresh_reasons, "quote_refresh_partial"]
+        else:
+            status = "refreshed"
+            reasons = list(refresh_reasons)
+        refreshed_observed = min(observations) if observations else None
+        if overlaid and (
+            refreshed_observed is None
+            or (now - refreshed_observed).total_seconds() > OPENING_QUOTE_MAX_AGE_SECONDS
+        ):
+            status = "stale"
+            reasons = [*reasons, "quote_refresh_observed_stale"]
+        evidence[symbol] = {
+            "source": "point_of_use_refresh",
+            "status": status,
+            "observed_at_utc": (
+                refreshed_observed.isoformat() if refreshed_observed else None
+            ),
+            "refreshed_at_utc": now.isoformat(),
+            "sealed_age_seconds": round(age, 3) if age is not None else None,
+            "contracts_expected": len(keys),
+            "contracts_refreshed": overlaid,
+            "reason_codes": sorted(set(reasons)),
+        }
+        if overlaid:
+            receipts[symbol] = {
+                **(market_state_by_symbol.get(symbol) or {}),
+                **(quote_rights_by_market.get(_market_for_symbol(symbol)) or {}),
+            }
+    return evidence, receipts
+
+
 def _apply_required_data_row_provenance(
     row: dict[str, Any],
     *,
@@ -1195,6 +1402,7 @@ def run_close_advice(
     account: str | None = None,
     context_override: Mapping[str, Any] | None = None,
     portfolio_context_override: Mapping[str, Any] | None = None,
+    roll_quote_refresh_fn: Any = None,
     required_data_snapshot_manifest_sha256: str | None = None,
     now_utc: datetime | None = None,
 ) -> dict[str, Any]:
@@ -1378,6 +1586,17 @@ def run_close_advice(
             base_dir=Path(base_dir),
             provenance_by_symbol=frozen_provenance,
         )
+        roll_quote_evidence, roll_quote_receipts = _roll_quote_refresh(
+            refresh_fn=roll_quote_refresh_fn,
+            quotes=quotes,
+            positions=quote_positions,
+            requirements=frozen_requirements_by_lot,
+            provenance=frozen_provenance,
+            market_dates=market_dates,
+            config=config,
+            base_dir=Path(base_dir),
+            now=decision_now,
+        )
     except RequiredDataSnapshotError as exc:
         return _snapshot_integrity_failure_result(
             output_dir=output_dir,
@@ -1487,7 +1706,11 @@ def run_close_advice(
             quote=quote,
         )
         observation, observation_flags = current_position_advice_evidence(
-            position=pos0, quote=quote, requirement=frozen_requirements_by_lot.get(lot_id),
+            position=pos0, quote=quote,
+            requirement={
+                **(frozen_requirements_by_lot.get(lot_id) or {}),
+                **(roll_quote_receipts.get(key[0]) or {}),
+            },
             market=market, now_utc=decision_now,
         )
         row.update(observation)
@@ -1540,7 +1763,10 @@ def run_close_advice(
         else:
             row["evaluation_status"] = "priced"
             row["quote_status"] = "priced"
-        requirement = frozen_requirements_by_lot.get(lot_id) or {}
+        requirement = {
+            **(frozen_requirements_by_lot.get(lot_id) or {}),
+            **(roll_quote_receipts.get(key[0]) or {}),
+        }
         if requirement.get("roll_scope"):
             roll = evaluate_frozen_position_roll(
                 position=pos0, positions_context=ctx, portfolio_context=portfolio_context_override,
@@ -1548,6 +1774,7 @@ def run_close_advice(
                 quotes=[value for quote_identity, value in quotes.items() if quote_identity[0] == key[0]],
                 provenance=frozen_provenance.get(key[0], {}), config=config, now=decision_now,
                 unavailable_reason=frozen_plan_reasons.get(advice_position_key(pos0)),
+                quote_evidence=roll_quote_evidence.get(key[0]),
             )
             row["roll_advice"] = json.dumps(roll, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
         status = str(row.get("evaluation_status") or "unknown").strip().lower() or "unknown"

@@ -234,7 +234,10 @@ def test_point_of_use_refresh_keeps_put_roll_deliverable(tmp_path, monkeypatch, 
     now, row, roll = _run_close_advice(
         tmp_path, monkeypatch, pipeline, refresh_fn=refresh_roll_quote_evidence,
     )
-    assert (roll["status"], roll["outcome"]) == ("success", "found"), roll
+    assert (roll["status"], roll["outcome"]) == ("success", "found"), {
+        key: roll.get(key)
+        for key in ("status", "outcome", "reason_codes", "quote_evidence")
+    }
     evidence = roll["quote_evidence"]
     assert evidence["source"] == "point_of_use_refresh"
     assert evidence["status"] == "refreshed"
@@ -264,8 +267,54 @@ def test_refresh_with_stale_quotes_keeps_candidate_dropped(tmp_path, monkeypatch
         refresh_rows_age_seconds=400,
     )
     assert roll["quote_evidence"]["source"] == "point_of_use_refresh"
+    assert roll["quote_evidence"]["status"] == "stale"
+    assert "quote_refresh_observed_stale" in roll["quote_evidence"]["reason_codes"]
+    assert roll.get("candidates") in (None, [],)
+    brief = _brief_with(tmp_path, row)
+    assert daily_brief_roll_notification_identities(
+        brief, now_utc=now + timedelta(seconds=DELIVERY_DELAY_SECONDS)
+    ) == set()
+
+
+def test_fresh_sealed_evidence_skips_the_refresh(tmp_path, monkeypatch, pipeline):  # noqa: F811
+    """Inside the refresh threshold the sealed rows stay authoritative."""
+    from src.application.roll_quote_refresh import refresh_roll_quote_evidence
+
+    calls = []
+
+    def refresh(**kwargs):
+        calls.append(kwargs)
+        return refresh_roll_quote_evidence(**kwargs)
+
+    now, row, roll = _run_close_advice(
+        tmp_path, monkeypatch, pipeline,
+        sealed_age_seconds=60, refresh_fn=refresh,
+    )
+    assert calls == []
+    assert roll["quote_evidence"]["source"] == "sealed_scan"
+    assert roll["quote_evidence"]["status"] == "not_needed"
+    assert roll["quote_evidence"]["sealed_age_seconds"] >= 60
+    assert roll["quote_evidence"]["window_anchor"] == "quote_observation"
+    assert datetime.fromisoformat(roll["actionable_until_utc"]) > (
+        now + timedelta(seconds=DELIVERY_DELAY_SECONDS)
+    )
+
+
+def test_refresh_failure_stays_fail_closed(tmp_path, monkeypatch, pipeline):  # noqa: F811
+    """An unavailable refresh neither crashes nor sends the stale window."""
+    def refresh(**kwargs):
+        raise TimeoutError("isolated refresh failure")
+
+    now, row, roll = _run_close_advice(
+        tmp_path, monkeypatch, pipeline, refresh_fn=refresh,
+    )
+    assert roll["quote_evidence"]["source"] == "point_of_use_refresh"
+    assert roll["quote_evidence"]["status"] == "unavailable"
+    assert "quote_refresh_failed" in roll["quote_evidence"]["reason_codes"]
     if roll.get("candidates"):
-        assert datetime.fromisoformat(roll["actionable_until_utc"]) <= now
+        assert datetime.fromisoformat(roll["actionable_until_utc"]) <= (
+            now + timedelta(seconds=DELIVERY_DELAY_SECONDS)
+        )
     brief = _brief_with(tmp_path, row)
     assert daily_brief_roll_notification_identities(
         brief, now_utc=now + timedelta(seconds=DELIVERY_DELAY_SECONDS)
