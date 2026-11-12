@@ -3,8 +3,8 @@
 <!--
   Template for the weekly config review report.
 
-  Replace __OM_BIN__, __RUNTIME_ROOT__, __CONFIGS_ROOT__, __ENV_FILE__, and
-  __LOG_DIR__ before installing under ~/Library/LaunchAgents/.  The report
+  Replace __OM_BIN__, __RUNTIME_ROOT__, __CONFIGS_ROOT__, __ENV_FILE__,
+  __LOG_DIR__, and __HOME__ before installing under ~/Library/LaunchAgents/.  The report
   declares Feishu delivery; __ENV_FILE__ must point at the same bot settings
   the daily brief uses (OM_FEISHU_BOT_*).  When those settings are absent or
   the optional Feishu plugin is not installed, the report is still written and

@@ -34,7 +34,7 @@ def _feishu_success(**kwargs):
     }
 
 
-def _run_args(tmp_path: Path, *extra: str) -> list[str]:
+def _run_args(tmp_path: Path, *extra: str, json_output: bool = True) -> list[str]:
     configs = tmp_path / "configs"
     configs.mkdir(exist_ok=True)
     (configs / "user.hk.json").write_text(
@@ -71,7 +71,7 @@ def _run_args(tmp_path: Path, *extra: str) -> list[str]:
         str(configs),
         "--prices-file",
         str(prices),
-        "--json",
+        *(["--json"] if json_output else []),
         *extra,
     ]
 
@@ -257,7 +257,7 @@ def test_report_run_delivers_and_records_manifest(
     assert manifest["delivery"]["status"] == "delivered"
 
 
-def test_report_run_delivery_failure_keeps_report_and_exits_nonzero(
+def test_report_run_delivery_failure_json_mode_keeps_report_and_exits_nonzero(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from src.application.reports import delivery
@@ -287,3 +287,54 @@ def test_report_run_delivery_failure_keeps_report_and_exits_nonzero(
     assert payload["delivery"]["status"] == "failed"
     assert (Path(payload["run_dir"]) / "report.md").is_file()
     assert "投递失败" in captured.err
+
+
+def test_report_dry_run_never_delivers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from src.application.reports import delivery
+    from src.interfaces.cli.main import main
+
+    monkeypatch.setattr(delivery, "channel_plugin_installed", lambda channel: True)
+    monkeypatch.setattr(delivery, "resolve_feishu_bot_config", lambda: _bot())
+    monkeypatch.setattr(
+        delivery,
+        "send_feishu_app_message",
+        lambda **kwargs: pytest.fail("--dry-run must not send"),
+    )
+
+    assert main(_run_args(tmp_path, "--dry-run")) == 0
+    capsys.readouterr()
+    assert not (tmp_path / "runtime" / "reports").exists()
+
+
+def test_report_run_delivery_failure_text_mode_keeps_report_and_exits_nonzero(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from src.application.reports import delivery
+    from src.interfaces.cli.main import main
+
+    monkeypatch.setattr(delivery, "channel_plugin_installed", lambda channel: True)
+    monkeypatch.setattr(delivery, "resolve_feishu_bot_config", lambda: _bot())
+    monkeypatch.setattr(
+        delivery,
+        "send_feishu_app_message",
+        lambda **kwargs: {
+            "ok": False,
+            "http_status": 500,
+            "feishu_code": 19001,
+            "request_path": "/open-apis/im/v1/messages",
+            "idempotency_key": kwargs.get("idempotency_key"),
+            "http_attempts": [],
+            "response_json": {"code": 19001, "msg": "server error"},
+        },
+    )
+
+    assert main(_run_args(tmp_path, json_output=False)) == 1
+    captured = capsys.readouterr()
+    assert "投递失败" in captured.err
+    reports = list((tmp_path / "runtime" / "reports" / "config_review").glob("*/report.md"))
+    assert len(reports) == 1
+    assert "运行成功" in captured.out
+    assert "feishu_app 投递失败" in captured.out
+
