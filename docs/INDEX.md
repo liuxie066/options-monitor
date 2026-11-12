@@ -100,7 +100,8 @@
 ## 运维、修复与发布
 
 - [Guardrails](GUARDRAILS.md)：本地 hook 与 CI 门禁。
-- [Report Center](REPORT_CENTER.md)：报告注册表、`om report` 入口、统一产物、调度描述与迁移顺序。
+- [Report Center](REPORT_CENTER.md)：报告注册表、`om report` 入口、周度配置三态与 A/B 口径、本机调度和投递回执。
+- [Weekly Config Review Design](WEEKLY_CONFIG_REVIEW_COMPLETION_DESIGN.md)：周报目标、同值边界样本门槛、未知与真零、只读预取及安装验收边界。
 - [Option Positions Repair](OPTION_POSITIONS_REPAIR.md)：账本错账的只读诊断、dry-run 和修复。
 - [Release Process](RELEASE_PROCESS.md)：VERSION 驱动的发布流程。
 

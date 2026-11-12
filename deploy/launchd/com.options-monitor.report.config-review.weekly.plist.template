@@ -3,8 +3,10 @@
 <!--
   Template for the weekly config review report.
 
+  __OM_BIN__ points to the rendered run-config-review-weekly.sh.template.
   Replace __OM_BIN__, __RUNTIME_ROOT__, __CONFIGS_ROOT__, __ENV_FILE__,
-  __LOG_DIR__, and __HOME__ before installing under ~/Library/LaunchAgents/.  The report
+  __LOG_DIR__, __HOME__, __INPUTS_ROOT__, __REMOTE_HOST__, __REMOTE_REPO_ROOT__,
+  and __REMOTE_RUNTIME_ROOT__ before installing under ~/Library/LaunchAgents/. The report
   declares Feishu delivery; __ENV_FILE__ must point at the same bot settings
   the daily brief uses (OM_FEISHU_BOT_*).  When those settings are absent or
   the optional Feishu plugin is not installed, the report is still written and
@@ -57,6 +59,10 @@
     <key>LANG</key><string>en_US.UTF-8</string>
     <key>PYTHONDONTWRITEBYTECODE</key><string>1</string>
     <key>OM_ENV_FILE</key><string>__ENV_FILE__</string>
+    <key>OM_REPORT_INPUTS_ROOT</key><string>__INPUTS_ROOT__</string>
+    <key>OM_REPORT_REMOTE_HOST</key><string>__REMOTE_HOST__</string>
+    <key>OM_REPORT_REMOTE_REPO_ROOT</key><string>__REMOTE_REPO_ROOT__</string>
+    <key>OM_REPORT_REMOTE_RUNTIME_ROOT</key><string>__REMOTE_RUNTIME_ROOT__</string>
   </dict>
   <key>StandardOutPath</key>
   <string>__LOG_DIR__/config-review.stdout.log</string>

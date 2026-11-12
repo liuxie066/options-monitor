@@ -49,12 +49,12 @@
 直接代码证据：
 
 - `src/application/reports/config_review.py::build_config_review` 已读取 HK/US 用户配置并合并已有 defaults，目前没有 A 或三态判断。复查确认 v1 距离公式实际为 `(spot - boundary) / spot * 100`；本设计已确认的 v2 定义改用边界作分母，见第 5 节。
-- 同模块 `_load_market_configs` / `_symbol_row` 已拥有配置边界清单，包括 `sell_put`、`sell_call`、Combo 明确支持的腿部边界。扩展此 owner，不另写一套配置继承规则。
+- 同模块 `_load_market_configs` / `_symbol_payload` 已拥有配置边界清单，包括 `sell_put`、`sell_call`、Combo 明确支持的腿部边界。扩展此 owner，不另写一套配置继承规则。
 - `src/application/reports/prices.py::resolve_price_snapshot` 已处理显式 prices 文件与本机 brief 中的最近价格观察；不在报告中另建行情客户端。
 - `src/application/reports/runner.py::execute_report` 已负责生成、落盘、投递和最终 run receipt。`reports/delivery.py::deliver_report` 已调用现有 notification owner。
 - `src/application/opening_candidate_snapshot.py::load_opening_candidate_snapshot` 与 `validate_opening_candidate_snapshot` 拥有封存快照完整性和决策合同；报告不能仅凭文件名信任 JSON。
 - `src/application/tick_run_workspace.py` 的快照路径为 `output_runs/<run_id>/accounts/<account>/state/opening_candidate_snapshot.json`。
-- `domain/domain/engine/candidate_engine.py::_strike_window_rejects` 产生四种方向码。`threshold` 是当次生效边界，可能来自配置、spot、成本底价或窗口比例。
+- `domain/domain/engine/candidate_engine.py::evaluate_opening_candidate_policy` 产生四种方向码。`threshold` 是当次生效边界，可能来自配置、spot、成本底价或窗口比例。
 - `domain/domain/insurance_underwriting.py::underwriting_fields` 中，call 的 `policy_min_strike` 可能已经是 effective min，不能把这个字段无条件称为原始用户配置。
 - `src/application/opening_candidate_snapshot.py::candidate_universe_summary` 拥有 scan completion / incomplete 的投影；报告复用，不重建完成状态解释器。
 - 已按 `docs/API_INDEX.md` 搜索候选、扫描状态及身份 owner；目前未登记另一套周度 strike 拒绝指标。
@@ -271,7 +271,7 @@ min 边界：pressure_pct = -distance_pct
 
 不导出完整 `account_run_config.json`，不复制 Feishu 凭证、OpenD 登录信息、持仓明细或完整历史树。导出只做验证和字段投影，A/B/三态算法只在本机报告 owner 中计算一次。
 
-实现一个任务专用的只读 exporter，作为仓库中的固定脚本随批准的本机安装版本执行；通过 SSH stdin 交给生产 venv Python，不安装文件、不修改生产 release。调用生产已经存在的快照加载/校验接口。未知接口或不兼容格式视为数据缺口，不降级为裸读并声称完整。
+只读 exporter 直接复用 `reports/strike_metrics.py` 的 `--export-root / --as-of` 执行入口；`deploy/launchd/run-config-review-weekly.py` 从批准的本机安装版本读取同一源码，经 SSH stdin 交给生产 venv Python，不安装文件、不修改生产 release。调用生产已经存在的快照加载/校验接口。未知接口或不兼容格式视为数据缺口，不降级为裸读并声称完整。这样不再维护一份独立的字段投影实现。
 
 本机 CLI 增加可选 `--candidate-evidence-file`，同 `--prices-file` 一样仅用于 `config_review`；默认未传时读取显式 `runtime_root/output_runs` 中的快照，便于本机/离线运行。两条入口共用同一投影与聚合合同，不合并不同 provenance 的数据集。
 
@@ -316,11 +316,11 @@ min 边界：pressure_pct = -distance_pct
 
 ### 8.3 飞书结果和可证明范围
 
-完全复用 `reports/delivery.py`、通知配置、`FeishuWebhookNotifier` 和既有 receipt，不新增 webhook 参数、传输器或第二套重试。
+完全复用 `reports/delivery.py` 的 `feishu_app` 通道、`resolve_feishu_bot_config`、`send_feishu_app_message` 和既有 receipt，不新增渠道参数、传输器或第二套重试。
 
 | 实际情况 | 操作者看到的说明 | 持久化状态 |
 | --- | --- | --- |
-| notify 关闭、webhook 缺失或凭证未配置 | **未配置渠道，已跳过投递**，附脱敏原因 | 原有 `skipped` |
+| 明确 `--no-deliver`、可选插件缺失或应用凭证未配置 | **已跳过投递**，附真实原因 | 原有 `skipped` |
 | 已配置但渠道拒绝，例如当前 10014 | **飞书凭证不可用，投递失败，未确认送达** | 原有 `failed` 与脱敏 reason |
 | 渠道返回成功 | **渠道已接受**，记录真实 submission result | 既有 `delivered`，不升级成更强回执 |
 | 有 OM bot 可读回的消息或用户在目标会话确认 | **已在 OM bot 确认收到** | 引用实际观察，不捏造消息 ID |
