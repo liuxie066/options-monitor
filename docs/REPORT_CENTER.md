@@ -133,7 +133,7 @@ om report schedule [--format text|json]
 ## 远端周度任务安装与切换（需明确授权）
 
 1. 从审查通过的提交安装稳定报告源码，替换 service 模板的 `@DEPLOY_USER@`、`@SOURCE_ROOT@`、`@RUNTIME_ROOT@`、`@PYTHON@`；源码和解释器必须独立于开发 worktree 和主程序 release 清理。保持主程序 symlink、配置、tick 调度不变。可复制现役依赖环境到报告专属目录，只调用其 Python，验证 `sys.prefix` 和插件导入路径；不修改共享缓存环境。
-2. service 读取 `/etc/options-monitor/options-monitor.env`；沿现役 materialize helper 从 `/etc/credstore.encrypted` 加载同一组飞书 credential IDs 到该服务专属 `CREDENTIALS_DIRECTORY`，结束时 cleanup。该模板用于已部署 helper 的 Linux 环境；不依赖本机 Keychain，不复制 secret 到源码或日志。[凭证契约](SECRET_STORAGE.md)。
+2. service 读取 `/etc/options-monitor/options-monitor.env`；沿现役 materialize helper 从 `/etc/credstore.encrypted` 加载现役 bot credential ID 到该服务专属 `CREDENTIALS_DIRECTORY`，结束时 cleanup。该模板用于已部署 helper 的 Linux 环境；不依赖本机 Keychain，不复制 secret 到源码或日志。[凭证契约](SECRET_STORAGE.md)。
 3. 审阅已渲染单元及目标文件，运行 `systemd-analyze verify`，安装 service/timer 后 reload、启用 timer；读回下次触发时间。独立单元不加入通用 service profile 或 managed allowlist，旧版本 drift 可显示 `extra_installed` 警告；确认 `ok=true`、error=0 且没有退役计划。它们的源码更新由独立报告部署维护，不随主程序自动升级。
 4. 手动 `systemctl start options-monitor-report-config-review.service`，读回终止码和 `/var/lib/options-monitor/reports/config_review/<run_id>/`。`deploy/systemd/run-config-review-weekly.py` 仅调用公共 report CLI 一次；`delivered` 且有 `message_id` 才允许服务成功。`skipped`、失败或无确认均保留报告/回执并使服务失败；不自动重发。结果不明确时先查消息和回执，再决定重跑，新命令会生成新 run。
 5. 核对实际报告配置值、价格时间、飞书消息读回及 timer 后，才 `launchctl bootout` 本机 `com.options-monitor.report.config-review.weekly`，把原 plist 移到 LaunchAgents 之外的时间戳备份；确认 job 查不到、配置文件哈希未变。保留旧源码、输入、用户 `configs/user.*.json` 和报告。远端验收失败时先保留本机调度；需回退时恢复备份 plist 并读回本机运行状态后再停远端 timer。

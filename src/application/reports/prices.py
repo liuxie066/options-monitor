@@ -19,7 +19,7 @@ import math
 from pathlib import Path
 from typing import Any, Iterable
 
-from domain.domain.symbol_identity import canonical_symbol
+from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.required_data_snapshot import (
     FrozenRequiredDataUnavailable,
@@ -191,7 +191,10 @@ def load_runtime_scan_prices(
             runs[market] = run_id
             for symbol in batch.manifest["symbols"]:
                 key = canonical_symbol(symbol)
-                if ("HK" if key.endswith(".HK") else "US") != market:
+                if key is None:
+                    gaps.append(f"{run_id} 扫描标的身份不可用：{symbol}")
+                    continue
+                if symbol_market(symbol) != market:
                     continue
                 try:
                     _entry, content = batch.resolve(symbol)
