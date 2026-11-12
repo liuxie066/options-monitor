@@ -270,3 +270,43 @@ def test_relevant_scan_failure_and_export_error_block_recommendation(tmp_path):
     assert _assess(_load(tmp_path, evidence))["conclusion"] == "观察"
     assert report_conclusion([], ["missing market"])["state"] == "观察"
     assert summarize_rejections(unavailable_evidence(NOW, "fetch_failed"))["count"] is None
+
+
+def test_out_of_week_snapshot_does_not_decode_large_candidate_body(tmp_path, monkeypatch):
+    from src.application.reports.strike_metrics import collect_candidate_evidence
+
+    path = tmp_path / "output_runs/arbitrary-name/accounts/fixture/state/opening_candidate_snapshot.json"
+    path.parent.mkdir(parents=True)
+    # Selection follows the sealed field, regardless of the directory identity.
+    path.write_text(json.dumps({"candidate_decisions": "x" * 100000,
+                                "sealed_at_utc": "2026-10-01T00:00:00Z"}, sort_keys=True))
+    original = Path.read_text
+    forbidden_reads = []
+
+    def read_text(current, *args, **kwargs):
+        if current == path:
+            forbidden_reads.append(current)
+            raise AssertionError("out-of-week body must not be fully decoded")
+        return original(current, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    evidence = collect_candidate_evidence(tmp_path, NOW)
+    assert forbidden_reads == []
+    assert evidence["snapshots"] == [] and evidence["errors"] == []
+    assert summarize_rejections(evidence)["count"] is None
+
+
+def test_seal_selection_falls_back_for_nested_keys_and_unusual_json(tmp_path):
+    from src.application.reports.strike_metrics import _snapshot_sealed_at
+
+    path = tmp_path / "snapshot.json"
+    stamp = "2026-11-03T04:00:00Z"
+    for payload in ({"sealed_at_utc": stamp, "z": {"sealed_at_utc": "2026-10-01T00:00:00Z"}},
+                    {"sealed_at_utc": stamp, "z": "x" * 100000}):
+        path.write_text(json.dumps(payload))
+        assert _snapshot_sealed_at(path) == stamp
+    path.write_text('{"sealed_at_utc" \n : "2026-11-03T04:00:00Z"}')
+    assert _snapshot_sealed_at(path) == stamp
+    path.write_text("invalid JSON")
+    with pytest.raises(ValueError):
+        _snapshot_sealed_at(path)

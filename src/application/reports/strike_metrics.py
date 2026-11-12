@@ -66,6 +66,26 @@ def unavailable_evidence(now: datetime, reason: str) -> dict[str, Any]:
             "errors": [{"reason": reason}], "excluded_runs": 0}
 
 
+def _snapshot_sealed_at(path: Path) -> Any:
+    # Canonical snapshots put this root field after the large candidate/scope
+    # arrays. Decode the suffix as an object: a nested match has unmatched outer
+    # closings and fails. This selects the week only; admission still uses the
+    # canonical loader, including dependency validation.
+    with path.open("rb") as stream:
+        stream.seek(0, 2)
+        stream.seek(max(0, stream.tell() - 65536))
+        tail = stream.read()
+    offset = tail.rfind(b'"sealed_at_utc":')
+    if offset >= 0:
+        try:
+            suffix = json.loads(b"{" + tail[offset:])
+            return suffix["sealed_at_utc"]
+        except (ValueError, KeyError):
+            pass
+    # Unusual key order/format or a large trailing field retains the old reader.
+    return json.loads(path.read_text(encoding="utf-8")).get("sealed_at_utc")
+
+
 def collect_candidate_evidence(runtime_root: str | Path, now: datetime) -> dict[str, Any]:
     """Validate originals, including dependencies, and project report-only fields."""
     from src.application.opening_candidate_snapshot import (
@@ -80,13 +100,15 @@ def collect_candidate_evidence(runtime_root: str | Path, now: datetime) -> dict[
     for path in sorted((root / "output_runs").glob("*/accounts/*/state/opening_candidate_snapshot.json")):
         relative = path.relative_to(root).as_posix()
         try:
-            # The envelope selects the window; only the canonical loader can admit it.
-            envelope = json.loads(path.read_text(encoding="utf-8"))
-            sealed = _timestamp(envelope.get("sealed_at_utc"))
+            # Select by the snapshot's seal, never its directory name or mtime.
+            sealed = _timestamp(_snapshot_sealed_at(path))
             if sealed > now.astimezone(timezone.utc):
                 raise ValueError("snapshot seal is in the future")
             if not start <= sealed < end:
                 continue
+            envelope = json.loads(path.read_text(encoding="utf-8"))
+            if _timestamp(envelope.get("sealed_at_utc")) != sealed:
+                raise ValueError("snapshot envelope changed during collection")
             if envelope.get("scan_mode") == "experience":
                 evidence["excluded_runs"] += 1
                 continue
