@@ -157,6 +157,6 @@ om service stop
 
 macOS 使用当前用户 LaunchAgents/Keychain；Linux 使用 systemd 系统服务和明确的部署用户。普通用户默认自身身份，root 必须指定 `--deploy-user`，配置与运行目录的属主必须匹配。权限不足时显示交接命令，不自动 sudo。所有可选功能关闭时，基础服务不会要求无关 Feishu/LLM 密钥。
 
-`om service render` 保留高级文件渲染能力，只生成文件和说明，不实际安装。运行包路径已随 v4.6.8 发布；launchd 升级协调的源码实现不等于实机自动升级已验收。发布资格、平台实际验收和升级边界见[发布流程](RELEASE_PROCESS.md#完整运行包的发布资格)。实际平台服务、OpenD、模型和消息投递需在授权目标环境验收，开发测试不代替这些事实。
+`om service render` 保留高级文件渲染能力，只生成文件和说明，不实际安装。运行包路径已随 v4.6.8 发布；launchd 升级协调的源码实现不等于实机自动升级已验收。发布资格、平台实际验收和升级边界见[发布流程](https://github.com/liuxie066/options-monitor/blob/main/docs/RELEASE_PROCESS.md#完整运行包的发布资格)。实际平台服务、OpenD、模型和消息投递需在授权目标环境验收，开发测试不代替这些事实。
 
-macOS 受控升级会保留完整定义不变、通过稳定 `current/om` 入口运行的瞬时升级任务，同时更新其他服务；升级任务定义变化、退役或入口不稳定时，会在切换前以 `SERVICE_UPGRADE_BUSY` 拒绝，须待任务空闲后重试。原生 launchd 自动升级尚待实机验收，详见[升级边界](RELEASE_PROCESS.md#远端自动升级)。
+macOS 受控升级会保留完整定义不变、通过稳定 `current/om` 入口运行的瞬时升级任务，同时更新其他服务；升级任务定义变化、退役或入口不稳定时，会在切换前以 `SERVICE_UPGRADE_BUSY` 拒绝，须待任务空闲后重试。原生 launchd 自动升级尚待实机验收，详见[升级边界](https://github.com/liuxie066/options-monitor/blob/main/docs/RELEASE_PROCESS.md#远端自动升级)。

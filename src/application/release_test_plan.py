@@ -91,6 +91,9 @@ TEST_RULES: tuple[TestRule, ...] = (
     TestRule(
         name="service_release",
         patterns=(
+            ".gitattributes",
+            "scripts/build_runtime_bundle.py",
+            "tests/test_source_distribution.py",
             ".github/workflows/**",
             "release/coverage/**",
             "scripts/install*",
@@ -126,6 +129,8 @@ TEST_RULES: tuple[TestRule, ...] = (
             "tests/test_release_version_recommendation.py tests/test_version_check.py "
             "tests/test_install_script.py tests/test_release_test_plan.py",
             "./.venv/bin/python -m pytest tests/test_pi_retirement.py",
+            "./.venv/bin/python -m pytest tests/test_source_distribution.py tests/test_runtime_bundle_excludes.py "
+            "tests/test_release_workflow.py",
         ),
     ),
     TestRule(

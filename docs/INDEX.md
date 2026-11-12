@@ -80,30 +80,30 @@
 - [Runtime Status History Query PRD](RUNTIME_STATUS_HISTORY_QUERY_PRD.md)：历史查询请求内去重与按需装配的已确认需求和开发分支验证；不代表已经部署。
 - [Runtime Failure Evidence and Retention Design](RUNTIME_FAILURE_EVIDENCE_DESIGN.md)：Tick/OpenD 故障终态、取证可读性与保留预览的当前合同。
 - [Runtime Failure Operations](RUNTIME_FAILURE_OPERATIONS.md)：Tick 故障取证、审计时间窗、drift 导出与只读回收预览。
-- [Dependency Graph](DEPENDENCY_GRAPH.md)：由生成脚本维护的 Python import graph。
+- [Dependency Graph](https://github.com/liuxie066/options-monitor/blob/main/docs/DEPENDENCY_GRAPH.md)：由生成脚本维护的 Python import graph。
 
 ## Tool Gateway、Bot 与消息入口
 
-- [Agent Getting Started](AGENT_GETTING_STARTED.md)：最短 Tool Gateway 接入。
-- [Agent Integration](AGENT_INTEGRATION.md)：JSON envelope、manifest 和权限合同。
+- [Agent Getting Started](https://github.com/liuxie066/options-monitor/blob/main/docs/AGENT_GETTING_STARTED.md)：最短 Tool Gateway 接入。
+- [Agent Integration](https://github.com/liuxie066/options-monitor/blob/main/docs/AGENT_INTEGRATION.md)：JSON envelope、manifest 和权限合同。
 - [Tool Reference](TOOL_REFERENCE.md)：公开工具分类、风险 metadata 和常用示例。
 - [OM Capability Surfaces](OM_AGENT_CAPABILITY_MAP.md)：Tool Gateway、Control、Bot 的能力边界。
 - [Inbound Control](INBOUND_CONTROL.md)：确定性 Control、pending operation 和 channel 安全。
 - [Bot PRD](BOT_PRD.md)：Bot产品合同及项目内通用只读助理需求。
 - [Bot / Python runtime / Scene v7](BOT_DESIGN.md)：策略、报错与过滤原因问答，个人记忆、上下文和只读工具合同；历史 Bot 数据保留与 Host schema 迁移边界。
 - [群查询bot 设计方案](GROUP_QUERY_BOT_DESIGN.md)：可选插件、新飞书机器人、自然语言与独立模型 Key，以及由 API 服务端控制的无账户行情和场景分析权限；S1–S3 本地实现与离线审查进行中，真实个人群接入、模型/行情联调和部署待验证。
-- [Agent Handbook](AGENT_WIKI.md)：本地 agent 的任务 playbook、模块地图和验证矩阵。
+- [Agent Handbook](https://github.com/liuxie066/options-monitor/blob/main/docs/AGENT_WIKI.md)：本地 agent 的任务 playbook、模块地图和验证矩阵。
 - [Session Summary](SESSION_SUMMARY.md)：仅在显式 handoff 时使用的模板。
 
 `./om tools spec`（兼容 `./om-agent spec`）是公开工具清单的运行时权威。Tool Reference 不复制每个工具的完整 schema。
 
 ## 运维、修复与发布
 
-- [Guardrails](GUARDRAILS.md)：本地 hook 与 CI 门禁。
+- [Guardrails](https://github.com/liuxie066/options-monitor/blob/main/docs/GUARDRAILS.md)：本地 hook 与 CI 门禁。
 - [Report Center](REPORT_CENTER.md)：报告注册表、`om report` 入口、周度配置三态与 A/B 口径、本机调度和投递回执。
 - [Weekly Config Review Design](WEEKLY_CONFIG_REVIEW_COMPLETION_DESIGN.md)：周报目标、同值边界样本门槛、未知与真零、只读预取及安装验收边界。
 - [Option Positions Repair](OPTION_POSITIONS_REPAIR.md)：账本错账的只读诊断、dry-run 和修复。
-- [Release Process](RELEASE_PROCESS.md)：VERSION 驱动的发布流程。
+- [Release Process](https://github.com/liuxie066/options-monitor/blob/main/docs/RELEASE_PROCESS.md)：VERSION 驱动的发布流程。
 
 ## 迁移与历史兼容
 
@@ -121,10 +121,10 @@
 
 ## 开发流程
 
-- [Agent Manual](../AGENTS.md)：任务执行规则、按任务阅读入口、已核对的开发命令及权限边界。
-- [Tests Guide](../tests/README.md)：测试分层、运行与维护约定；验证选择见 [Agent Handbook §9](AGENT_WIKI.md#9-verification-matrix)。
-- [开发经验](../LESSONS.md)：经证据支持的复用教训与维护模板；不作为当前业务合同或运行事实的替代。
-- [合并后增量巡检](CODE_HEALTH_REVIEW.md)：同一每日任务的已合并改动检查、统一 issue 与使用反馈复核、本地修复与独立审核，以及独立进度和交付授权边界。
+- [Agent Manual](https://github.com/liuxie066/options-monitor/blob/main/AGENTS.md)：任务执行规则、按任务阅读入口、已核对的开发命令及权限边界。
+- [Tests Guide](https://github.com/liuxie066/options-monitor/blob/main/tests/README.md)：测试分层、运行与维护约定；验证选择见 [Agent Handbook §9](https://github.com/liuxie066/options-monitor/blob/main/docs/AGENT_WIKI.md#9-verification-matrix)。
+- [开发经验](https://github.com/liuxie066/options-monitor/blob/main/LESSONS.md)：经证据支持的复用教训与维护模板；不作为当前业务合同或运行事实的替代。
+- [合并后增量巡检](https://github.com/liuxie066/options-monitor/blob/main/docs/CODE_HEALTH_REVIEW.md)：同一每日任务的已合并改动检查、统一 issue 与使用反馈复核、本地修复与独立审核，以及独立进度和交付授权边界。
 
 ## 工作流证据
 

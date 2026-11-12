@@ -35,6 +35,20 @@ def test_release_test_plan_maps_service_changes_without_retired_event_suite() ->
     assert {rule["name"] for rule in plan["matched_rules"]} >= {"service_release"}
 
 
+@pytest.mark.parametrize("path", [
+    ".gitattributes", "scripts/build_runtime_bundle.py", "tests/test_source_distribution.py",
+    ".github/workflows/_release-reusable.yml",
+])
+def test_release_test_plan_covers_product_distribution_changes(path: str) -> None:
+    from src.application.release_test_plan import build_release_test_plan
+
+    plan = build_release_test_plan(changed_files=[path], mode="standard")
+
+    assert "service_release" in {rule["name"] for rule in plan["matched_rules"]}
+    assert any("tests/test_source_distribution.py tests/test_runtime_bundle_excludes.py" in command
+               and "tests/test_release_workflow.py" in command for command in plan["commands"])
+
+
 def test_release_test_plan_maps_service_deploy_support_to_both_runtime_gates() -> None:
     from src.application.release_test_plan import build_release_test_plan
 
@@ -409,6 +423,10 @@ def test_release_workflow_verifies_extracted_archive_before_publish() -> None:
     assert 'ARCHIVE_ROOT="$(mktemp -d "${RUNNER_TEMP}/options-monitor-archive.XXXXXX")"' in verify
     assert 'tar -xzf "options-monitor-${{ inputs.tag }}.tar.gz" -C "${ARCHIVE_ROOT}"' in verify
     assert 'cd "${ARCHIVE_ROOT}"' in verify
+    assert 'export OM_PYTHON="${CHECKOUT_PYTHON}"' in verify
+    assert './om --help >/dev/null' in verify
+    assert './om-agent spec >/dev/null' in verify
+    assert '"${CHECKOUT_PYTHON}" scripts/release_check.py --tag "${{ inputs.tag }}"' in verify
     assert '"${CHECKOUT_PYTHON}" -c' in verify
     assert "import src.application.bot.runtime" in verify
     assert "--prefix agent-runtime" not in verify

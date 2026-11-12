@@ -70,6 +70,10 @@ jobs:
           ARCHIVE_ROOT="$(mktemp -d "${RUNNER_TEMP}/options-monitor-archive.XXXXXX")"
           tar -xzf "options-monitor-${{ inputs.tag }}.tar.gz" -C "${ARCHIVE_ROOT}"
           cd "${ARCHIVE_ROOT}"
+          export OM_PYTHON="${CHECKOUT_PYTHON}"
+          ./om --help >/dev/null
+          ./om-agent spec >/dev/null
+          "${CHECKOUT_PYTHON}" scripts/release_check.py --tag "${{ inputs.tag }}"
           "${CHECKOUT_PYTHON}" -c 'import src.application.bot.host; import src.application.bot.runtime'
 
       - name: Verify official plugin publication set

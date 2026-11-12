@@ -18,7 +18,7 @@ v4.6.9 已正式发布 `macos-arm64` 运行包。以下按[该版本实际 Relea
 
 当前锁文件的 `release_platforms` 仅含 `macos-arm64`。其他两项的 CI 构建或资格任务不等于正式运行包已发布；最低 OS 兼容声明也不等于该最低版本实机通过，不承诺所有 macOS/Linux 版本。
 
-默认安装要求目标稳定 Release 有精确匹配的 `options-monitor-<tag>-<platform>.tar.gz` 及可信 SHA-256。安装端需要 shell、HTTPS 下载工具 `curl`、`tar`、`awk`、`sed` 和 `sha256sum` 或 `shasum`，会先检查缺失工具。没有合格资产、摘要不符或平台不匹配会失败，不会自动安装编译器、Homebrew 或切换源码路径。发布证据要求见[运行包发布资格](RELEASE_PROCESS.md#完整运行包的发布资格)。
+默认安装要求目标稳定 Release 有精确匹配的 `options-monitor-<tag>-<platform>.tar.gz` 及可信 SHA-256。安装端需要 shell、HTTPS 下载工具 `curl`、`tar`、`awk`、`sed` 和 `sha256sum` 或 `shasum`，会先检查缺失工具。没有合格资产、摘要不符或平台不匹配会失败，不会自动安装编译器、Homebrew 或切换源码路径。发布证据要求见[运行包发布资格](https://github.com/liuxie066/options-monitor/blob/main/docs/RELEASE_PROCESS.md#完整运行包的发布资格)。
 
 新 Release 会先提供核心产物，运行包随后异步构建并补挂。Release 刚发布的几分钟内，正文 **Runtime bundles** 可能显示 `building`：这表示包尚未就绪，不表示该版本不提供运行包；实际等待时间取决于 Actions 排队与构建。`ready` 才表示资格回执与 SHA-256 已齐全并完成回读；`failed` 表示构建或补挂失败，请查看正文中的 Actions 日志并等待维护者重试。
 
@@ -127,7 +127,7 @@ om plugins install broker-longbridge --confirm  # 先满足长桥 SDK 前提
 
 文件位于代码目录同级 `.om-plugins/<代码绝对路径摘要>/<插件名>/`，与运行包的不可变文件清单分离。安装选择属于这个 OM 代码实例，改变账户或运行目录不改变安装选择；新代码路径需由受控升级迁移选择。进程固定使用启动时的物理代码目录，切换 `current` 不会让旧进程改读新版本插件。直接搬迁代码后应重新检查安装状态。请以该实例实际运行用户执行安装和卸载，插件目录为该用户私有，不要用 sudo 改变归属。
 
-安装不等于启用：PM 仍由 `portfolio_management.enabled` 控制，持仓建议仍由 `close_advice.enabled` 控制；消息渠道仍使用 `channels.feishu`、`channels.wechat_clawbot` 的总开关、收信和通知开关。命令不改配置、凭据、账本、历史报告或服务；已加载插件的进程需另行重启，新进程按需加载。损坏的托管安装可先明确卸载再重装。受控升级在切换前安装并校验目标版本的已选插件，目标资产缺失会保留当前实例；见[升级流程](RELEASE_PROCESS.md)。
+安装不等于启用：PM 仍由 `portfolio_management.enabled` 控制，持仓建议仍由 `close_advice.enabled` 控制；消息渠道仍使用 `channels.feishu`、`channels.wechat_clawbot` 的总开关、收信和通知开关。命令不改配置、凭据、账本、历史报告或服务；已加载插件的进程需另行重启，新进程按需加载。损坏的托管安装可先明确卸载再重装。受控升级在切换前安装并校验目标版本的已选插件，目标资产缺失会保留当前实例；见[升级流程](https://github.com/liuxie066/options-monitor/blob/main/docs/RELEASE_PROCESS.md)。
 
 卸载先将安装原子移出加载目录，再清理文件；移出失败保留原安装，清理失败则明确显示已卸载及残留目录（JSON 为 `cleanup_pending`、`retained_directory`），这些残留不会被加载，不应误认作仍已安装。
 
@@ -168,7 +168,7 @@ PM 默认关闭。安装后设置全局 `portfolio_management.enabled: true`；�
 与配置是否启用无关；未安装或主动卸载的包不会因配置仍启用而补装。首次从内置 PM 的
 旧版迁移时，仅为有效旧配置已启用的 PM 安装扩展。若目标是运行包且需要保留 pip 安装的插件或长桥 SDK，
 升级在切换前拒绝；通过 `om plugins` 托管的能力另走官方资产迁移路径。缓存及切换前校验见
-[升级流程](RELEASE_PROCESS.md)；首次迁移必须使用含修复的新控制器，旧版自动升级器不能
+[升级流程](https://github.com/liuxie066/options-monitor/blob/main/docs/RELEASE_PROCESS.md)；首次迁移必须使用含修复的新控制器，旧版自动升级器不能
 自行获得目标 release 中的修复。
 
 ## 可选持仓建议
@@ -181,7 +181,7 @@ PM 默认关闭。安装后设置全局 `portfolio_management.enabled: true`；�
 ./.venv/bin/python -m pip uninstall om-position-advice-plugin
 ```
 
-安装器也支持 `--with-position-advice`；安装不启用，需在配置中明确开启 `close_advice.enabled`。缺包不影响核心扫描启动及历史报告读取。开发/CI 的 `requirements/dev.txt` 安装此包并保留全部策略测试；缺包启动由隔离子进程覆盖。受控升级保留实际安装选择，并为旧内置建议已启用的实例迁移安装；主动卸载保持卸载。首次迁移仍须使用新升级控制器，见[升级流程](RELEASE_PROCESS.md)。
+安装器也支持 `--with-position-advice`；安装不启用，需在配置中明确开启 `close_advice.enabled`。缺包不影响核心扫描启动及历史报告读取。开发/CI 的 `requirements/dev.txt` 安装此包并保留全部策略测试；缺包启动由隔离子进程覆盖。受控升级保留实际安装选择，并为旧内置建议已启用的实例迁移安装；主动卸载保持卸载。首次迁移仍须使用新升级控制器，见[升级流程](https://github.com/liuxie066/options-monitor/blob/main/docs/RELEASE_PROCESS.md)。
 
 ## 可选消息渠道
 
@@ -391,7 +391,7 @@ $HOME/.local/bin/
 
 运行包与源码安装共用该目录及 wrapper 布局；两种解释器目录不是同时必需。解释器选择先检查显式 `OM_PYTHON`，再检查已声明运行包，然后是已有 `.venv` 和系统候选。声明运行包但解释器或清单损坏时明确失败，不偷用系统 Python。
 
-初装不接管活动实例；检测到活动部署时使用[受控升级](RELEASE_PROCESS.md#远端自动升级)，不要用安装命令代替服务升级。升级在自身事务内物化新版本并切换 `current`，源码保持原路径，运行包使用已校验资产，不隐含转换安装类型。长期运行服务应使用 `current` 作为 repo root。
+初装不接管活动实例；检测到活动部署时使用[受控升级](https://github.com/liuxie066/options-monitor/blob/main/docs/RELEASE_PROCESS.md#远端自动升级)，不要用安装命令代替服务升级。升级在自身事务内物化新版本并切换 `current`，源码保持原路径，运行包使用已校验资产，不隐含转换安装类型。长期运行服务应使用 `current` 作为 repo root。
 用户级 wrapper 指向 `current`，所以升级后 `om` / `om-agent` 会自动跟随新的 release。
 
 在 `current` 实际切换前发生可恢复失败或收到 INT/TERM，安装器会恢复原有 wrapper，原本没有入口则移除本次新建入口；切换完成后保留新入口。恢复或清理失败会非零退出，并报告尚存备份的路径。已发布的失败 release 保留，普通重试仍拒绝已有 inactive target；确认后可沿用 `--force` 重建，活动 release 仍拒绝 `--force`。

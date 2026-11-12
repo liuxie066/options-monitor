@@ -36,6 +36,31 @@
 发布说明以人工确认的 `Unreleased` 为语义真源，不从 commit message 自动猜测或改写。
 纯内部重构如果没有用户或运营价值，可以只保留在提交历史中。
 
+## 产品包内容边界
+
+`.gitattributes` 持有源码交付清单。正式源码资产和自动升级的 Git 缓存取包均使用
+`git archive`，因此应用同一组 `export-ignore` 规则；新增仓库顶层目录不会自动进入产品包。
+运行包构建器在原有解释器、依赖和源码白名单之外，也遵守这组导出规则。
+
+保留业务源码、八个官方插件的源码项目、运行及服务端依赖清单、约束、配置示例、服务和部署
+资源、许可、版本记录及用户文档。`docs/architecture/` 下供程序读取的资源一并保留。
+源码包的 `scripts/` 只保留 `install.sh`、`install_agent_plugin.sh`、`python_runtime.sh`、
+`auto_close_schedule.sh` 和 `release_check.py`；最后一项是源码自动升级切换前的实际校验依赖。
+运行包继续依赖自身的 manifest 和资格校验，不包含该脚本，
+插件仍通过独立 wheel 提供。
+
+测试、CI、Git hooks、开发依赖、代码巡检、审查和计划材料，以及纯开发发布工具不进入安装包。
+`release_acceptance.py`、`release_environment.py` 和 `release_preflight.sh` 留在维护仓库；
+独立升级验收按本文流程从已审查源码暂存 collector，再使用目标 release 的解释器运行。
+这组规则只控制分发，完整仓库仍供开发和 CI 使用。
+
+发布前必须从实际源码归档解包，运行 `om --help`、`om-agent spec`、目标 tag 的版本元数据
+校验及 Bot 导入检查。回归测试另用真实本地 Git 镜像和归档覆盖自动升级取包，检查依赖清单
+引用、插件项目和程序读取资源齐全；运行包测试验证导出规则与原有包清单边界共同生效。
+源码包和运行包均保留决策历史的用户指南与产品合同，逐份检查所有随包 Markdown 的本地文档
+链接；对未分发的维护文档和测试说明，保留标题与锚点，改为指向维护仓库。
+标准发布测试计划还必须选中 workflow 结构测试，覆盖发布门禁、资产清单和失败收尾。
+
 ## 版本规则
 
 - 稳定版：`MAJOR.MINOR.PATCH`

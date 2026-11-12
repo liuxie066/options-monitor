@@ -57,7 +57,7 @@
 | 当前移仓有效性、账户／市场／旧 lot 身份 | [Daily Brief domain](../domain/domain/daily_decision_brief.py)：129–201 行 |
 | 配置默认值、校验及 0 的语义 | [config defaults](../src/application/config_defaults.py)：124–130、176–180 行；[validator](../src/application/config_validator.py)：1311–1334、1409–1447 行 |
 | 当前账户隔离、固定报告、增量及精确重试合同 | [通知体验 PRD](OPTION_NOTIFICATION_EXPERIENCE_PRD.md)；[Close Advice 合同](CLOSE_ADVICE_CONTRACT.md#tick-调度移仓与提醒) |
-| 同账户移仓分组、旧仓边界、全部成员确认 | [分组回归](../tests/test_daily_brief_roll_grouping.py)；[已授权入库的历史 fixture 说明](../tests/fixtures/daily_brief_roll_grouping/README.md) |
+| 同账户移仓分组、旧仓边界、全部成员确认 | [分组回归](../tests/test_daily_brief_roll_grouping.py)；[已授权入库的历史 fixture 说明](https://github.com/liuxie066/options-monitor/blob/main/tests/fixtures/daily_brief_roll_grouping/README.md) |
 | Tick 与回执链路 | [Tick flow](../src/application/tick_notification_flow.py)、[receipt helper](../src/application/receipt_query.py)、[receipt_read](../src/application/agent_tools/receipts.py)、[Brief repository](../src/application/daily_decision_brief_repository.py) |
 
 本设计期间在该基线上运行了分组回归全集及两个定向 service 测试，共 26 项通过。另以仓库 fixture builder 合成 11 个普通 hold 与两个合法移仓，把移仓置于第六、七位：无开仓候选和加入一个开仓候选时，都展示两条移仓。该回放证明当前渲染行为，不能替代生产版本及有效配置的读回。

@@ -20,7 +20,7 @@
 | 缺失、过期、部分数据和有效零结果分别表达；不猜测价格、现金、币种或可卖张数 | [证据来源索引](INDEX.md)、[账户工具说明](TOOL_REFERENCE.md#持仓现金与组合) |
 | 交易事件及持仓投影由本地 SQLite 账本拥有，券商事实由所选券商适配器提供（富途经 OpenD，长桥限已接入的股票、现金范围）；保留差异，不用其他来源冒充完整账户数据 | [Ledger Architecture](LEDGER_ARCHITECTURE.md)、[成交与持仓同步](FUTU_TRADE_HOLDINGS_SYNC.md) |
 | 期间期权现金流、开仓批次结果和包含股票盈亏的账户总回报保持不同口径 | [Option Performance Design](OPTION_PERFORMANCE_DESIGN.md) |
-| 配置保存、外部连接、扫描、通知送达和服务运行分别验收；通知、真实账本写入、服务与升级按各自预览、授权和回读边界执行 | [CLI 产品合同](CLI_REFACTOR_PRD.md)、[Agent Manual](../AGENTS.md) |
+| 配置保存、外部连接、扫描、通知送达和服务运行分别验收；通知、真实账本写入、服务与升级按各自预览、授权和回读边界执行 | [CLI 产品合同](CLI_REFACTOR_PRD.md)、[Agent Manual](https://github.com/liuxie066/options-monitor/blob/main/AGENTS.md) |
 
 ## 待确认的产品信息
 

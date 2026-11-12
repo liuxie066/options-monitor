@@ -152,4 +152,4 @@ Combo / Wheel 投影 & 元数据 ── 策略层（只读投影，不重复声�
 - 代码语义收敛批次已合入主线，R1 迁移窗口记录见 §6；这些记录不证明任意恢复库或目标主机的现状。
 - `inventory` / `verify` 及 `apply` 的 preview 为只读历史诊断；普通构建的 `--apply` 写入已禁用。
 - 历史事件兼容读继续保留；旧 `position_lots` / `wheel_events` 结构须由历史受控迁移处理，普通 repository 不修复。
-- 技术设计 §9.4–§12 保留历史迁移依据，当前操作说明归 [Ledger Architecture](LEDGER_ARCHITECTURE.md)、[Option Positions Repair](OPTION_POSITIONS_REPAIR.md) 和 [Guardrails](GUARDRAILS.md)。
+- 技术设计 §9.4–§12 保留历史迁移依据，当前操作说明归 [Ledger Architecture](LEDGER_ARCHITECTURE.md)、[Option Positions Repair](OPTION_POSITIONS_REPAIR.md) 和 [Guardrails](https://github.com/liuxie066/options-monitor/blob/main/docs/GUARDRAILS.md)。
