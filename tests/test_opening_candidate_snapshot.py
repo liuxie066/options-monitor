@@ -1664,6 +1664,69 @@ def test_capacity_fx_memory_validation_never_loads_run_source(tmp_path, monkeypa
     _validate_changed_evidence(payload)
 
 
+def test_strike_capability_is_hashed_and_legacy_is_still_readable(tmp_path):
+    payload = _seal(tmp_path)
+    assert payload["strike_boundary_reason_codes_version"] == 1
+    assert load_opening_candidate_snapshot(base=tmp_path, run_id="run-1", account="lx")["strike_boundary_reason_codes_version"] == 1
+    for version in (None, True, 2, "1"):
+        changed = deepcopy(payload)
+        changed["strike_boundary_reason_codes_version"] = version
+        changed["content_sha256"] = canonical_sha256({k: v for k, v in changed.items() if k != "content_sha256"})
+        with pytest.raises(OpeningCandidateSnapshotError, match="strike reason capability"):
+            validate_opening_candidate_snapshot(changed, expected_run_id="run-1", expected_account="lx")
+    legacy = deepcopy(payload)
+    del legacy["strike_boundary_reason_codes_version"]
+    legacy["content_sha256"] = canonical_sha256({k: v for k, v in legacy.items() if k != "content_sha256"})
+    _snapshot_path(tmp_path).write_bytes(_compact_bytes(legacy))
+    assert "strike_boundary_reason_codes_version" not in load_opening_candidate_snapshot(base=tmp_path, run_id="run-1", account="lx")
+
+
+def test_weekly_report_uses_real_sealed_rejects_and_dependency_validation(tmp_path, monkeypatch):
+    from domain.domain.engine import evaluate_opening_candidate_policy
+    from src.application.reports.config_review import build_config_review
+    from src.application.reports.strike_metrics import collect_candidate_evidence, load_candidate_evidence, summarize_rejections
+
+    candidate = _candidate(contract_symbol="NVDA260918P00100000", period_return=0.04)
+    candidate.update(strike=100, policy_max_strike=90)
+    decision = evaluate_opening_candidate_policy(candidate, mode="put")
+    assert "put_strike_above_max" in {item["reason"] for item in decision["rejects"]}
+    _seal_snapshot(tmp_path, run_id="weekly", scan_statuses=[_scan_status("NVDA", "put", "completed")],
+                   final_candidates={"put": []},
+                   candidate_evaluations={"put": [{"normalized_input": candidate, "opening_decision": decision}]})
+    now = datetime(2026, 8, 10, 4, tzinfo=timezone.utc)
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("report collection re-evaluated a strategy")
+    monkeypatch.setattr("src.application.opening_candidate_snapshot.evaluate_opening_candidate_policy", forbidden)
+    evidence = collect_candidate_evidence(tmp_path, now)
+    assert evidence["errors"] == []
+    assert summarize_rejections(evidence)["observed_direction_counts"]["put_strike_above_max"] == 1
+    evidence_file = tmp_path / "candidate-evidence.json"
+    evidence_file.write_text(json.dumps(evidence))
+    assert summarize_rejections(load_candidate_evidence(evidence_file, now)) == summarize_rejections(evidence)
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "user.hk.json").write_text('{"symbols":[]}')
+    (configs / "user.us.json").write_text(json.dumps({"symbols": [{"symbol": "NVDA", "sell_put": {"max_strike": 90}}]}))
+    prices = tmp_path / "prices.json"
+    prices.write_text(json.dumps({"generated_at_utc": now.isoformat(), "prices": {"NVDA": 100}}))
+    result = build_config_review(configs_root=configs, runtime_root=tmp_path, prices_file=prices, now=now)
+    assert result.payload["strike_rejections"]["observed_count"] == 1
+    assert "**结论：观察**" in result.markdown
+    assert result.markdown.index("**结论：") < result.markdown.index("## 指标 A")
+    unknown = _snapshot_path(tmp_path, "unknown-mode")
+    unknown.parent.mkdir(parents=True)
+    unknown.write_text(json.dumps({"sealed_at_utc": NOW.isoformat(), "scan_mode": None}))
+    mixed = collect_candidate_evidence(tmp_path, now)
+    assert len(mixed["snapshots"]) == 1 and mixed["errors"]
+    assert mixed["excluded_runs"] == 0  # Unknown mode is not an experience run.
+    unknown.unlink()
+    # The existing loader must still reject a missing referenced dependency.
+    (tmp_path / "output_runs/weekly/state/required_data_snapshot_manifest.json").unlink()
+    invalid = collect_candidate_evidence(tmp_path, now)
+    assert invalid["errors"] and invalid["snapshots"] == []
+    assert summarize_rejections(invalid)["count"] is None
+
+
 @pytest.mark.parametrize("mode,sign", [("put", -1), ("call", 1)])
 @pytest.mark.parametrize("unverifiable", [False, True])
 def test_delta_rejection_sealed_and_explained_without_rescan(tmp_path, monkeypatch, mode, sign, unverifiable):

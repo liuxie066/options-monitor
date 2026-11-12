@@ -27,6 +27,7 @@ class ReportRunContext:
     configs_root: Path
     prices_file: Path | None
     now: datetime
+    candidate_evidence_file: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,7 @@ def _build_config_review(context: ReportRunContext) -> ReportBuild:
         configs_root=context.configs_root,
         runtime_root=context.runtime_root,
         prices_file=context.prices_file,
+        candidate_evidence_file=context.candidate_evidence_file,
         now=context.now,
     )
     payload = json.dumps(result.payload, ensure_ascii=False, indent=2) + "\n"
@@ -50,6 +52,7 @@ def _build_config_review(context: ReportRunContext) -> ReportBuild:
         artifacts=(
             ReportArtifact(name="report.md", content=result.markdown),
             ReportArtifact(name="report.json", content=payload),
+            ReportArtifact(name="candidate_evidence.json", content=json.dumps(result.evidence, ensure_ascii=False, indent=2) + "\n"),
         ),
         summary=result.summary,
     )

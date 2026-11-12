@@ -244,10 +244,16 @@ def test_report_run_delivers_and_records_manifest(
 
     monkeypatch.setattr(delivery, "channel_plugin_installed", lambda channel: True)
     monkeypatch.setattr(delivery, "resolve_feishu_bot_config", lambda: _bot())
-    monkeypatch.setattr(delivery, "send_feishu_app_message", lambda **kwargs: _feishu_success(**kwargs))
+    messages = []
+    def send(**kwargs):
+        messages.append(kwargs["message"])
+        return _feishu_success(**kwargs)
+    monkeypatch.setattr(delivery, "send_feishu_app_message", send)
 
     assert main(_run_args(tmp_path)) == 0
     payload = json.loads(capsys.readouterr().out)
+    assert len(messages) == 1
+    assert messages[0].index("**结论：观察**") < messages[0].index("## 指标 A")
     assert payload["delivery"]["status"] == "delivered"
     assert payload["delivery"]["message_id"] == "om_message_1"
     run_dir = Path(payload["run_dir"])
