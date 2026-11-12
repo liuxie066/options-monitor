@@ -22,6 +22,7 @@ def command_guide() -> str:
 日常管理（按任务选择）
   om status                          查看运行状态；按需指定 --config-key us/hk
   om daily-brief latest              查看已有决策简报
+  om report list                     报告中心：列出报告、运行、历史与调度描述
   om scan --help                     扫描机会；保留现有参数和输出
   om position-advice evaluate --help 主动评估持仓；默认人工展示，--format json 输出业务 JSON
   om position-advice roll-down --help 查询 short put 向下移仓；请求须指定最大新到期日
