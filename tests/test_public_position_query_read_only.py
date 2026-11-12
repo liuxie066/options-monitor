@@ -8,6 +8,7 @@ import pytest
 
 from src.application.ledger import api
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
+from src.application.ledger.writer import persist_trade_event_object
 from src.application.tool_execution import execute_tool
 from tests.test_agent_plugin_smoke import _public_cfg_with_futu
 from tests.test_trade_event_pagination import _event
@@ -50,6 +51,88 @@ def _payload(config, action):
     if action == "assigned-stock":
         payload["refresh_quotes"] = False
     return payload
+
+
+@pytest.mark.parametrize("surface", ["inspect", "verify"])
+@pytest.mark.parametrize("scenario", ["quiet", "atomic-commit", "unpublished"])
+def test_projection_diagnostics_share_one_read_snapshot(query_store, tmp_path, monkeypatch, surface, scenario):
+    path, _, config = query_store
+    writer = SQLiteOptionPositionsRepository(path)
+    persist_trade_event_object(writer, _event("open", event_time_ms=100))
+    second_event = _event("concurrent", event_time_ms=200)
+    if scenario == "unpublished":
+        writer.upsert_trade_event(second_event)
+
+    original_connect = sqlite3.connect
+    committed = False
+    in_writer = False
+    forbidden_writes = []
+
+    class ObservedCursor(sqlite3.Cursor):
+        def execute(self, sql, parameters=()):
+            self.read_sql = " ".join(sql.lower().split())
+            return super().execute(sql, parameters)
+
+        def fetchall(self):
+            nonlocal committed, in_writer
+            rows = super().fetchall()
+            if (scenario == "atomic-commit" and not committed and not in_writer
+                    and any(f"from {table} " in self.read_sql + " " for table in ("position_lots", "trade_events"))
+                    and ("select *" in self.read_sql or "select event_json" in self.read_sql)):
+                committed = True
+                in_writer = True
+                try:
+                    persist_trade_event_object(writer, second_event)
+                finally:
+                    in_writer = False
+            return rows
+
+    class ObservedConnection(sqlite3.Connection):
+        def execute(self, sql, parameters=()):
+            if not in_writer and sql.lstrip().split(None, 1)[0].upper() in {
+                "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER", "REPLACE",
+            }:
+                forbidden_writes.append(sql)
+                raise AssertionError("diagnostic attempted a ledger write")
+            return self.cursor(factory=ObservedCursor).execute(sql, parameters)
+
+    def observed_connect(*args, **kwargs):
+        return original_connect(*args, **{**kwargs, "factory": ObservedConnection})
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sqlite3, "connect", observed_connect)
+        if surface == "inspect":
+            result = execute_tool("option_positions_read", _payload(config, "inspect"))
+            assert result["ok"], result
+            data = result["data"]
+            current_count = len(data["current_lots"])
+            projected_count = len(data["projected_lots"])
+        else:
+            data = api.verify_position_lot_projection(repo=writer, base=tmp_path, mode="full")
+            current_count = data["position_lot_count"]
+            projected_count = data["projected_lot_count"]
+            assert data["ok"] is (scenario != "unpublished"), data
+
+    assert forbidden_writes == []
+    assert committed is (scenario == "atomic-commit")
+    assert current_count == 1
+    assert projected_count == (2 if scenario == "unpublished" else 1)
+    assert len(writer.list_trade_events()) == (1 if scenario == "quiet" else 2)
+    assert len(writer.list_position_lots()) == (2 if scenario == "atomic-commit" else 1)
+    after = api.verify_position_lot_projection(repo=writer, base=tmp_path, mode="full")
+    assert after["ok"] is (scenario != "unpublished")
+
+
+def test_projection_diagnostic_accepts_reconciliation_evidence_reader(query_store, tmp_path):
+    from src.application.ledger.read_only_evidence import open_trade_reconciliation_evidence_repo
+
+    path, _, _ = query_store
+    writer = SQLiteOptionPositionsRepository(path)
+    persist_trade_event_object(writer, _event("open", event_time_ms=100))
+    reader = open_trade_reconciliation_evidence_repo(path)
+    report = api.verify_position_lot_projection(repo=reader, base=tmp_path, mode="full")
+    assert report["ok"], report
+    assert report["event_count"] == report["position_lot_count"] == 1
 
 
 def _corrupt_query_payload(path, table, column, payload):
