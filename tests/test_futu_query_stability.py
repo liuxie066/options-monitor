@@ -67,6 +67,13 @@ def sdk(monkeypatch):
         TradeDealHandlerBase=type("DealBase", (), {}),
     ))
     monkeypatch.setattr(gateway, "port_open", lambda *_args: True)
+
+    def start(kind, kwargs, *, deadline=None, cancelled=None):
+        return gateway._FutuQueryContext(
+            gateway._create_futu_sdk_context(kind, kwargs), deadline=deadline, cancelled=cancelled,
+        )
+
+    monkeypatch.setattr(gateway, "_start_futu_query_context", start)
     return contexts, Context
 
 
@@ -266,6 +273,149 @@ def test_retry_recovers_transport_error_and_accepts_valid_empty_result(monkeypat
 
     assert gateway.retry_futu_gateway_call("positions", call, quiet=True) == []
     assert len(attempts) == 2
+
+
+@pytest.mark.parametrize("capability,method", [("quote", "get_market_snapshot"), ("broker", "position_list_query")])
+def test_blocked_query_discards_context_without_waiting_for_close(sdk, monkeypatch, capability, method):
+    import time
+
+    contexts, context_cls = sdk
+    release = threading.Event()
+    closing = threading.Event()
+    calls = []
+
+    def query(_self, symbol):
+        calls.append(symbol)
+        if symbol == "US.AAPL":
+            release.wait(timeout=2.0)  # No SDK response, including no internal timeout.
+        return 0, [{"code": symbol}]
+
+    def close(self):
+        closing.set()
+        release.wait(timeout=2.0)  # Model SDK close waiting on the query's context lock.
+        self.closed = True
+
+    monkeypatch.setattr(context_cls, method, query, raising=False)
+    monkeypatch.setattr(context_cls, "close", close)
+    monkeypatch.setattr(gateway, "FUTU_QUERY_TIMEOUT_SEC", 0.05)
+    first = _build(capability)
+    first_context = first.backend._quote_client if capability == "quote" else first.backend._trade_client
+    started = time.monotonic()
+    try:
+        with pytest.raises(gateway.FutuGatewayTransientError, match="query timeout"):
+            gateway.retry_futu_gateway_call(
+                method, lambda: getattr(first_context, method)("US.AAPL"),
+                retry_time_budget_sec=0.01, quiet=True,
+            )
+        first.close()
+        assert closing.wait(0.5)
+        assert time.monotonic() - started < 1.0
+        with pytest.raises(gateway.FutuGatewayTransientError, match="context discarded"):
+            getattr(first_context, method)("US.AAPL")
+        assert calls == ["US.AAPL"]
+
+        # A separate symbol's context can complete while the first is still stuck.
+        second = _build(capability)
+        second_context = second.backend._quote_client if capability == "quote" else second.backend._trade_client
+        assert getattr(second_context, method)("US.MSFT") == (0, [{"code": "US.MSFT"}])
+        assert calls == ["US.AAPL", "US.MSFT"]
+    finally:
+        release.set()
+        first.close()
+        if len(contexts) > 1:
+            second.close()
+
+
+def test_inflight_query_obeys_earlier_fetch_deadline_and_cleanup_still_runs(sdk, monkeypatch):
+    import time
+
+    contexts, context_cls = sdk
+    release = threading.Event()
+    closed = threading.Event()
+
+    def close(self):
+        self.closed = True
+        closed.set()
+
+    monkeypatch.setattr(context_cls, "close", close)
+    monkeypatch.setattr(context_cls, "get_market_snapshot", lambda _self: release.wait(timeout=2.0), raising=False)
+    monkeypatch.setattr(gateway, "FUTU_QUERY_TIMEOUT_SEC", 15.0)
+    context = gateway.build_futu_quote_context(
+        host="test-opend", port=11119, deadline=time.monotonic() + 0.1,
+    )
+    try:
+        with pytest.raises(TimeoutError, match="deadline reached"):
+            context.get_market_snapshot()
+        context.close()
+        # Cleanup is independent of the expired deadline.
+        assert closed.wait(0.5)
+        assert contexts[0].closed
+    finally:
+        release.set()
+        context.close()
+
+
+@pytest.mark.parametrize("control", ["deadline", "cancelled"])
+def test_warm_gateway_uses_current_readiness_controls(sdk, monkeypatch, control):
+    import time
+
+    _, context_cls = sdk
+    ready = _build("quote")  # Created without a tool deadline or cancellation.
+    release = threading.Event()
+    cancelled = threading.Event()
+    timer = threading.Timer(0.05, cancelled.set)
+    monkeypatch.setattr(context_cls, "get_global_state", lambda _self: release.wait(timeout=2.0))
+    kwargs = {"deadline": time.monotonic() + 0.05} if control == "deadline" else {"cancelled": cancelled.is_set}
+    timer.start()
+    start = time.monotonic()
+    try:
+        with pytest.raises((TimeoutError, gateway.FutuGatewayTransientError), match="deadline|cancelled"):
+            ready.ensure_quote_ready(**kwargs)
+        assert time.monotonic() - start < 0.5
+    finally:
+        release.set()
+        timer.cancel()
+        ready.close()
+
+
+def test_retry_controls_bound_a_query_on_a_reused_context(sdk, monkeypatch):
+    import time
+
+    _, context_cls = sdk
+    ready = _build("quote")
+    release = threading.Event()
+    monkeypatch.setattr(context_cls, "get_market_snapshot", lambda _self: release.wait(timeout=2.0), raising=False)
+    start = time.monotonic()
+    try:
+        with pytest.raises(TimeoutError, match="deadline reached"):
+            gateway.retry_futu_gateway_call(
+                "snapshot", ready.backend._quote_client.get_market_snapshot,
+                deadline=time.monotonic() + 0.05, quiet=True,
+            )
+        assert time.monotonic() - start < 0.5
+    finally:
+        release.set()
+        ready.close()
+
+
+def test_hung_close_is_bounded_and_is_not_started_twice(sdk, monkeypatch):
+    contexts, context_cls = sdk
+    release = threading.Event()
+    calls = []
+
+    def close(_self):
+        calls.append(True)
+        release.wait(timeout=2.0)
+
+    monkeypatch.setattr(context_cls, "close", close)
+    monkeypatch.setattr(gateway, "FUTU_QUERY_TIMEOUT_SEC", 0.05)
+    context = _build("quote")
+    try:
+        context.close()
+        context.close()
+        assert calls == [True]
+    finally:
+        release.set()
 
 
 def test_missing_timeout_sdk_method_is_not_a_transport_failure():

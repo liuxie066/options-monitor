@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import atexit
+import faulthandler
 import fcntl
 import json
 import os
@@ -413,6 +415,8 @@ def run_tick_cron(
         run_id = create_run_id()
         env.update(plan.trigger_env)
         env["OM_TICK_CRON_RUN_ID"] = run_id
+        trace_path = base / "output_runs" / run_id / "state" / "tick_hang_traceback.txt"
+        env["OM_TICK_HANG_TRACEBACK_PATH"] = str(trace_path)
 
         if preflight_config_fn is not None:
             try:
@@ -500,6 +504,28 @@ def run_tick_cron(
         return rc
 
 
+def _install_tick_hang_diagnostics() -> None:
+    """Install in the tick child when the CLI imports this module."""
+    trace_path = os.environ.get("OM_TICK_HANG_TRACEBACK_PATH")
+    if not trace_path:
+        return
+    path = Path(trace_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    trace = path.open("a", encoding="utf-8")
+    faulthandler.register(signal.SIGUSR1, file=trace, all_threads=True)
+    faulthandler.dump_traceback_later(
+        max(0.1, float(os.environ["OM_TIMEOUT_SECONDS"]) - 30.0),
+        file=trace,
+    )
+
+    def cleanup() -> None:
+        faulthandler.cancel_dump_traceback_later()
+        faulthandler.unregister(signal.SIGUSR1)
+        trace.close()
+
+    atexit.register(cleanup)
+
+
 def _run_tick_process_group(
     *,
     command: list[str],
@@ -517,6 +543,14 @@ def _run_tick_process_group(
     try:
         returncode = proc.wait(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
+        trace_path = env.get("OM_TICK_HANG_TRACEBACK_PATH")
+        if trace_path and Path(trace_path).exists():
+            try:
+                # Signal only the registered Python child, not its subprocesses.
+                os.kill(proc.pid, signal.SIGUSR1)
+                proc.wait(timeout=2.0)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                pass
         try:
             os.killpg(proc.pid, signal.SIGTERM)
         except ProcessLookupError:
@@ -534,3 +568,6 @@ def _run_tick_process_group(
 
 
 __all__ = ["TickCronPlan", "build_tick_cron_plan", "run_tick_cron"]
+
+
+_install_tick_hang_diagnostics()

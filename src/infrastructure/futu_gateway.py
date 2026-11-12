@@ -10,16 +10,24 @@ Centralizes:
 """
 
 import ast
+import builtins
+from contextvars import ContextVar
 from dataclasses import dataclass, field
+import faulthandler
+from functools import wraps
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from importlib import metadata as importlib_metadata
 from importlib import util as importlib_util
 import logging
+import multiprocessing
 from numbers import Integral
+import os
 from pathlib import Path
 import random
+import signal
 import sys
+import threading
 import time
 from typing import Any, Callable, Iterable, Mapping
 
@@ -32,6 +40,8 @@ from src.infrastructure.futu_dataframe import futu_dataframe_records
 LOG = logging.getLogger(__name__)
 
 FUTU_QUERY_CONNECT_TIMEOUT_SEC = 8.0
+# SDK response timers do not bound waits on its context lock or close().
+FUTU_QUERY_TIMEOUT_SEC = 15.0
 FUTU_ACCOUNT_CANDIDATE_LIMIT = 20
 
 FUTU_EARNINGS_CALENDAR_MIN_VERSION = "10.9.6908"
@@ -278,6 +288,251 @@ def _ensure_futu_api_importable() -> None:
             handler.setStream(sys.stderr)
 
 
+_FETCH_CONTROL: ContextVar[tuple[Any, Any] | None] = ContextVar("futu_fetch_control", default=None)
+
+
+def _with_fetch_control(fn: Callable[..., Any]) -> Callable[..., Any]:
+    @wraps(fn)
+    def call(*args: Any, **kwargs: Any) -> Any:
+        token = _FETCH_CONTROL.set((kwargs.get("deadline"), kwargs.get("cancelled")))
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _FETCH_CONTROL.reset(token)
+
+    return call
+
+
+def _send_worker_error(connection: Any, exc: BaseException) -> None:
+    connection.send(("error", (type(exc).__name__, str(exc))))
+
+
+def _futu_query_worker(connection: Any, kind: str, kwargs: dict[str, Any], factory: Any) -> None:
+    """Own the SDK's global network manager and locks in a killable process."""
+    trace = None
+    context = None
+    try:
+        trace_path = os.environ.get("OM_TICK_HANG_TRACEBACK_PATH")
+        if trace_path:
+            path = Path(trace_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            trace = path.open("a", encoding="utf-8")
+        faulthandler.register(signal.SIGUSR1, file=trace or sys.stderr, all_threads=True)
+        context = factory(kind, kwargs)
+        connection.send(("ready", tuple(name for name in dir(context) if callable(getattr(context, name)))))
+        while True:
+            name, args, call_kwargs = connection.recv()
+            try:
+                result = getattr(context, name)(*args, **call_kwargs)
+                connection.send(("result", result))
+            except BaseException as exc:
+                _send_worker_error(connection, exc)
+            if name == "close":
+                break
+    except EOFError:
+        pass
+    except BaseException as exc:
+        try:
+            _send_worker_error(connection, exc)
+        except (OSError, EOFError):
+            pass
+    finally:
+        if context is not None:
+            try:
+                context.close()
+            except Exception:
+                pass
+        connection.close()
+        if trace is not None:
+            trace.close()
+
+
+class _FutuContextProcess:
+    def __init__(self, kind: str, kwargs: dict[str, Any], *, factory: Any = None):
+        spawn = multiprocessing.get_context("spawn")
+        self._connection, child = spawn.Pipe()
+        self._lock = threading.Lock()
+        self._stopped = False
+        self._methods: frozenset[str] = frozenset()
+        self._process = spawn.Process(
+            target=_futu_query_worker,
+            args=(child, kind, kwargs, factory or _create_futu_sdk_context),
+            name=f"opend-{kind}",
+            daemon=True,
+        )
+        self._process.start()
+        child.close()
+
+    def _receive(self) -> Any:
+        try:
+            status, value = self._connection.recv()
+        except (EOFError, OSError) as exc:
+            raise FutuGatewayTransientError("OpenD query worker disconnected") from exc
+        if status == "error":
+            name, message = value
+            error_type = globals().get(name)
+            if isinstance(error_type, type) and issubclass(error_type, FutuGatewayError):
+                raise error_type(message)
+            error_type = getattr(builtins, name, RuntimeError)
+            if not isinstance(error_type, type) or not issubclass(error_type, BaseException):
+                error_type = RuntimeError
+            raise error_type(message)
+        return value
+
+    def wait_ready(self) -> None:
+        self._methods = frozenset(self._receive())
+
+    def __getattr__(self, name: str) -> Any:
+        if name not in self._methods:
+            raise AttributeError(f"OpenD context has no method {name}")
+
+        def call(*args: Any, **kwargs: Any) -> Any:
+            with self._lock:
+                try:
+                    self._connection.send((name, args, kwargs))
+                except (OSError, EOFError) as exc:
+                    raise FutuGatewayTransientError("OpenD query worker disconnected") from exc
+                return self._receive()
+        return call
+
+    def abort(self, *, dump: bool = False) -> None:
+        if self._stopped:
+            return
+        self._stopped = True
+        if dump and self._process.is_alive():
+            try:
+                os.kill(self._process.pid, signal.SIGUSR1)
+            except ProcessLookupError:
+                pass
+
+        def reap() -> None:
+            # Allow a requested stack write, without extending the caller's limit.
+            self._process.join(timeout=0.1 if dump else 0.0)
+            if self._process.is_alive():
+                self._process.terminate()
+                self._process.join(timeout=1.0)
+            if self._process.is_alive():
+                self._process.kill()
+                self._process.join(timeout=1.0)
+            self._connection.close()
+
+        threading.Thread(target=reap, name="opend-process-reaper", daemon=True).start()
+
+    def close(self) -> None:
+        if self._stopped:
+            return
+        try:
+            self.__getattr__("close")()
+        finally:
+            self.abort()
+
+
+def _start_futu_query_context(
+    kind: str, kwargs: dict[str, Any], *, deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> Any:
+    remote = _FutuContextProcess(kind, kwargs)
+    context = _FutuQueryContext(remote, deadline=deadline, cancelled=cancelled)
+    try:
+        context._call("connect", remote.wait_ready)
+    except BaseException:
+        remote.abort()
+        raise
+    return context
+
+
+class _FutuQueryContext:
+    """Bound SDK calls without reusing a context whose worker was abandoned."""
+
+    def __init__(self, context: Any, *, deadline: float | None, cancelled: Callable[[], bool] | None):
+        self._context = context
+        self._deadline = deadline
+        self._cancelled = cancelled
+        self._unavailable: str | None = None
+        self._closed = False
+
+    def _abandon(self, reason: str) -> None:
+        self._unavailable = reason
+        if isinstance(self._context, _FutuContextProcess):
+            self._context.abort(dump=True)
+            self._closed = True
+            return
+        if not self._closed:
+            self._closed = True
+            # SDK close() takes the same lock as synchronous queries. Never wait
+            # for that lock on the caller after abandoning a blocked query.
+            def cleanup() -> None:
+                try:
+                    self._context.close()
+                except Exception:
+                    LOG.debug("Abandoned OpenD context cleanup failed", exc_info=True)
+
+            threading.Thread(target=cleanup, name="opend-abandoned-close", daemon=True).start()
+
+    def _call(self, name: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        # Cleanup must still run after a caller's deadline or cancellation.
+        controls = _FETCH_CONTROL.get()
+        deadline, cancelled = controls if controls is not None else (self._deadline, self._cancelled)
+        if name == "close":
+            deadline, cancelled = None, None
+        check_fetch_control(deadline, cancelled)
+        if self._unavailable is not None:
+            raise FutuGatewayTransientError(self._unavailable)
+        if self._closed:
+            raise FutuGatewayError("OpenD context is closed")
+        finished = threading.Event()
+        result: list[Any] = []
+        errors: list[BaseException] = []
+
+        def query() -> None:
+            try:
+                result.append(fn(*args, **kwargs))
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                finished.set()
+
+        timeout = FUTU_QUERY_CONNECT_TIMEOUT_SEC if name == "connect" else FUTU_QUERY_TIMEOUT_SEC
+        end = time.monotonic() + timeout
+        threading.Thread(target=query, name=f"opend-{name}", daemon=True).start()
+        try:
+            while True:
+                check_fetch_control(deadline, cancelled)
+                remaining = end - time.monotonic()
+                if deadline is not None:
+                    remaining = min(remaining, deadline - time.monotonic())
+                if finished.wait(max(0.0, min(remaining, 0.05))):
+                    break
+                if time.monotonic() >= end:
+                    reason = f"OpenD query timeout: {name} exceeded {timeout:g}s; context discarded"
+                    if name == "close":
+                        self._closed = True  # The existing close worker owns cleanup.
+                    self._abandon(reason)
+                    raise FutuGatewayTransientError(reason)
+        except TimeoutError:
+            self._abandon(f"OpenD query abandoned: {name}")
+            raise
+        if errors:
+            raise errors[0]
+        return result[0]
+
+    def __getattr__(self, name: str) -> Any:
+        value = getattr(self._context, name)
+        if callable(value):
+            return lambda *args, **kwargs: self._call(name, value, *args, **kwargs)
+        return value
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        try:
+            self._call("close", self._context.close)
+        except FutuGatewayTransientError:
+            LOG.warning("OpenD context close timed out; cleanup continues in background")
+        finally:
+            self._closed = True
+
+
 def _wait_for_futu_context(context: Any, *, host: str, port: int, deadline: float | None = None, cancelled: Callable[[], bool] | None = None) -> Any:
     try:
         check_fetch_control(deadline, cancelled)
@@ -313,7 +568,6 @@ def build_futu_quote_context(
 
     require_plugin("market-opend")
     _ensure_futu_api_importable()
-    import futu
 
     check_fetch_control(deadline, cancelled)
     if before_request is not None:
@@ -324,11 +578,44 @@ def build_futu_quote_context(
         raise FutuGatewayUnreachableError(f"OpenD unreachable: {host}:{port}")
     if before_request is not None:
         before_request()
-    context = futu.OpenQuoteContext(host=host, port=port, is_async_connect=True)
-    return _wait_for_futu_context(context, host=host, port=port, deadline=deadline, cancelled=cancelled)
+    return _start_futu_query_context(
+        "quote", {"host": host, "port": port}, deadline=deadline, cancelled=cancelled,
+    )
 
 
 def build_futu_trade_context(
+    *, host: str, port: int, is_encrypt: bool | None = None,
+    on_init_connect_error: Callable[[str], None] | None = None,
+) -> Any:
+    from src.application.plugin_runtime import require_plugin
+
+    require_plugin("broker-futu")
+    _ensure_futu_api_importable()
+    if not port_open(host, port):
+        raise FutuGatewayUnreachableError(f"OpenD unreachable: {host}:{port}")
+    if on_init_connect_error is not None:
+        # The separate trade-push service owns in-process event callbacks.
+        return _FutuQueryContext(
+            _build_futu_trade_context_local(
+                host=host, port=port, is_encrypt=is_encrypt,
+                on_init_connect_error=on_init_connect_error,
+            ),
+            deadline=None, cancelled=None,
+        )
+    return _start_futu_query_context("trade", {"host": host, "port": port, "is_encrypt": is_encrypt})
+
+
+def _create_futu_sdk_context(kind: str, kwargs: dict[str, Any]) -> Any:
+    if kind == "trade":
+        return _build_futu_trade_context_local(**kwargs)
+    _ensure_futu_api_importable()
+    import futu
+
+    context = futu.OpenQuoteContext(**kwargs, is_async_connect=True)
+    return _wait_for_futu_context(context, host=kwargs["host"], port=kwargs["port"])
+
+
+def _build_futu_trade_context_local(
     *, host: str, port: int, is_encrypt: bool | None = None,
     on_init_connect_error: Callable[[str], None] | None = None,
 ) -> Any:
@@ -807,6 +1094,15 @@ class FutuGateway:
             raise mapped from None
         raise mapped
 
+    def is_connected(self) -> bool:
+        """Let the existing pool replace a context abandoned after a timeout."""
+        clients = [c for c in (getattr(self.backend, "_quote_client", None),
+                               getattr(self.backend, "_trade_client", None)) if c is not None]
+        try:
+            return bool(clients) and all(bool(c.get_sync_conn_id()) for c in clients)
+        except Exception:
+            return False
+
     def close(self) -> None:
         for c in (getattr(self.backend, "_quote_client", None), getattr(self.backend, "_trade_client", None)):
             client_id = id(c)
@@ -857,6 +1153,7 @@ class FutuGateway:
             self._raise_mapped(exc, action="ensure_trade_client", redact_errors=redact_errors)
         raise AssertionError("unreachable")
 
+    @_with_fetch_control
     def ensure_quote_ready(
         self,
         *,
@@ -1600,6 +1897,7 @@ def wait_fetch_control(
         time.sleep(min(remaining, 0.05) if cancelled is not None else remaining)
 
 
+@_with_fetch_control
 def retry_futu_gateway_call(
     what: str,
     fn: Any,
