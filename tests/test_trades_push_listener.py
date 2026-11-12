@@ -18,6 +18,13 @@ def _open_port(monkeypatch):
     from src.infrastructure import futu_gateway as mod
 
     monkeypatch.setattr(mod, "port_open", lambda host, port: True)
+    monkeypatch.setattr(
+        mod, "_start_futu_query_context",
+        lambda kind, kwargs, *, deadline=None, cancelled=None: mod._FutuQueryContext(
+            mod._create_futu_sdk_context(kind, kwargs),
+            deadline=deadline, cancelled=cancelled,
+        ),
+    )
     yield
 
 

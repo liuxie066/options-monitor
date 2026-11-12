@@ -49,6 +49,13 @@ def sdk(monkeypatch):
         RET_OK=0, OpenSecTradeContext=Trade, OpenQuoteContext=no_quote,
     ))
     monkeypatch.setattr(mod, "port_open", lambda host, port: True)
+    monkeypatch.setattr(
+        mod, "_start_futu_query_context",
+        lambda kind, kwargs, *, deadline=None, cancelled=None: mod._FutuQueryContext(
+            mod._create_futu_sdk_context(kind, kwargs),
+            deadline=deadline, cancelled=cancelled,
+        ),
+    )
     return state
 
 

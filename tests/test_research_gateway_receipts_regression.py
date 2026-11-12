@@ -611,6 +611,13 @@ def test_multishard_default_readiness_stays_inside_window(planned, monkeypatch, 
     monkeypatch.setattr(futu, "_ensure_futu_api_importable", lambda: None)
     monkeypatch.setattr(futu, "port_open", probe)
     monkeypatch.setitem(sys.modules, "futu", SimpleNamespace(RET_OK=0, OpenQuoteContext=Context))
+    monkeypatch.setattr(
+        futu, "_start_futu_query_context",
+        lambda kind, kwargs, *, deadline=None, cancelled=None: futu._FutuQueryContext(
+            futu._create_futu_sdk_context(kind, kwargs),
+            deadline=deadline, cancelled=cancelled,
+        ),
+    )
     if mode.startswith("cancel_"):
         with pytest.raises(KeyboardInterrupt) as raised:
             group.collect_watchlist_series(**args, confirm=True)
