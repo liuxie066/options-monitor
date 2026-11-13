@@ -300,7 +300,15 @@ def project_resumable_trade_events(
                 if transition.event.event_type in CLOSE_EVENT_TYPES
                 else before_key
             )
-            if before_key in realized_pnl_by_event and after_key in realized_pnl_by_event:
+            if (
+                before_key in realized_pnl_by_event
+                and after_key in realized_pnl_by_event
+                and (
+                    (transition.lot_before is not None
+                     and transition.lot_before.realized_pnl != realized_pnl_by_event[before_key])
+                    or transition.lot_after.realized_pnl != realized_pnl_by_event[after_key]
+                )
+            ):
                 transition = replace(
                     transition,
                     lot_before=(

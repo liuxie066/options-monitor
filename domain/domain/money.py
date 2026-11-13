@@ -8,6 +8,10 @@ MONEY_QUANTUM = Decimal("0.000001")
 
 
 def to_decimal(value: Any, *, field_name: str = "value") -> Decimal:
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise ValueError(f"{field_name} must be a finite decimal")
+        return value
     if isinstance(value, bool) or value in (None, ""):
         raise ValueError(f"{field_name} is required")
     try:
@@ -26,6 +30,8 @@ def coerce_decimal(value: Any) -> Decimal:
     ``Decimal("NaN")`` so a deferred validator (e.g. ``validate_trade_event``)
     can report them as diagnostics instead of raising at construction.
     """
+    if isinstance(value, Decimal):
+        return value
     if isinstance(value, bool):
         value = int(value)
     if value in (None, ""):

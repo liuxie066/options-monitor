@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 from typing import Any
 
 from domain.domain.ledger import ContractKey, TradeEvent
@@ -120,7 +121,12 @@ def _stored_trade_event_payload_to_ledger_event(
 
 
 def valid_void_target_event_id(item: Any) -> str | None:
-    event, diagnostics = stored_trade_event_to_ledger_event(item)
+    payload = trade_event_payload_dict(item)
+    # Ordinary history cannot invalidate another event. Decode only candidates;
+    # real voids must still pass the complete canonical decoder and validator.
+    if str(payload.get("event_type") or "").strip().lower() != "void":
+        return None
+    event, diagnostics = stored_trade_event_to_ledger_event(payload)
     if event is None or any(diag.severity == "error" for diag in diagnostics):
         return None
     if event.event_type != "void":
@@ -228,14 +234,30 @@ def _contract_key_from_payload(raw: Any) -> ContractKey:
         return raw
     if not isinstance(raw, dict):
         raise ValueError("contract_key must be a JSON object")
+    values = (
+        raw.get("broker"), raw.get("account"),
+        raw.get("underlying_symbol") or raw.get("symbol"), raw.get("option_type"),
+        raw.get("strike"), raw.get("expiration_ymd") or raw.get("expiration"), raw.get("asset_type"),
+    )
+    # Only immutable JSON scalars share a normalized, frozen identity. Every
+    # event is still constructed and validated; mutable/custom inputs retain
+    # the uncached normalization path.
+    normalize = (
+        _contract_key_from_scalars
+        if all(type(value) in (str, int, float, type(None)) for value in values)
+        else _contract_key_from_scalars.__wrapped__
+    )
+    return normalize(*values)
+
+
+@lru_cache(maxsize=256, typed=True)
+def _contract_key_from_scalars(
+    broker: Any, account: Any, symbol: Any, option_type: Any,
+    strike: Any, expiration: Any, asset_type: Any,
+) -> ContractKey:
     return ContractKey.from_values(
-        broker=raw.get("broker"),
-        account=raw.get("account"),
-        underlying_symbol=raw.get("underlying_symbol") or raw.get("symbol"),
-        option_type=raw.get("option_type"),
-        strike=raw.get("strike"),
-        expiration_ymd=raw.get("expiration_ymd") or raw.get("expiration"),
-        asset_type=raw.get("asset_type"),
+        broker=broker, account=account, underlying_symbol=symbol, option_type=option_type,
+        strike=strike, expiration_ymd=expiration, asset_type=asset_type,
     )
 
 
