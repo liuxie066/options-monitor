@@ -971,6 +971,8 @@ Combo 成员 owner 仍是 `src/application/ledger/combo_membership.py`。完整�
 留下单腿。当前决策读取完整账户证明历史，已释放组不再因历史 inference 占用当前成员。
 指派前的策略证明只读取指派发生前的事实；指派股票经济更正仍沿用原有投影合同。
 
+已确认组合的成员归属与当前剩余数量分别解释。原两腿正常全平或部分平仓不会自行撤销有效确认；成员 owner 保留已关闭成员的身份，归属视图按事件重放与当前投影校验剩余数量。原确认及精确成员仍有效时，组合证据 owner 将已确认的原推荐计入覆盖，避免把拆腿后的同源推荐占位误判为新竞争；旧式受控 adoption 沿用成员 owner 的精确证明校验，不能仅凭 inherited 元数据视为确认。新增 counterpart 的开仓身份、其他推荐证据和已记录冲突继续按原仲裁规则处理，不能仅凭相同合约或 exposure ID 吞掉新竞争。counterpart 推荐匹配使用事件重放事实；存储投影缺失或错误显示为零，不能证明不存在新 counterpart。归属详情可投影原成员及剩余数量；证据或投影不一致时不提供已核验的成员说明，继续保留相应缺口。读取不改写历史策略归属、交易或费用，也不释放仍存续腿的资金义务。
+
 Control 使用同一条 `/attribute` → `/confirm attribution` / `/cancel attribution` 链路。
 单笔语法仍为 `/attribute <account> <execution_key> ordinary|wheel|combo [target_id]`。
 完整冲突可用 `/attribute <account> batch '<JSON>'`：JSON 顶层为非空的 `conflict_event_ids`

@@ -786,12 +786,12 @@ def _nonnegative_integer(value: Any) -> int | None:
     return parsed if parsed is not None and parsed >= 0 else None
 
 
-def _controlled_pair_adoption(
+def resolve_controlled_combo_adoption(
     rows: list[dict[str, Any]], *, binding: Mapping[str, Any],
     opening: TradeEvent, group_id: str, role: str, instant: int,
     voided_ids: set[str],
 ) -> tuple[str, int] | None:
-    """Recognize an exact pre-assignment post-trade Combo adoption."""
+    """Prove an exact controlled Combo adoption before the supplied instant."""
     candidates = [
         row for row in rows
         if row.get("event_type") == "adjust"
@@ -990,7 +990,7 @@ def resolve_combo_assignment_proof(
             if target
         }
         proofs = [
-            _controlled_pair_adoption(
+            resolve_controlled_combo_adoption(
                 strategy_rows, binding=put_binding if label == "put" else call_binding,
                 opening=leg_events[label], group_id=group_id, role=role,
                 instant=instant, voided_ids=voided_ids,

@@ -383,7 +383,7 @@ def test_combo_can_only_be_released_as_a_complete_decision(tmp_path, monkeypatch
         assert resolve_combo_assignment_proof(assignment=assignment, group_id=pair["strategy_group_id"],
             trade_events=repo.list_trade_events(), identities=repo.list_strategy_group_identities(account="lx")) == ("csp_lc", None)
         # Every consumer must reject a complete manifest whose prior state never existed.
-        from src.application.ledger.combo_membership import _controlled_pair_adoption
+        from src.application.ledger.combo_membership import resolve_controlled_combo_adoption
         invalid = deepcopy(repo.list_trade_events())
         for row in invalid:
             if row["event_id"] in result["proof_event_ids"]:
@@ -393,7 +393,7 @@ def test_combo_can_only_be_released_as_a_complete_decision(tmp_path, monkeypatch
         assert resolve_combo_assignment_proof(assignment=assignment, group_id=pair["strategy_group_id"],
             trade_events=invalid, identities=repo.list_strategy_group_identities(account="lx"))[0] is None
         binding = next(row for row in membership.fact["member_bindings_for_current_account"] if row["record_id"] == "put-lot")
-        assert _controlled_pair_adoption(invalid, binding=binding, opening=_put_open(),
+        assert resolve_controlled_combo_adoption(invalid, binding=binding, opening=_put_open(),
             group_id=pair["strategy_group_id"], role="funding_put", instant=assignment.event_time_ms,
             voided_ids=set()) is None
         from domain.domain.ledger import TradeEvent

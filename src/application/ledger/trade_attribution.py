@@ -668,7 +668,8 @@ def build_trade_attribution_view(
         for execution in event["payload"]["execution_keys"]}
     exposures = list(combo_evidence.get("exposures") or [])
     combos = combo_attribution_candidates_from_rows(rows, account=account, runtime_environment="",
-        exposures=exposures, effective_now_ms=now_ms, include_claimed=True, revalidate_expired=revalidate_expired)
+        exposures=exposures, effective_now_ms=now_ms, include_claimed=True,
+        revalidate_expired=revalidate_expired, attribution_facts=facts)
     combo_lots = {row["record_id"]: row for row in combos["lot_facts"]}
     known_proposals = {row["inference_id"] for row in rows["account_combo_inferences"]
                        if row.get("status") in {"proposal_ready", "ambiguous", "user_confirmed"}}
@@ -703,7 +704,10 @@ def build_trade_attribution_view(
         covered_exposures = {exposure for candidate in candidates[lot]
                              for exposure in candidate["inference"]["candidate_exposure_ids"]}
         covered_exposures.update(combos["rejected_exposure_ids_by_lot"].get(lot, []))
-        for exposure in delivered_combo_exposures_for_lot(combo_lots.get(lot) or {}, exposures):
+        covered_exposures.update(combos["confirmed_exposure_ids_by_lot"].get(lot, []))
+        if lot in combos["confirmed_members_by_lot"]:
+            fact["combo_members"] = combos["confirmed_members_by_lot"][lot]
+        for exposure in combos["delivered_exposure_ids_by_lot"].get(lot, []):
             if exposure not in covered_exposures:
                 candidates[lot].append({"candidate_id": "combo-exposure:" + exposure, "strategy": "combo_yield",
                     "eligible": False, "reason_codes": ["combo_proposal_expired"
@@ -872,7 +876,7 @@ def build_trade_attribution_view(
         if complete and existing["status"] != "conflict":
             ordinary_basis = ordinary_attribution_basis(fact=fact, facts=account_facts,
                 events=_effective_events(rows["trade_events"]), proposals=proposals, exposures=exposures,
-                exposure_ids=delivered_combo_exposures_for_lot(combo_lots.get(fact["lot_id"]) or {}, exposures),
+                exposure_ids=combos["delivered_exposure_ids_by_lot"].get(fact["lot_id"], []),
                 observation=capacity_observation or {}, now_ms=now_ms)
             if ordinary_basis is not None and trade_attribution_capacity_check(config=config, fact=fact,
                     facts=account_facts, wheel_read_model=capacity_model, observation=capacity_observation or {},
