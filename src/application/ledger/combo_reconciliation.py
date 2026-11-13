@@ -16,6 +16,7 @@ from domain.domain.ledger.position_fields import (
     now_ms,
 )
 from src.application.ledger.combo_membership import (
+    resolve_controlled_combo_adoption,
     resolve_combo_group_membership,
     resolve_lot_group_bindings,
 )
@@ -314,22 +315,83 @@ def supersede_post_trade_combo_pair(
     )
 
 
+def _confirmed_combo_members(
+    pair: Mapping[str, Any], membership: Any, *, account: str,
+    facts: Mapping[str, Mapping[str, Any]], stored: Mapping[str, Mapping[str, Any]],
+    events: list[dict[str, Any]], effective_now_ms: int,
+) -> list[dict[str, Any]]:
+    """Keep durable ownership separate from the members' remaining quantities."""
+    expected = {
+        pair["put_record_id"]: (pair["put_open_event_id"], "funding_put"),
+        pair["call_record_id"]: (pair["call_open_event_id"], "participation_call"),
+    }
+    if (pair.get("account") != account or len(expected) != 2 or membership.fact["status"] != "exact"
+            or set(membership.global_current_lot_ids) != set(expected)
+            or set(membership.global_historical_lot_ids) != set(expected)):
+        return []
+    bindings = {item["record_id"]: item for item in membership.fact["member_bindings_for_current_account"]}
+    members = []
+    for lot_id, (open_event_id, role) in expected.items():
+        fact, binding = facts.get(lot_id), bindings.get(lot_id)
+        if (not fact or not binding or lot_id not in stored
+                or (binding["open_event_id"], binding["role"]) != (open_event_id, role)
+                or fact["open_event_id"] != open_event_id or fact["account"] != account
+                or fact["status"] != "linked" or fact["strategy"] != "combo_yield"
+                or fact["strategy_group_id"] != pair["strategy_group_id"]
+                or not fact["ledger_event_ids"]
+                or set(fact["reason_codes"]) - {"execution_not_fully_open", "execution_has_successors"}
+                or effective_contracts_open(dict(stored[lot_id])) != fact["contracts_open"]):
+            return []
+        members.append({"lot_id": lot_id, "open_event_id": open_event_id, "leg_role": role,
+            "contract_key": dict(fact["contract_key"]), "position_side": fact["position_side"],
+            "contracts": fact["contracts"], "contracts_open": fact["contracts_open"]})
+    if not all("combo:" + pair["strategy_group_id"] in facts[lot_id]["acknowledged_candidate_ids"]
+               for lot_id in expected):
+        if any(facts[lot_id]["origin"] != "inherited" for lot_id in expected):
+            return []
+        # Older controlled adoptions have no candidate acknowledgment. Reuse the
+        # membership owner's proof, requiring both legs to identify this inference.
+        openings = {event["event_id"]: event for event in events if event.get("event_type") == "open"}
+        voided_ids = {target for event in events if (target := valid_void_target_event_id(event))}
+        proofs = [resolve_controlled_combo_adoption(
+            events, binding=bindings[lot_id], opening=TradeEvent.from_dict(openings[open_event_id]),
+            group_id=pair["strategy_group_id"], role=role,
+            instant=effective_now_ms + 1, voided_ids=voided_ids,
+        ) for lot_id, (open_event_id, role) in expected.items()]
+        if any(proof is None for proof in proofs) or len(set(proofs)) != 1 or proofs[0][0] != pair["inference_id"]:
+            return []
+    return members
+
+
+def _combo_counterpart_open_ids(
+    lot: Mapping[str, Any], exposure: str, *, lots: Mapping[str, Mapping[str, Any]],
+    delivered: Mapping[str, set[str]],
+) -> set[str]:
+    return {item["open_event_id"] for lot_id, item in lots.items()
+            if item["option_type"] != lot["option_type"] and item["broker_account_ref"] == lot["broker_account_ref"]
+            and exposure in delivered[lot_id]}
+
+
 def combo_attribution_candidates_from_rows(
     rows: Mapping[str, Any], *, account: str, runtime_environment: str,
     exposures: list[dict[str, Any]], effective_now_ms: int, include_claimed: bool = False,
-    revalidate_expired: bool = False,
+    revalidate_expired: bool = False, attribution_facts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Reuse the canonical matcher on the caller's complete ledger snapshot."""
     events = list(rows.get("trade_events") or [])
     lots = list(rows.get("stored_position_lots") or [])
     identities = list(rows.get("account_combo_identities") or [])
     existing = list(rows.get("account_combo_inferences") or [])
+    confirmed = [item for item in existing if item.get("status") == "user_confirmed"]
+    memberships = {}
+    for item in confirmed:
+        group_id = item["strategy_group_id"]
+        if group_id not in memberships:
+            memberships[group_id] = resolve_combo_group_membership(
+                group_id=group_id, account=account, trade_events=events, projected_position_lots=lots)
     confirmed_open_event_ids = {
         str(item.get(field) or "").strip()
-        for item in existing
-        if str(item.get("status") or "").strip().lower() == "user_confirmed"
-        and resolve_combo_group_membership(group_id=item["strategy_group_id"], account=account,
-            trade_events=events, projected_position_lots=lots).global_current_lot_ids
+        for item in confirmed if memberships[item["strategy_group_id"]].global_current_lot_ids
         for field in ("put_open_event_id", "call_open_event_id")
         if str(item.get(field) or "").strip()
     }
@@ -395,14 +457,14 @@ def combo_attribution_candidates_from_rows(
             lot_id = pair.get(leg + "_record_id")
             if lot_id in by_lot and by_lot[lot_id]["open_event_id"] == pair.get(leg + "_open_event_id"):
                 expired_exposures.setdefault(lot_id, set()).update(pair.get("candidate_exposure_ids") or [])
+    delivered = ({lot_id: set(delivered_combo_exposures_for_lot(item, exposures))
+                  for lot_id, item in by_lot.items()} if include_claimed else {})
     rejected_exposures: dict[str, set[str]] = {}
     rejected = [item for item in existing if item.get("status") == "user_rejected"]
     if include_claimed and rejected:
         rejected_ids = {item["inference_id"] for item in rejected}
         probe = match_post_trade_combo_pairs(lots=lot_facts, exposures=exposures)
         exact_pairs = [*rejected, *(item for item in probe["inferences"] if item["inference_id"] in rejected_ids)]
-        by_lot = {item["record_id"]: item for item in lot_facts}
-        delivered = {lot_id: set(delivered_combo_exposures_for_lot(item, exposures)) for lot_id, item in by_lot.items()}
         rejected_counterparts: dict[tuple[str, str], set[str]] = {}
         for pair in exact_pairs:
             for leg, opposite in (("put", "call"), ("call", "put")):
@@ -411,13 +473,48 @@ def combo_attribution_candidates_from_rows(
                     for exposure in pair.get("candidate_exposure_ids") or []:
                         rejected_counterparts.setdefault((lot_id, exposure), set()).add(pair[opposite + "_open_event_id"])
         for (lot_id, exposure), rejected_ids in rejected_counterparts.items():
-            lot = by_lot[lot_id]
-            counterparts = {item["open_event_id"] for other_id, item in by_lot.items()
-                if item["option_type"] != lot["option_type"] and item["broker_account_ref"] == lot["broker_account_ref"]
-                and exposure in delivered[other_id]}
-            if counterparts <= rejected_ids:
+            if _combo_counterpart_open_ids(by_lot[lot_id], exposure, lots=by_lot, delivered=delivered) <= rejected_ids:
                 rejected_exposures.setdefault(lot_id, set()).add(exposure)
+    confirmed_exposures: dict[str, set[str]] = {}
+    confirmed_members: dict[str, list[dict[str, Any]]] = {}
+    if include_claimed and attribution_facts and confirmed:
+        facts = {fact["lot_id"]: fact for fact in attribution_facts}
+        stored = {lot["record_id"]: lot["fields"] for lot in lots}
+        # A missing/zero stored counterpart is not proof of absence. Normalize
+        # replayed executions through the same owner/matcher before covering evidence.
+        counterpart_lots = _ledger_lot_facts(
+            account=account, runtime_environment=runtime_environment, events=events,
+            lots=[{"record_id": fact["lot_id"], "fields": {
+                "contract_key": fact["contract_key"], "open_event_id": fact["open_event_id"],
+                "contracts_opened": fact["contracts"], "contracts_open": fact["contracts_open"],
+                "position_side": fact["position_side"], "currency": fact["currency"],
+                "multiplier": fact["multiplier"],
+            }} for fact in attribution_facts],
+            confirmed_open_event_ids=set(), effective_identity_open_event_ids=set(), include_claimed=True,
+        )
+        counterpart_by_lot = {item["record_id"]: item for item in counterpart_lots}
+        counterpart_delivered = {lot_id: set(delivered_combo_exposures_for_lot(item, exposures))
+                                 for lot_id, item in counterpart_by_lot.items()}
+        for pair in confirmed:
+            members = _confirmed_combo_members(pair, memberships[pair["strategy_group_id"]],
+                account=account, facts=facts, stored=stored, events=events, effective_now_ms=effective_now_ms)
+            if not members:
+                continue
+            for leg, opposite in (("put", "call"), ("call", "put")):
+                lot_id = pair[leg + "_record_id"]
+                confirmed_members[lot_id] = members
+                for exposure in pair.get("candidate_exposure_ids") or []:
+                    # Cover only this original pair. A new/partial counterpart using
+                    # the same recommendation must remain competing evidence.
+                    if (exposure in delivered.get(lot_id, set())
+                            and _combo_counterpart_open_ids(counterpart_by_lot[lot_id], exposure,
+                                lots=counterpart_by_lot, delivered=counterpart_delivered)
+                            <= {pair[opposite + "_open_event_id"]}):
+                        confirmed_exposures.setdefault(lot_id, set()).add(exposure)
     return {**matched, "lot_facts": lot_facts, "reactivatable_inference_ids": reactivatable_inference_ids,
+            "delivered_exposure_ids_by_lot": {key: sorted(value) for key, value in delivered.items()},
+            "confirmed_exposure_ids_by_lot": {key: sorted(value) for key, value in confirmed_exposures.items()},
+            "confirmed_members_by_lot": confirmed_members,
             "rejected_exposure_ids_by_lot": {key: sorted(value) for key, value in rejected_exposures.items()},
             "expired_exposure_ids_by_lot": {key: sorted(value) for key, value in expired_exposures.items()}}
 

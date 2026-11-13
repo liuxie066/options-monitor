@@ -1,5 +1,6 @@
 from src.application.ledger import trade_attribution as ledger_attribution
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -16,10 +17,10 @@ from test_combo_reconciliation_application import BASE_TIME_MS, RUNTIME_ENVIRONM
 from test_combo_reconciliation_domain import _exposure
 
 
-def _scope(tmp_path, monkeypatch):
+def _scope(tmp_path, monkeypatch, *, contracts=1):
     repo = SQLiteOptionPositionsRepository(tmp_path / 'ledger.sqlite3')
-    persist_trade_event_object(repo, _call_open())
-    persist_trade_event_object(repo, _put_open())
+    persist_trade_event_object(repo, replace(_call_open(), contracts=contracts))
+    persist_trade_event_object(repo, replace(_put_open(), contracts=contracts))
     now = BASE_TIME_MS + 3000
     monkeypatch.setattr(attribution.time, 'time', lambda: now / 1000)
     config = {'accounts': ['lx'], 'market': 'us', 'account_settings': {
@@ -30,9 +31,9 @@ def _scope(tmp_path, monkeypatch):
         effective_now_ms=now, exposures=evidence['exposures'], persist=True)
     pair, = repo.list_combo_pair_inferences(account='lx')
     snapshot = build_futu_position_snapshot(rows=[
-        {'code': 'US.NVDA260821P100000', 'stock_owner': 'US.NVDA', 'sec_type': 'OPTION', 'qty': -1,
+        {'code': 'US.NVDA260821P100000', 'stock_owner': 'US.NVDA', 'sec_type': 'OPTION', 'qty': -contracts,
          'option_type': 'PUT', 'option_strike_price': 100, 'strike_time': '2026-08-21', 'multiplier': 100},
-        {'code': 'US.NVDA260821C110000', 'stock_owner': 'US.NVDA', 'sec_type': 'OPTION', 'qty': 1,
+        {'code': 'US.NVDA260821C110000', 'stock_owner': 'US.NVDA', 'sec_type': 'OPTION', 'qty': contracts,
          'option_type': 'CALL', 'option_strike_price': 110, 'strike_time': '2026-08-21', 'multiplier': 100},
         {'code': 'US.VOO', 'sec_type': 'STOCK', 'qty': 2.8758},
     ], broker_account_ref={'broker_id': 'futu', 'external_account_id': '1001', 'environment': 'REAL',
