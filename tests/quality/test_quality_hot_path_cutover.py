@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import argparse
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 import json
+import os
 from pathlib import Path
+import stat
+import subprocess
+import sys
+from threading import Barrier
 
 import pytest
 
@@ -94,6 +101,143 @@ def test_cutover_preview_and_immutable_apply(tmp_path: Path) -> None:
     _write(evidence, changed)
     with pytest.raises(ValueError, match="already exists"):
         activate_quality_hot_path_cutover(evidence, receipt_path=receipt)
+
+
+def test_cutover_cli_hard_exit_during_write_leaves_final_path_retryable(tmp_path, monkeypatch) -> None:
+    from src.interfaces.quality import cli
+
+    evidence = tmp_path / "evidence.json"
+    receipt = tmp_path / "state" / "cutover.json"
+    _write(evidence, _evidence())
+    script = """
+import argparse, os, sys
+from pathlib import Path
+from src.application.quality import cutover
+from src.interfaces.quality import cli
+cli.OMQualityService = lambda: None
+cli.default_quality_hot_path_cutover_receipt_path = lambda: Path(sys.argv[2])
+write = os.write
+def hard_exit(fd, data):
+    write(fd, data[:8])
+    os._exit(77)
+cutover.os.write = hard_exit
+cli.handle_quality_command(argparse.Namespace(
+    quality_command="cutover", apply=True, evidence=sys.argv[1]))
+"""
+    interrupted = subprocess.run([sys.executable, "-c", script, str(evidence), str(receipt)],
+        cwd=Path(__file__).resolve().parents[2], capture_output=True, text=True, timeout=20)
+    assert interrupted.returncode == 77, interrupted.stderr
+    assert not receipt.exists()
+    assert read_quality_hot_path_cutover_receipt(receipt)["status"] == "inactive"
+    monkeypatch.setattr(cli, "OMQualityService", lambda: None)
+    monkeypatch.setattr(cli, "default_quality_hot_path_cutover_receipt_path", lambda: receipt)
+    result = cli.handle_quality_command(argparse.Namespace(
+        quality_command="cutover", apply=True, evidence=str(evidence)))
+    assert read_quality_hot_path_cutover_receipt(receipt) == result
+    assert result["status"] == "active"
+    assert stat.S_IMODE(receipt.stat().st_mode) == 0o600
+
+
+def test_cutover_publishes_only_after_file_sync_and_syncs_parent(tmp_path, monkeypatch) -> None:
+    from src.application.quality import cutover
+
+    evidence = tmp_path / "evidence.json"
+    receipt = tmp_path / "state" / "cutover.json"
+    _write(evidence, _evidence())
+    events = []
+    sync, link = os.fsync, os.link
+
+    def tracked_sync(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            assert receipt.exists()
+            events.append("directory_sync")
+        else:
+            assert not receipt.exists()
+            events.append("file_sync")
+        return sync(fd)
+
+    def tracked_link(source, target, **kwargs):
+        assert events == ["file_sync"]
+        result = link(source, target, **kwargs)
+        events.append("publish")
+        return result
+
+    monkeypatch.setattr(cutover.os, "fsync", tracked_sync)
+    monkeypatch.setattr(cutover.os, "link", tracked_link)
+    activate_quality_hot_path_cutover(evidence, receipt_path=receipt)
+    assert events == ["file_sync", "publish", "directory_sync"]
+    assert not list(receipt.parent.glob(".*.tmp"))
+
+
+@pytest.mark.parametrize("same_evidence", [False, True])
+def test_cutover_concurrent_publish_never_overwrites(tmp_path, monkeypatch, same_evidence) -> None:
+    from src.application.quality import cutover
+
+    evidence = tmp_path / "evidence.json"
+    other = tmp_path / "other.json"
+    receipt = tmp_path / "state" / "cutover.json"
+    _write(evidence, _evidence())
+    payload = _evidence()
+    payload["deployment_access"]["evidence_sha256"] = "b" * 64
+    _write(other, payload)
+    barrier = Barrier(2)
+    link = os.link
+
+    def concurrent_link(source, target, **kwargs):
+        barrier.wait(timeout=10)
+        return link(source, target, **kwargs)
+
+    def activate(path):
+        try:
+            return activate_quality_hot_path_cutover(path, receipt_path=receipt)
+        except ValueError as exc:
+            assert "already exists" in str(exc)
+            return None
+
+    monkeypatch.setattr(cutover.os, "link", concurrent_link)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(activate, [evidence, evidence if same_evidence else other]))
+    current = read_quality_hot_path_cutover_receipt(receipt)
+    if same_evidence:
+        assert results == [current, current]
+    else:
+        assert results.count(None) == 1
+        assert current == next(item for item in results if item is not None)
+    assert current["status"] == "active"
+    assert not list(receipt.parent.glob(".*.tmp"))
+
+
+@pytest.mark.parametrize("zero_progress", [False, True])
+def test_cutover_write_failure_cleans_unpublished_files(tmp_path, monkeypatch, zero_progress) -> None:
+    from src.application.quality import cutover
+
+    evidence = tmp_path / "evidence.json"
+    receipt = tmp_path / "state" / "cutover.json"
+    _write(evidence, _evidence())
+
+    def fail_write(*args):
+        if zero_progress:
+            return 0
+        raise OSError("injected write failure")
+
+    monkeypatch.setattr(cutover.os, "write", fail_write)
+    with pytest.raises(OSError, match="write"):
+        activate_quality_hot_path_cutover(evidence, receipt_path=receipt)
+    assert not receipt.exists()
+    assert not list(receipt.parent.iterdir())
+
+
+def test_cutover_preserves_preexisting_incomplete_receipt(tmp_path) -> None:
+    evidence = tmp_path / "evidence.json"
+    receipt = tmp_path / "state" / "cutover.json"
+    _write(evidence, _evidence())
+    receipt.parent.mkdir()
+    receipt.write_bytes(b"")
+    with pytest.raises(ValueError, match="already exists"):
+        activate_quality_hot_path_cutover(evidence, receipt_path=receipt)
+    assert receipt.read_bytes() == b""
+    assert read_quality_hot_path_cutover_receipt(receipt)["status"] == "inactive"
+    assert list(receipt.parent.iterdir()) == [receipt]
 
 
 def test_cutover_rejects_inventory_drift_and_symlink_receipt(

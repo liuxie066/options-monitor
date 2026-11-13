@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import tempfile
 from typing import Any
 
 from src.infrastructure.private_storage import (
@@ -235,35 +236,38 @@ def activate_quality_hot_path_cutover(
     target = private_path(receipt_path)
     ensure_private_directory(target.parent)
     encoded = _canonical_bytes(receipt) + b"\n"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd, temporary_name = tempfile.mkstemp(
+        dir=target.parent, prefix=f".{target.name}.", suffix=".tmp",
+    )
+    temporary = Path(temporary_name)
     try:
-        fd = os.open(target, flags, 0o600)
-    except FileExistsError:
-        current = read_quality_hot_path_cutover_receipt(target)
-        if current.get("status") == "active" and current.get("evidence_sha256") == receipt[
-            "evidence_sha256"
-        ]:
-            return current
-        raise ValueError("quality hot-path cutover receipt already exists") from None
-    try:
-        os.fchmod(fd, PRIVATE_FILE_MODE)
-        view = memoryview(encoded)
-        written = 0
-        while written < len(view):
-            count = os.write(fd, view[written:])
-            if count <= 0:
-                raise OSError("quality cutover receipt write made no progress")
-            written += count
-        os.fsync(fd)
-    except BaseException:
         try:
-            target.unlink()
+            os.fchmod(fd, PRIVATE_FILE_MODE)
+            view = memoryview(encoded)
+            written = 0
+            while written < len(view):
+                count = os.write(fd, view[written:])
+                if count <= 0:
+                    raise OSError("quality cutover receipt write made no progress")
+                written += count
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        try:
+            # Publish complete, synced bytes without replacing an existing receipt.
+            os.link(temporary, target, follow_symlinks=False)
+        except FileExistsError:
+            current = read_quality_hot_path_cutover_receipt(target)
+            if current.get("status") == "active" and current.get("evidence_sha256") == receipt[
+                "evidence_sha256"
+            ]:
+                return current
+            raise ValueError("quality hot-path cutover receipt already exists") from None
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
         except OSError:
             pass
-        raise
-    finally:
-        os.close(fd)
     parent_fd = os.open(
         target.parent,
         os.O_RDONLY
