@@ -37,27 +37,30 @@
       "category": "New Features",
       "text": "Upgraded Copilot to Bot with receipt-aware context, bounded execution, and durable conversation memory.",
       "commits": [
-        "40243377d59dfb7805bd0ffaf2d2f7c1a2f22353"
+        "3e496cf63d6a6ba3e1cdec901e4916d379a22c9a",
+        "8a23ba3e705159a3381ff78e6f06f511d465d29f"
       ]
     },
     {
       "category": "Bug Fixes",
       "text": "Preserved verified account and environment evidence from OpenD trade push headers so valid fills can be recorded on first delivery without guessing account identity.",
       "commits": [
-        "8a23ba3e705159a3381ff78e6f06f511d465d29f"
+        "40243377d59dfb7805bd0ffaf2d2f7c1a2f22353"
       ]
     },
     {
       "category": "Bug Fixes",
       "text": "Preserved active SQLite transaction locks while securing database and sidecar file permissions.",
       "commits": [
-        "32debda2af51580a548e30bfee7115fc9bc6fbd3"
+        "40243377d59dfb7805bd0ffaf2d2f7c1a2f22353"
       ]
     },
     {
       "category": "Bug Fixes",
       "text": "Added bounded trade-intake and notification recovery with actionable failure receipts and distinct recovery-success receipts, while preventing duplicate economic effects and blind resends after ambiguous delivery.",
       "commits": [
+        "40243377d59dfb7805bd0ffaf2d2f7c1a2f22353",
+        "32debda2af51580a548e30bfee7115fc9bc6fbd3",
         "3e496cf63d6a6ba3e1cdec901e4916d379a22c9a"
       ]
     }
