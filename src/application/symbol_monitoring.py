@@ -15,7 +15,7 @@ import pandas as pd
 from domain.domain.sell_call_config import resolve_effective_sell_call_min_strike
 from domain.domain.symbol_identity import symbol_market
 from src.application.market_data_provider import resolve_market_data_provider, market_data_source
-from src.application.required_data_snapshot import assert_required_data_source
+from src.application.required_data_snapshot import assert_required_data_source, assert_required_data_discovery_scope
 from src.application.required_data_coverage import covered_required_data_frame
 from src.application.opend_symbol_outputs import SUCCESS_EMPTY_REASON_CODES
 from src.application.strategy_scan_failures import append_strategy_scan_failure
@@ -77,6 +77,7 @@ class SymbolMonitoringInputs:
     required_data_snapshot_run_id: str | None = None
     required_data_snapshot_batch: FrozenRequiredDataBatch | None = None
     deadline_monotonic: float | None = None
+    cancelled: Callable[[], bool] | None = None
     final_candidates_sink_fn: (
         Callable[[str, list[dict[str, Any]]], None] | None
     ) = None
@@ -142,6 +143,8 @@ def run_symbol_monitoring(
         deadline = time.monotonic() + inputs.timeout_sec
 
     def check_deadline() -> None:
+        if inputs.cancelled is not None and inputs.cancelled():
+            raise SymbolProcessingTimeout(f"{symbol} symbol processing cancelled")
         if deadline is not None and time.monotonic() >= deadline:
             raise SymbolProcessingTimeout(f"{symbol} symbol processing exceeded deadline")
 
@@ -435,6 +438,8 @@ def run_symbol_monitoring(
             quote_evidence = deps.ensure_required_data_fn(
                 **required_data_kwargs,
             )
+        if frozen_required_data and quote_evidence is not None:
+            assert_required_data_discovery_scope(quote_evidence, symbol=symbol)
     except Exception as exc:
         if isinstance(exc, (SymbolProcessingTimeout, StrategyScanStatusError)):
             raise

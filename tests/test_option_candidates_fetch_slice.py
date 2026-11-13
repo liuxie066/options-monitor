@@ -53,7 +53,7 @@ class Gateway:
             if kwargs.get('option_type', side) == side
         ])
 
-    def get_snapshot(self, codes):
+    def get_snapshot(self, codes, **_controls):
         self.snapshot_calls.append(list(codes))
         return pd.DataFrame([dict(code=code, bid_price=1, ask_price=2, last_price=1.5) for code in codes])
 
@@ -358,7 +358,7 @@ def test_late_provider_success_or_failure_stops_next_io(tmp_path, stage):
 
 def test_underlier_cancel_stops_before_market_state(tmp_path):
     stop = threading.Event()
-    def snapshot(codes):
+    def snapshot(codes, **_controls):
         stop.set()
         raise RuntimeError('late error')
     gateway = SimpleNamespace(get_snapshot=snapshot)

@@ -109,12 +109,14 @@ def get_trading_days_with_receipt(gateway, *, market_data_provider="opend", **kw
     return provider_by_name(market_data_provider).get_trading_days_with_receipt(gateway, **kwargs)
 
 
-def get_market_state(gateway, codes, *, market_data_provider="opend"):
-    return provider_by_name(market_data_provider).get_market_state(gateway, codes)
+def get_market_state(gateway, codes, *, market_data_provider="opend", deadline=None, cancelled=None):
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
+    return provider_by_name(market_data_provider).get_market_state(gateway, codes, **controls)
 
 
-def get_quote_rights(gateway, *, market, market_data_provider="opend"):
-    return provider_by_name(market_data_provider).get_quote_rights(gateway, market=market)
+def get_quote_rights(gateway, *, market, market_data_provider="opend", deadline=None, cancelled=None):
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
+    return provider_by_name(market_data_provider).get_quote_rights(gateway, market=market, **controls)
 
 
 def get_underlier_observation(*args, market_data_provider="opend", **kwargs):

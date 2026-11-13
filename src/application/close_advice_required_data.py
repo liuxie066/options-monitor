@@ -8,7 +8,10 @@ import math
 from pathlib import Path
 import subprocess
 import sys
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
+from src.application.runtime_trigger_context import resolve_tick_deadline, tick_subprocess_env
+from src.infrastructure.external_services import run_command
+from src.infrastructure.futu_gateway import check_fetch_control
 
 from domain.domain.candidate_defaults import (
     DEFAULT_SELL_CALL_WINDOW,
@@ -104,8 +107,13 @@ def enrich_close_advice_required_data_plan(
     plan_path: Path,
     expected_run_id: str,
     gateway_factory: Any = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Seal independent calendar and post-prefetch market-state observations."""
+    deadline = resolve_tick_deadline(deadline=deadline)
+    check_fetch_control(deadline, cancelled)
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
     plan = load_close_advice_required_data_plan(path=plan_path, expected_run_id=expected_run_id)
     provider = provider_by_name(plan.get("market_data_provider", "opend"))
     if gateway_factory is None:
@@ -133,86 +141,99 @@ def enrich_close_advice_required_data_plan(
         }
         gateway = None
         try:
-            gateway = gateway_factory(host=host, port=port)
-            if end.year != start.year:
-                raise ValueError("calendar_cross_year_unsupported")
-            response = provider.get_trading_days_with_receipt(
-                gateway, market=market, start=start.isoformat(), end=end.isoformat()
-            )
-            dates = trading_calendar_dates(response, start=start, end=end)
-            calendar.update({
-                "trading_calendar_status": "ok",
-                "trading_calendar_dates": json.dumps(dates, separators=(",", ":")),
-                "trading_calendar_input_hash": canonical_sha256({
-                    "market": market, "start": start.isoformat(), "end": end.isoformat(), "dates": dates,
-                }),
-                "trading_calendar_receipt": {
-                    "retcode": 0, "coverage_complete": True, "pagination_complete": True,
-                    "page_count": 1, "row_count": len(response["rows"]),
-                    "received_at_utc": _utc_iso(datetime.now(timezone.utc)),
-                },
-            })
-        except Exception as exc:
-            calendar["trading_calendar_reason"] = ("calendar_cross_year_unsupported" if end.year != start.year
-                                                   else f"calendar_unavailable:{type(exc).__name__}")
-        rights = {"quote_rights_status": "unavailable", "quote_rights_market": market,
-                  "quote_rights_underlier": "UNKNOWN", "quote_rights_option": "UNKNOWN"}
-        if gateway is not None:
+            check_fetch_control(deadline, cancelled)
             try:
-                response = provider.get_quote_rights(gateway, market=market)
-                if isinstance(response, Mapping) and response.get("market") == market:
-                    allowed = {"LV1", "LV2", "LV3", "BMP", "NO", "SF"}
-                    rights["quote_rights_status"] = "ok" if response.get("status") == "ok" else "unavailable"
-                    for scope in ("underlier", "option"):
-                        value = str(response.get(f"{scope}_right") or "").upper()
-                        rights[f"quote_rights_{scope}"] = value if value in allowed else "UNKNOWN"
-            except Exception:
-                pass
-        rights["quote_rights_received_at_utc"] = _utc_iso(datetime.now(timezone.utc))
-        states_by_symbol: dict[str, tuple[str, str] | None] = {}
-        for requirement in requirements:
-            requirement.update(calendar)
-            requirement.update(rights)
-            requirement["trading_calendar_expiration"] = requirement["expiration"]
-            if gateway is None:
-                continue
-            symbol = str(requirement["symbol"])
-            if symbol not in states_by_symbol:
-                states_by_symbol[symbol] = None
+                gateway = gateway_factory(host=host, port=port)
+                if end.year != start.year:
+                    raise ValueError("calendar_cross_year_unsupported")
+                response = provider.get_trading_days_with_receipt(
+                    gateway, market=market, start=start.isoformat(), end=end.isoformat(), **controls,
+                )
+                dates = trading_calendar_dates(response, start=start, end=end)
+                calendar.update({
+                    "trading_calendar_status": "ok",
+                    "trading_calendar_dates": json.dumps(dates, separators=(",", ":")),
+                    "trading_calendar_input_hash": canonical_sha256({
+                        "market": market, "start": start.isoformat(), "end": end.isoformat(), "dates": dates,
+                    }),
+                    "trading_calendar_receipt": {
+                        "retcode": 0, "coverage_complete": True, "pagination_complete": True,
+                        "page_count": 1, "row_count": len(response["rows"]),
+                        "received_at_utc": _utc_iso(datetime.now(timezone.utc)),
+                    },
+                })
+            except Exception as exc:
+                calendar["trading_calendar_reason"] = ("calendar_cross_year_unsupported" if end.year != start.year
+                                                       else f"calendar_unavailable:{type(exc).__name__}")
+            check_fetch_control(deadline, cancelled)
+            rights = {"quote_rights_status": "unavailable", "quote_rights_market": market,
+                      "quote_rights_underlier": "UNKNOWN", "quote_rights_option": "UNKNOWN"}
+            if gateway is not None:
                 try:
-                    code = normalize_underlier(symbol).code
-                    state_rows = _provider_rows(provider.get_market_state(gateway, [code]))
-                    received = datetime.now(timezone.utc)
-                    matching = [row for row in state_rows if str(row.get("code") or "") == code]
-                    if len(matching) == 1:
-                        states_by_symbol[symbol] = (
-                            str(matching[0].get("market_state") or "").strip().upper(),
-                            _utc_iso(received),
-                        )
+                    response = provider.get_quote_rights(gateway, market=market, **controls)
+                    if isinstance(response, Mapping) and response.get("market") == market:
+                        allowed = {"LV1", "LV2", "LV3", "BMP", "NO", "SF"}
+                        rights["quote_rights_status"] = "ok" if response.get("status") == "ok" else "unavailable"
+                        for scope in ("underlier", "option"):
+                            value = str(response.get(f"{scope}_right") or "").upper()
+                            rights[f"quote_rights_{scope}"] = value if value in allowed else "UNKNOWN"
                 except Exception:
                     pass
-            state = states_by_symbol[symbol]
-            if state is not None:
-                requirement["market_state_after_snapshot"] = state[0]
-                requirement["market_state_received_at_utc"] = state[1]
-        if gateway is not None:
-            try:
-                gateway.close()
-            except Exception:
-                pass
+            check_fetch_control(deadline, cancelled)
+            rights["quote_rights_received_at_utc"] = _utc_iso(datetime.now(timezone.utc))
+            states_by_symbol: dict[str, tuple[str, str] | None] = {}
+            for requirement in requirements:
+                check_fetch_control(deadline, cancelled)
+                requirement.update(calendar)
+                requirement.update(rights)
+                requirement["trading_calendar_expiration"] = requirement["expiration"]
+                if gateway is None:
+                    continue
+                symbol = str(requirement["symbol"])
+                if symbol not in states_by_symbol:
+                    states_by_symbol[symbol] = None
+                    try:
+                        code = normalize_underlier(symbol).code
+                        state_rows = _provider_rows(provider.get_market_state(gateway, [code], **controls))
+                        received = datetime.now(timezone.utc)
+                        matching = [row for row in state_rows if str(row.get("code") or "") == code]
+                        if len(matching) == 1:
+                            states_by_symbol[symbol] = (
+                                str(matching[0].get("market_state") or "").strip().upper(),
+                                _utc_iso(received),
+                            )
+                    except Exception:
+                        pass
+                check_fetch_control(deadline, cancelled)
+                state = states_by_symbol[symbol]
+                if state is not None:
+                    requirement["market_state_after_snapshot"] = state[0]
+                    requirement["market_state_received_at_utc"] = state[1]
+        finally:
+            if gateway is not None:
+                try:
+                    gateway.close()
+                except Exception:
+                    pass
+    check_fetch_control(deadline, cancelled)
     return publish_close_advice_required_data_plan(path=plan_path, payload=plan)
 
 
 def enrich_close_advice_required_data_plan_bounded(
     *, plan_path: Path, expected_run_id: str, python: Path, repo_root: Path,
+    deadline: float | None = None, cancelled: Callable[[], bool] | None = None,
 ) -> str | None:
-    """Keep a stalled market-data call from blocking the tick indefinitely."""
+    """Bound the existing worker by both its stage cap and the remaining tick."""
+    deadline = resolve_tick_deadline(deadline=deadline)
     try:
-        subprocess.run(
+        result = run_command(
             [str(python), "-m", "src.application.close_advice_required_data", str(plan_path), expected_run_id],
-            cwd=repo_root, capture_output=True, check=True, timeout=30,
+            cwd=repo_root, capture_output=True, timeout_sec=30,
+            env=tick_subprocess_env(deadline=deadline), deadline=deadline, cancelled=cancelled,
         )
+        result.check_returncode()
     except subprocess.TimeoutExpired:
+        check_fetch_control(deadline, cancelled)
         return "calendar_enrichment_timeout"
     except (OSError, subprocess.CalledProcessError) as exc:
         return f"calendar_enrichment_failed:{type(exc).__name__}"

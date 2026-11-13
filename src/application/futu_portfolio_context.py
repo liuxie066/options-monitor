@@ -12,11 +12,15 @@ import re
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.fetch_source import is_futu_fetch_source, normalize_fetch_source
-from src.infrastructure.futu_gateway import build_ready_futu_broker_gateway, build_ready_futu_quote_gateway
+from src.infrastructure.futu_gateway import (
+    build_ready_futu_broker_gateway,
+    build_ready_futu_quote_gateway,
+    check_fetch_control,
+)
 from src.infrastructure.futu_dataframe import futu_dataframe_records
 from src.application.futu_quote_routing import resolve_futu_quote_route
 from src.application.futu_option_terms import _enrich_option_contract_terms
@@ -363,11 +367,18 @@ def _to_futu_acc_id(value: Any) -> int:
 
 def _fetch_market_exchange_rate_observation(
     *, cache_path: Path | None = None, write_cache: bool = True,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any] | None:
-    return get_exchange_rates_or_fetch_latest(
+    check_fetch_control(deadline, cancelled)
+    observation = get_exchange_rates_or_fetch_latest(
         cache_path=cache_path or shared_exchange_rate_cache_path(resolve_runtime_root(repo_root=Path(__file__).resolve().parents[2]).runtime_root),
         write_cache=write_cache,
+        **({"deadline": deadline, "cancelled": cancelled}
+           if deadline is not None or cancelled is not None else {}),
     )
+    check_fetch_control(deadline, cancelled)
+    return observation
 
 
 def _runtime_market(cfg: Mapping[str, Any], *, fallback: str) -> str:
@@ -912,7 +923,12 @@ def fetch_futu_portfolio_context(
     exchange_rate_observation: Mapping[str, Any] | None | object = _FX_NOT_PROVIDED,
     exchange_rate_cache_path: Path | None = None,
     write_cache: bool = True,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
+    check_fetch_control(deadline, cancelled)
+    controls = ({"deadline": deadline, "cancelled": cancelled}
+                if deadline is not None or cancelled is not None else {})
     if not account:
         raise ValueError("futu portfolio context requires account")
 
@@ -938,35 +954,45 @@ def fetch_futu_portfolio_context(
         expected_account_ids=account_ids,
         trd_env=trd_env,
         is_option_chain_cache_enabled=False,
+        **controls,
     )
     position_errors: list[str] = []
     try:
+        check_fetch_control(deadline, cancelled)
         balance_rows = _query_rows_for_account_ids(
             gateway, "get_account_balance", account_ids, trd_env=trd_env,
-            currency="CNH", refresh_cache=True,
+            currency="CNH", refresh_cache=True, **controls,
         )
+        check_fetch_control(deadline, cancelled)
         cash_observed_at = datetime.now(timezone.utc).isoformat()
         if exchange_rate_observation is _FX_NOT_PROVIDED:
             try:
                 exchange_rate_observation = _fetch_market_exchange_rate_observation(
                     cache_path=exchange_rate_cache_path, write_cache=write_cache,
+                    **controls,
                 )
             except (TimeoutError, CancelledError):
                 raise
             except Exception:
+                check_fetch_control(deadline, cancelled)
                 exchange_rate_observation = None
+        check_fetch_control(deadline, cancelled)
         try:
             position_rows = _query_rows_for_account_ids(
-                gateway, "get_positions", account_ids, trd_env=trd_env, refresh_cache=True,
+                gateway, "get_positions", account_ids, trd_env=trd_env,
+                refresh_cache=True, **controls,
             )
         except (TimeoutError, CancelledError):
             raise
         except Exception:
+            check_fetch_control(deadline, cancelled)
             position_rows = []
             position_errors.append("position_query_failed")
+        check_fetch_control(deadline, cancelled)
         source_observed_at = datetime.now(timezone.utc).isoformat()
     finally:
         gateway.close()
+    check_fetch_control(deadline, cancelled)
 
     balance_rows = _filter_rows_for_account_ids(balance_rows, account_ids, trd_env=trd_env)
     position_rows = _filter_rows_for_account_ids(position_rows, account_ids, trd_env=trd_env)
@@ -978,9 +1004,12 @@ def fetch_futu_portfolio_context(
                 if not route.ok:
                     raise ValueError("Futu option terms quote route unavailable")
                 quotes = build_ready_futu_quote_gateway(
-                    host=str(route.host), port=int(route.port), is_option_chain_cache_enabled=False)
+                    host=str(route.host), port=int(route.port),
+                    is_option_chain_cache_enabled=False, **controls)
                 try:
+                    check_fetch_control(deadline, cancelled)
                     enriched = _enrich_option_contract_terms(quotes, [position_rows[index] for index in option_indexes])
+                    check_fetch_control(deadline, cancelled)
                 finally:
                     quotes.close()
                 for index, row in zip(option_indexes, enriched, strict=True):
@@ -988,7 +1017,9 @@ def fetch_futu_portfolio_context(
             except (TimeoutError, CancelledError):
                 raise
             except Exception:
+                check_fetch_control(deadline, cancelled)
                 position_errors.append("position_option_terms_failed")
+    check_fetch_control(deadline, cancelled)
     capacity_market = _runtime_market(cfg, fallback=base_currency)
     snapshot_input = build_futu_position_snapshot(
         rows=position_rows,
@@ -1001,7 +1032,7 @@ def fetch_futu_portfolio_context(
         asset_types=["stock", "option"] if include_options else ["stock"], observed_at_utc=source_observed_at,
         completeness="partial" if position_errors else "complete", source_errors=position_errors,
     )
-    return build_futu_portfolio_context(
+    context = build_futu_portfolio_context(
         balance_rows=balance_rows,
         position_rows=position_rows,
         account=account,
@@ -1016,6 +1047,8 @@ def fetch_futu_portfolio_context(
         exchange_rate_observation=exchange_rate_observation,
         position_snapshot_input=snapshot_input,
     )
+    check_fetch_control(deadline, cancelled)
+    return context
 
 
 def fetch_futu_exchange_rate_observation(

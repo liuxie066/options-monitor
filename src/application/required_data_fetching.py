@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 import json
@@ -54,6 +54,8 @@ class RequiredDataFetchRequest:
     trading_date: str | None = None
     market_data_provider: str = "opend"
     allow_closed_market_reference: bool = False
+    deadline: float | None = None
+    cancelled: Callable[[], bool] | None = None
 
 
 def execute_required_data_opend(*, base: Path, request: RequiredDataFetchRequest) -> dict[str, object]:
@@ -103,6 +105,8 @@ def execute_required_data_opend(*, base: Path, request: RequiredDataFetchRequest
             no_retry=bool(request.no_retry),
             trading_date=request.trading_date,
             allow_closed_market_reference=bool(request.allow_closed_market_reference),
+            deadline=request.deadline,
+            cancelled=request.cancelled,
         )
     )
 

@@ -712,7 +712,7 @@ def _fetch_one_chain(
         on_rate_gate_wait(wait_sec)
     if on_opend_call is not None:
         on_opend_call()
-    kwargs = {"code": request.underlier_code, "is_force_refresh": bool(request.is_force_refresh)}
+    kwargs = {"code": request.underlier_code, "is_force_refresh": bool(request.is_force_refresh), **controls}
     if expiration:
         kwargs["start"] = str(expiration)
         kwargs["end"] = str(expiration)

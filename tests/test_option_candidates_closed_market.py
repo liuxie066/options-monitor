@@ -49,7 +49,7 @@ def closed_query(monkeypatch, tmp_path):
     monkeypatch.setattr(fetch, "get_trading_date", lambda market: state["now"].astimezone(quotes._MARKET_TIMEZONES[market]).date())
 
     class Gateway:
-        def get_snapshot(self, codes):
+        def get_snapshot(self, codes, *, deadline=None, cancelled=None):
             state["calls"].append(("snapshot", list(codes)))
             rows = []
             for code in codes:
@@ -70,7 +70,7 @@ def closed_query(monkeypatch, tmp_path):
                 rows.append(row)
             return pd.DataFrame(rows)
 
-        def get_market_state(self, codes):
+        def get_market_state(self, codes, *, deadline=None, cancelled=None):
             state["calls"].append(("state", list(codes)))
             return pd.DataFrame([{"code": code, "market_state": state["market_state"]} for code in codes])
 
@@ -82,7 +82,7 @@ def closed_query(monkeypatch, tmp_path):
                     "page_count": 1, "rows": [{"time": day.isoformat(), "trade_date_type": "WHOLE"}
                     for day in dates if day.weekday() < 5]}
 
-        def get_option_expiration_dates(self, code):
+        def get_option_expiration_dates(self, code, *, deadline=None, cancelled=None):
             state["calls"].append(("expirations", code))
             return pd.DataFrame([{"strike_time": expiry}])
 

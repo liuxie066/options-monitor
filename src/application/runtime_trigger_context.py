@@ -1,8 +1,42 @@
 from __future__ import annotations
 
+import math
 import os
+import time
 from collections.abc import Mapping
 from typing import Any
+
+
+# Internal transport between Tick processes on the same host. This is a
+# monotonic clock value, never persisted as source identity or frozen content.
+_TICK_DEADLINE_ENV = "OM_TICK_DEADLINE_MONOTONIC"
+
+
+def resolve_tick_deadline(
+    *,
+    timeout_seconds: float | None = None,
+    deadline: float | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> float | None:
+    """Keep the earliest inherited, caller and phase deadline."""
+    env = os.environ if environ is None else environ
+    values = [value for value in (deadline, env.get(_TICK_DEADLINE_ENV)) if value is not None]
+    deadlines = [float(value) for value in values]
+    if timeout_seconds is not None:
+        deadlines.append(time.monotonic() + float(timeout_seconds))
+    if any(not math.isfinite(value) for value in deadlines):
+        raise ValueError("Tick deadline must be finite")
+    return min(deadlines) if deadlines else None
+
+
+def tick_subprocess_env(
+    *, deadline: float | None, environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    env = dict(os.environ if environ is None else environ)
+    effective = resolve_tick_deadline(deadline=deadline, environ=env)
+    if effective is not None:
+        env[_TICK_DEADLINE_ENV] = repr(effective)
+    return env
 
 
 _TEXT_FIELDS: dict[str, tuple[str, ...]] = {

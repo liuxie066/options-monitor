@@ -33,11 +33,13 @@ class OpenDMarketDataProvider:
     def get_trading_days_with_receipt(self, gateway, **kwargs):
         return gateway.get_trading_days_with_receipt(**kwargs)
 
-    def get_market_state(self, gateway, codes):
-        return gateway.get_market_state(codes)
+    def get_market_state(self, gateway, codes, *, deadline=None, cancelled=None):
+        controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
+        return gateway.get_market_state(codes, **controls)
 
-    def get_quote_rights(self, gateway, *, market):
-        return gateway.get_quote_rights(market=market)
+    def get_quote_rights(self, gateway, *, market, deadline=None, cancelled=None):
+        controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
+        return gateway.get_quote_rights(market=market, **controls)
 
     def discover_option_expirations(self, *args, **kwargs):
         from src.application.opend_symbol_chain_fetching import discover_option_expirations

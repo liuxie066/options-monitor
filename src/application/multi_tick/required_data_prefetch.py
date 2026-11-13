@@ -68,8 +68,12 @@ from src.application.required_data_planning import (
     build_required_data_fetch_plan,
     freeze_required_data_planning_identity,
 )
+from src.infrastructure.futu_gateway import check_fetch_control, wait_fetch_control
+from src.infrastructure.external_services import run_command
+from src.application.runtime_trigger_context import tick_subprocess_env
 from src.application.required_data_plan_identity import (
     build_required_data_fetch_binding,
+    validate_required_data_failed_planning_scopes,
     build_required_data_expected_fetch_contract,
     required_data_planned_empty_reason,
 )
@@ -202,10 +206,16 @@ def _prefill_spot_observation_cache(
     spot_observation_cache: dict[tuple[Any, ...], Any],
     stop_monotonic: float | None = None,
     market_data_provider: str = "opend",
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> tuple[
     dict[PlanningIdentityKey, RequiredDataPlanningIdentity],
     set[str],
 ]:
+    check_fetch_control(deadline, cancelled)
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
+    if deadline is not None:
+        stop_monotonic = deadline if stop_monotonic is None else min(deadline, stop_monotonic)
     identities: dict[PlanningIdentityKey, RequiredDataPlanningIdentity] = {}
     identity_failed_symbols: set[str] = set()
 
@@ -280,6 +290,7 @@ def _prefill_spot_observation_cache(
         max_wait_sec=float(snapshot_cfg.get("max_wait_sec") or 30.0),
     )
     for (_source, host, port), binding_identities in sorted(by_binding.items()):
+        check_fetch_control(deadline, cancelled)
         if stop_monotonic is not None and time.monotonic() >= stop_monotonic:
             break
         started = time.monotonic()
@@ -288,8 +299,10 @@ def _prefill_spot_observation_cache(
                 host=host,
                 port=port,
                 is_option_chain_cache_enabled=False,
+                **controls,
             )
         except Exception as exc:
+            check_fetch_control(deadline, cancelled)
             for identity in binding_identities:
                 spot_observation_cache[identity.cache_key] = _unavailable(identity, [{
                     "endpoint": "build_ready_futu_quote_gateway",
@@ -324,8 +337,11 @@ def _prefill_spot_observation_cache(
                         snapshot_batch_size=snapshot_batch_size,
                         stop_monotonic=stop_monotonic,
                         diagnostics=diagnostics,
+                        **controls,
                     )
+                    check_fetch_control(deadline, cancelled)
                 except Exception as exc:
+                    check_fetch_control(deadline, cancelled)
                     diagnostics.append({
                         "endpoint": "get_underlier_observations_opend",
                         "error_code": classify_option_chain_error(exc),
@@ -376,6 +392,8 @@ def _build_prefetch_fetch_plan(
         dict[PlanningIdentityKey, RequiredDataPlanningIdentity] | None
     ) = None,
     market_data_provider: str = "opend",
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> RequiredDataFetchPlanBundle:
     source_cfgs = symbol_cfg.get("_prefetch_source_symbol_cfgs")
     if isinstance(source_cfgs, list) and len(source_cfgs) > 1:
@@ -388,6 +406,8 @@ def _build_prefetch_fetch_plan(
                 opend_fetch_cfg=opend_fetch_cfg,
                 expiration_discovery_cache=expiration_discovery_cache,
                 spot_observation_cache=spot_observation_cache,
+                deadline=deadline,
+                cancelled=cancelled,
                 planning_identity=_planning_identity_for_symbol_cfg(
                     item,
                     market_data_provider=market_data_provider,
@@ -483,7 +503,12 @@ def _build_prefetch_fetch_plan(
                 str(bundle.projection_outcome or "").strip()
                 for bundle in bundles
             }
-            if "provider_error" in source_projection_outcomes:
+            failed_scopes = [scope for bundle in bundles for scope in bundle.failed_planning_scopes]
+            if failed_scopes and merged_side_plans and all(
+                plan.source_fields == ["close_advice.position_requirements"] for plan in merged_side_plans
+            ):
+                projection_outcome = "success_rows"
+            elif "provider_error" in source_projection_outcomes:
                 projection_outcome = "provider_error"
             elif "parse_error" in source_projection_outcomes:
                 projection_outcome = "parse_error"
@@ -520,13 +545,14 @@ def _build_prefetch_fetch_plan(
                 expiration_discovery_complete=all(
                     bundle.expiration_discovery_complete for bundle in bundles
                 ),
-                expiration_discovery_error="; ".join(
+                expiration_discovery_error="; ".join(dict.fromkeys(
                     str(bundle.expiration_discovery_error)
                     for bundle in bundles
                     if bundle.expiration_discovery_error
-                )
+                ))
                 or None,
                 expiration_discovery=expiration_discovery,
+                failed_planning_scopes=failed_scopes,
                 projection_outcome=projection_outcome,
                 projected_expirations=projected_expirations,
                 require_realized_volatility=(
@@ -550,6 +576,8 @@ def _build_prefetch_fetch_plan(
         opend_fetch_cfg=opend_fetch_cfg,
         expiration_discovery_cache=expiration_discovery_cache,
         spot_observation_cache=spot_observation_cache,
+        deadline=deadline,
+        cancelled=cancelled,
         planning_identity=_planning_identity_for_symbol_cfg(
             symbol_cfg,
             market_data_provider=market_data_provider,
@@ -569,6 +597,8 @@ def _build_single_prefetch_fetch_plan(
     spot_observation_cache: dict[tuple[Any, ...], Any] | None = None,
     planning_identity: RequiredDataPlanningIdentity | None = None,
     market_data_provider: str = "opend",
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> RequiredDataFetchPlanBundle:
     symbol = str(symbol_cfg.get("symbol") or "").strip()
     fetch_cfg = _as_dict(symbol_cfg.get("fetch"))
@@ -620,6 +650,8 @@ def _build_single_prefetch_fetch_plan(
         expiration_window_sec=float(expiration_cfg.get("window_sec") or 30.0),
         expiration_max_calls=int(expiration_cfg.get("max_calls") or 60),
         planning_identity=planning_identity,
+        deadline=deadline,
+        cancelled=cancelled,
     )
 
 
@@ -868,6 +900,8 @@ def _fetch_symbol_for_required_data_request(
         history_kline_window_sec=request.history_kline_window_sec,
         history_kline_max_calls=request.history_kline_max_calls,
         include_realized_volatility=request.include_realized_volatility,
+        **({"deadline": request.deadline, "cancelled": request.cancelled}
+           if request.deadline is not None or request.cancelled is not None else {}),
     )
 
 
@@ -896,17 +930,28 @@ def _global_required_data_plan_summary(
     symbol_cfgs: list[dict[str, Any]],
     fetch_plans_by_config_id: dict[int, RequiredDataFetchPlanBundle],
     expected_contracts_by_config_id: dict[int, dict[str, Any]] | None = None,
+    market_data_provider: str = "opend",
 ) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     for symbol_cfg in symbol_cfgs:
         fetch_plan = fetch_plans_by_config_id[id(symbol_cfg)]
         fetch_cfg = _as_dict(symbol_cfg.get("fetch"))
+        executable = fetch_plan.projection_outcome in {"success_rows", "success_empty"}
         expected_fetch_contract = (
             (expected_contracts_by_config_id or {}).get(id(symbol_cfg))
-            or _expected_fetch_contract(symbol_cfg, fetch_plan)
+            or _expected_fetch_contract(symbol_cfg, fetch_plan, market_data_provider)
+        ) if executable else None
+        source, _decision = resolve_symbol_fetch_source(fetch_cfg)
+        binding_payload = build_required_data_fetch_binding(
+            source=market_data_source(market_data_provider, source),
+            host=str(fetch_cfg.get("host") or "127.0.0.1"),
+            port=_to_int(fetch_cfg.get("port") or 11111, 11111),
         )
-        binding_payload = dict(expected_fetch_contract["fetch_binding"])
         binding_source = binding_payload["source"]
+        if not executable:
+            validate_required_data_failed_planning_scopes(
+                fetch_plan.to_debug_dict(), symbol=fetch_plan.symbol.upper(), binding=binding_payload,
+            )
         expirations = sorted({
             str(expiration)
             for side_plan in fetch_plan.side_plans
@@ -980,6 +1025,7 @@ def _global_required_data_plan_summary(
         "planning_complete": all(
             item["projection_outcome"]
             in {"success_rows", "success_empty"}
+            and not item["fetch_plan"].get("failed_planning_scopes")
             for item in items
         ),
     }
@@ -1150,7 +1196,11 @@ def _fetch_one_inprocess(
     expected_fetch_contract: dict[str, Any] | None = None,
     producer_run_id: str | None = None,
     market_data_provider: str = "opend",
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
+    check_fetch_control(deadline, cancelled)
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
     from src.application.research.prescreen import publish_scan_prescreen
 
     symbol = str(symbol_cfg.get('symbol')).strip()
@@ -1261,6 +1311,7 @@ def _fetch_one_inprocess(
                 expiration_max_calls=int(opend_fetch_cfg['option_expiration']['max_calls']),
                 include_realized_volatility=bool(fetch_kwargs.get("include_realized_volatility")),
                 **rv_fetch_kwargs,
+                **controls,
             )
         else:
             specs = list(fetch_plan.merged_specs)
@@ -1286,6 +1337,8 @@ def _fetch_one_inprocess(
                         not fetch_plan.spot_observation_complete
                     ),
                 )
+                request = replace(request, deadline=deadline, cancelled=cancelled)
+                check_fetch_control(deadline, cancelled)
                 if spec.include_realized_volatility:
                     request = replace(
                         request,
@@ -1495,8 +1548,10 @@ def _merge_coordinator_results(
     return merged
 
 
-def _sleep_after_rate_limit_wave(wait_sec: float) -> None:
-    time.sleep(max(0.0, float(wait_sec)))
+def _sleep_after_rate_limit_wave(
+    wait_sec: float, *, deadline: float | None = None, cancelled: Callable[[], bool] | None = None,
+) -> None:
+    wait_fetch_control(max(0.0, float(wait_sec)), deadline=deadline, cancelled=cancelled)
 
 
 def _has_option_chain_rate_limit(items: list[dict[str, Any]]) -> bool:
@@ -1546,6 +1601,8 @@ def _warm_required_data_chain_cache_inprocess(
     worker_stop_at_utc: str,
     lock_release_by_utc: str,
     progress_fn: Callable[[dict[str, Any]], None] | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     started = time.monotonic()
     summary = _opening_chain_warmup_summary(
@@ -1566,6 +1623,8 @@ def _warm_required_data_chain_cache_inprocess(
         (stop_at - datetime.now(timezone.utc)).total_seconds(),
     )
     stop_monotonic = started + remaining_at_start
+    if deadline is not None:
+        stop_monotonic = min(stop_monotonic, deadline)
 
     def publish_progress() -> None:
         summary["duration_ms"] = max(0, int((time.monotonic() - started) * 1000))
@@ -1630,6 +1689,8 @@ def _warm_required_data_chain_cache_inprocess(
             ).market_snapshot,
             spot_observation_cache=spot_observation_cache,
             stop_monotonic=stop_monotonic,
+            deadline=stop_monotonic,
+            cancelled=cancelled,
         )
         if identity_failed:
             add_reason("plan_identity_error")
@@ -1658,6 +1719,8 @@ def _warm_required_data_chain_cache_inprocess(
                     expiration_discovery_cache=expiration_discovery_cache,
                     spot_observation_cache=spot_observation_cache,
                     planning_identities=planning_identities,
+                    deadline=stop_monotonic,
+                    cancelled=cancelled,
                 )
                 if fetch_plan.projection_outcome == "success_empty":
                     continue
@@ -1752,6 +1815,8 @@ def _warm_required_data_chain_cache_inprocess(
                         window_sec=float(request.option_chain_window_sec),
                         max_calls=int(request.option_chain_max_calls),
                         no_retry=True,
+                        deadline=stop_monotonic,
+                        cancelled=cancelled,
                     ),
                     retry_call=retry_futu_gateway_call,
                 )
@@ -1850,7 +1915,10 @@ def warm_required_data_chain_cache(
     next_formal_target_utc: str,
     worker_stop_at_utc: str,
     lock_release_by_utc: str,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
+    check_fetch_control(deadline, cancelled)
     started = time.monotonic()
     summary = _opening_chain_warmup_summary(
         next_formal_target_utc=next_formal_target_utc,
@@ -1866,6 +1934,8 @@ def warm_required_data_chain_cache(
         summary["reason_codes"] = ["invalid_worker_deadline"]
         return summary
     wait_sec = max(0.0, (stop_at - datetime.now(timezone.utc)).total_seconds())
+    if deadline is not None:
+        wait_sec = min(wait_sec, max(0.0, deadline - started))
     if wait_sec <= 0:
         summary["status"] = "deadline_reached"
         summary["reason_codes"] = ["worker_deadline_reached"]
@@ -1873,6 +1943,10 @@ def warm_required_data_chain_cache(
 
     ctx = multiprocessing.get_context("spawn")
     recv_conn, send_conn = ctx.Pipe(duplex=False)
+    cancel_event = ctx.Event() if cancelled is not None else None
+    child_controls = {"deadline": min(started + wait_sec, deadline) if deadline is not None else started + wait_sec}
+    if cancel_event is not None:
+        child_controls["cancelled"] = cancel_event.is_set
     process = ctx.Process(
         target=_warm_required_data_chain_cache_child,
         args=(
@@ -1887,6 +1961,7 @@ def warm_required_data_chain_cache(
                 "next_formal_target_utc": next_formal_target_utc,
                 "worker_stop_at_utc": worker_stop_at_utc,
                 "lock_release_by_utc": lock_release_by_utc,
+                **child_controls,
             },
         ),
         daemon=True,
@@ -1928,8 +2003,14 @@ def warm_required_data_chain_cache(
             summary = dict(envelope["summary"])
             final_received = bool(envelope.get("final"))
 
+    was_cancelled = False
     try:
         while process.is_alive() and not final_received and not pipe_closed:
+            if cancelled is not None and cancelled():
+                was_cancelled = True
+                assert cancel_event is not None
+                cancel_event.set()
+                break
             remaining = stop_monotonic - time.monotonic()
             if remaining <= 0:
                 break
@@ -1946,7 +2027,7 @@ def warm_required_data_chain_cache(
         deadline_reached = (
             not final_received
             and not pipe_closed
-            and time.monotonic() >= stop_monotonic
+            and (was_cancelled or time.monotonic() >= stop_monotonic)
         )
         if final_received or pipe_closed or not process.is_alive():
             process.join(timeout=0.2)
@@ -1962,7 +2043,7 @@ def warm_required_data_chain_cache(
             summary["status"] = "deadline_reached" if deadline_reached else "degraded"
             count_key = "deadline_skipped_shards" if deadline_reached else "failed_shards"
             summary[count_key] += unfinished_shard_count()
-            reason = "worker_deadline_reached" if deadline_reached else "child_failed"
+            reason = "worker_cancelled" if was_cancelled else ("worker_deadline_reached" if deadline_reached else "child_failed")
             reasons = list(summary.get("reason_codes") or [])
             if reason not in reasons:
                 reasons.append(reason)
@@ -1984,7 +2065,10 @@ def prefetch_required_data(
     force_refresh: bool = False,
     producer_run_id: str | None = None,
     scan_at_utc: datetime | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
+    check_fetch_control(deadline, cancelled)
     require_market_data_provider(cfg)
     with exclusive_private_file_lock(
         Path(base) / "output_shared" / "state" / "required_data_prefetch.lock"
@@ -1998,6 +2082,8 @@ def prefetch_required_data(
             force_refresh=force_refresh,
             producer_run_id=producer_run_id,
             scan_at_utc=scan_at_utc,
+            deadline=deadline,
+            cancelled=cancelled,
         )
 
 
@@ -2011,7 +2097,10 @@ def _prefetch_required_data_unlocked(
     force_refresh: bool = False,
     producer_run_id: str | None = None,
     scan_at_utc: datetime | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
+    check_fetch_control(deadline, cancelled)
     market_data_provider = resolve_market_data_provider(cfg).name
     profiles = resolve_templates_config(cfg)
     syms = [apply_profiles(it, profiles) for it in resolve_watchlist_config(cfg) if it.get('symbol')]
@@ -2031,7 +2120,15 @@ def _prefetch_required_data_unlocked(
     parsed_dir.mkdir(parents=True, exist_ok=True)
 
     process_root = (repo_root or base).resolve()
-    exec_service = ToolExecutionService(base=base)
+    if deadline is not None or cancelled is not None:
+        def controlled_runner(cmd, *, cwd, timeout=None, capture_output=False, text=False):
+            return run_command(
+                cmd, cwd=Path(cwd), timeout_sec=timeout, capture_output=capture_output, text=text,
+                deadline=deadline, cancelled=cancelled, env=tick_subprocess_env(deadline=deadline),
+            )
+        exec_service = ToolExecutionService(base=base, runner=controlled_runner)
+    else:
+        exec_service = ToolExecutionService(base=base)
     opend_fetch_cfg = _resolve_opend_fetch_cfg(cfg)
     batch_cfg = resolve_opend_batch_config(cfg)
     execution_mode = _resolve_execution_mode(cfg)
@@ -2049,6 +2146,8 @@ def _prefetch_required_data_unlocked(
         opend_fetch_cfg=opend_fetch_cfg,
         snapshot_batch_size=batch_cfg.market_snapshot,
         spot_observation_cache=spot_observation_cache,
+        deadline=deadline,
+        cancelled=cancelled,
     )
     if _identity_failed:
         raise RuntimeError(
@@ -2065,6 +2164,8 @@ def _prefetch_required_data_unlocked(
             expiration_discovery_cache=expiration_discovery_cache,
             spot_observation_cache=spot_observation_cache,
             planning_identities=planning_identities,
+            deadline=deadline,
+            cancelled=cancelled,
         )
         for symbol_cfg in fetch_syms
     }
@@ -2075,6 +2176,7 @@ def _prefetch_required_data_unlocked(
             fetch_plan_cache[id(symbol_cfg)].projection_outcome or ""
         ).strip()
         not in {"success_rows", "success_empty"}
+        and not fetch_plan_cache[id(symbol_cfg)].failed_planning_scopes
     ]
     if invalid_plan_symbols:
         publish_watchlist_plan(
@@ -2095,27 +2197,18 @@ def _prefetch_required_data_unlocked(
             market_data_provider,
         )
         for symbol_cfg in fetch_syms
+        if fetch_plan_cache[id(symbol_cfg)].projection_outcome in {"success_rows", "success_empty"}
     }
     global_required_data_plan = _global_required_data_plan_summary(
         symbol_cfgs=fetch_syms,
         fetch_plans_by_config_id=fetch_plan_cache,
         expected_contracts_by_config_id=expected_contract_cache,
+        market_data_provider=market_data_provider,
     )
     publish_watchlist_plan(
         producer_root=shared_required, producer_run_id=producer_run_id,
         plan=global_required_data_plan,
     )
-    if not bool(global_required_data_plan["planning_complete"]):
-        failed_symbols = [
-            str(item.get("symbol") or "")
-            for item in global_required_data_plan["symbols"]
-            if item.get("projection_outcome")
-            not in {"success_rows", "success_empty"}
-        ]
-        raise RuntimeError(
-            "global required-data plan incomplete; discovery or projection failed for: "
-            + ", ".join(failed_symbols)
-        )
 
     earnings_scan_at_utc = scan_at_utc or datetime.now(timezone.utc)
     earnings_calendar = prefetch_market_earnings_calendars(
@@ -2127,6 +2220,8 @@ def _prefetch_required_data_unlocked(
         ),
         output_dir=shared_required / "earnings_calendar",
         scan_at_utc=earnings_scan_at_utc,
+        **({"deadline": deadline, "cancelled": cancelled}
+           if deadline is not None or cancelled is not None else {}),
     )
 
     def _get_fetch_plan(symbol_cfg: dict[str, Any]) -> RequiredDataFetchPlanBundle:
@@ -2326,6 +2421,18 @@ def _prefetch_required_data_unlocked(
     fail_budget_consecutive, fail_budget_total = _resolve_failure_budget(cfg)
 
     def _dispatch(symbol_cfg: dict[str, Any]) -> dict[str, Any]:
+        check_fetch_control(deadline, cancelled)
+        fetch_plan = _get_fetch_plan(symbol_cfg)
+        if fetch_plan.projection_outcome in {"provider_error", "parse_error"}:
+            discovery = fetch_plan.expiration_discovery
+            assert discovery is not None
+            payload = normalize_tool_execution_payload(
+                tool_name="required_data_prefetch", symbol=fetch_plan.symbol,
+                source=market_data_provider, limit_exp=0, status="error", ok=False,
+                message=discovery.error or discovery.outcome, returncode=None,
+            )
+            payload["error_type"] = discovery.outcome
+            return payload
         if execution_mode == 'subprocess':
             return _fetch_one(symbol_cfg)
         return _fetch_one_inprocess(
@@ -2338,12 +2445,15 @@ def _prefetch_required_data_unlocked(
             fetch_plan=_get_fetch_plan(symbol_cfg),
             expected_fetch_contract=_get_expected_contract(symbol_cfg),
             producer_run_id=producer_run_id,
+            deadline=deadline,
+            cancelled=cancelled,
         )
 
     wave_results: list[PrefetchCoordinatorResult] = []
     rate_limit_cooldowns: list[dict[str, Any]] = []
     effective_max_workers = 0
     for wave_idx, wave in enumerate(budget_plan.waves):
+        check_fetch_control(deadline, cancelled)
         wave_workers = max(1, min(configured_max_workers, len(wave.symbol_cfgs)))
         effective_max_workers = max(effective_max_workers, wave_workers)
         coordinator = PrefetchCoordinator(
@@ -2368,7 +2478,9 @@ def _prefetch_required_data_unlocked(
                     "wait_sec": wait_sec,
                 }
             )
-            _sleep_after_rate_limit_wave(wait_sec)
+            _sleep_after_rate_limit_wave(wait_sec, **(
+                {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
+            ))
     max_workers = effective_max_workers
     coordinator_result = _merge_coordinator_results(
         wave_results,

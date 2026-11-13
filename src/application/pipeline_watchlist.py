@@ -66,6 +66,7 @@ from src.application.cc_lp_candidate_snapshot import (
 from src.application.candidate_snapshot_manifest import (
     publish_candidate_snapshot_manifest,
 )
+from src.infrastructure.futu_gateway import check_fetch_control
 from src.application.required_data_snapshot import (
     FrozenRequiredDataBatch,
     resolve_frozen_required_data_csv_bytes_batch,
@@ -99,8 +100,18 @@ def _enforce_symbol_timeout(
     *,
     symbol: str,
     timeout_sec: int | float | None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ):
+    started = time.monotonic()
     timeout = float(timeout_sec or 0)
+    if cancelled is not None and cancelled():
+        raise SymbolProcessingTimeout(f"{symbol} symbol processing cancelled")
+    if deadline is not None:
+        remaining = deadline - started
+        if remaining <= 0:
+            raise SymbolProcessingTimeout(f"{symbol} symbol processing exceeded Tick deadline")
+        timeout = min(timeout, remaining) if timeout > 0 else remaining
     if timeout <= 0:
         yield None
         return
@@ -112,7 +123,6 @@ def _enforce_symbol_timeout(
         and hasattr(signal, "setitimer")
         and hasattr(signal, "ITIMER_REAL")
     )
-    started = time.monotonic()
     deadline = started + timeout
     if not can_interrupt:
         yield deadline
@@ -413,7 +423,10 @@ def run_watchlist_pipeline(
     account_config_sha256: str | None = None,
     experience: bool = False,
     account_display_name: str | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> list[dict]:
+    check_fetch_control(deadline, cancelled)
     sym_whitelist = _parse_symbols_whitelist(symbols_arg)
 
     runtime = cfg.get('runtime', {}) or {}
@@ -614,6 +627,8 @@ def run_watchlist_pipeline(
 
     def _process_item(item0: dict, deadline_monotonic: float | None = None) -> list[dict]:
         try:
+            if cancelled is not None and cancelled():
+                raise SymbolProcessingTimeout("Tick symbol processing cancelled")
             item = resolve_watchlist_item_runtime_config(
                 item=item0,
                 profiles=profiles,
@@ -643,6 +658,8 @@ def run_watchlist_pipeline(
                 }
                 if quote_snapshot_id:
                     advice_scan_kwargs["quote_snapshot_id"] = quote_snapshot_id
+            if cancelled is not None:
+                advice_scan_kwargs["cancelled"] = cancelled
             if required_data_snapshot_manifest is not None:
                 advice_scan_kwargs.update(
                     {
@@ -706,8 +723,10 @@ def run_watchlist_pipeline(
             with _enforce_symbol_timeout(
                 symbol=symbol,
                 timeout_sec=symbol_timeout_sec,
-            ) as deadline:
-                return _process_item(item0, deadline)
+                deadline=deadline,
+                cancelled=cancelled,
+            ) as symbol_deadline:
+                return _process_item(item0, symbol_deadline)
         except SymbolProcessingTimeout as exc:
             account = str((cfg.get("portfolio") or {}).get("account") or "").lower()
             for scope in expected_strategy_statuses:
@@ -783,7 +802,10 @@ def run_watchlist_pipeline_default(
     account_config_sha256: str | None = None,
     experience: bool = False,
     account_display_name: str | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> list[dict]:
+    check_fetch_control(deadline, cancelled)
     wheel_symbol_filter = _parse_symbols_whitelist(symbols_arg)
     from src.application.config_profiles import apply_profiles
     from src.application.pipeline_context import build_pipeline_context
@@ -852,6 +874,7 @@ def run_watchlist_pipeline_default(
                 manifest_path=required_data_snapshot_manifest,
                 expected_run_id=account_run_id,
                 required_data_root=required_data_dir,
+                require_expiration_discovery=True,
             )
         )
     result = run_watchlist_pipeline(
@@ -927,6 +950,8 @@ def run_watchlist_pipeline_default(
         account_config_sha256=account_config_sha256,
         experience=experience,
         account_display_name=account_display_name,
+        deadline=deadline,
+        cancelled=cancelled,
     )
     if not candidate_capture_enabled:
         return result
@@ -1115,6 +1140,7 @@ def run_watchlist_pipeline_default(
                     )
                 else:
                     try:
+                        check_fetch_control(deadline, cancelled)
                         call_scan = run_wheel_call_scan(
                             wheel_read_model,
                             wheel_policy,
@@ -1168,6 +1194,7 @@ def run_watchlist_pipeline_default(
                     )
                 else:
                     try:
+                        check_fetch_control(deadline, cancelled)
                         put_scan = run_wheel_put_scan(
                             wheel_read_model,
                             wheel_policy,

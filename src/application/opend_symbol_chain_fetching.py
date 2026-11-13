@@ -22,7 +22,7 @@ from src.application.option_chain_fetching import (
     fetch_option_chains,
     prune_option_chain_cache,
 )
-from src.infrastructure.futu_gateway import build_ready_futu_quote_gateway, retry_futu_gateway_call
+from src.infrastructure.futu_gateway import build_ready_futu_quote_gateway, retry_futu_gateway_call, check_fetch_control
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -107,7 +107,11 @@ def list_option_expirations(
     expiration_window_sec: float = 30.0,
     expiration_max_calls: int = 60,
     asof_date: str | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> list[str]:
+    check_fetch_control(deadline, cancelled)
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
     effective_base_dir = Path(base_dir) if base_dir is not None else REPO_ROOT
     underlier = normalize_underlier(symbol, base_dir=effective_base_dir)
     resolved_asof_date = _strict_iso_date(
@@ -122,6 +126,7 @@ def list_option_expirations(
         host=host,
         port=int(port),
         is_option_chain_cache_enabled=False,
+        **controls,
     )
     try:
         expiration_limit = OpenDFetchLimits.from_flat_kwargs(
@@ -137,6 +142,7 @@ def list_option_expirations(
             expiration_limit=expiration_limit,
             retry_call=retry_futu_gateway_call,
             rate_limited_call=rate_limited_opend_call,
+            **controls,
         )
     finally:
         try:
@@ -157,9 +163,13 @@ def discover_option_expirations(
     expiration_max_calls: int = 60,
     list_expirations_fn: Callable[..., list[str]] | None = None,
     trading_date: str | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> OptionExpirationDiscoveryResult:
     """Return the typed result of the scheduled expiration observation."""
 
+    check_fetch_control(deadline, cancelled)
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
     effective_base_dir = Path(base_dir) if base_dir is not None else REPO_ROOT
     try:
         underlier = normalize_underlier(symbol, base_dir=effective_base_dir)
@@ -209,7 +219,9 @@ def discover_option_expirations(
             expiration_window_sec=expiration_window_sec,
             expiration_max_calls=expiration_max_calls,
             asof_date=resolved_trading_date,
+            **controls,
         )
+        check_fetch_control(deadline, cancelled)
         observed_at = _utc_now_iso()
         if not isinstance(raw_expirations, list):
             raise OptionExpirationParseError(
@@ -245,6 +257,7 @@ def discover_option_expirations(
             error=f"{type(exc).__name__}: {exc}",
         )
     except Exception as exc:
+        check_fetch_control(deadline, cancelled)
         return OptionExpirationDiscoveryResult(
             outcome="provider_error",
             reason_code="expiration_discovery_failed",
@@ -272,7 +285,11 @@ def list_option_expirations_with_gateway(
     asof_date: str | None = None,
     use_cache: bool = True,
     metrics: dict[str, Any] | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> list[str]:
+    check_fetch_control(deadline, cancelled)
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
     cache_path = None
     if use_cache and asof_date:
         cache_path = option_expiration_cache_path(base_dir, underlier_code, str(asof_date))
@@ -282,8 +299,11 @@ def list_option_expirations_with_gateway(
             return cached
 
     def _call_expiration_dates() -> Any:
+        check_fetch_control(deadline, cancelled)
         _increment_metric(metrics, "expiration_opend_calls")
-        return gateway.get_option_expiration_dates(underlier_code)
+        result = gateway.get_option_expiration_dates(underlier_code, **controls)
+        check_fetch_control(deadline, cancelled)
+        return result
 
     df_e = retry_call(
         "get_option_expiration_date",
@@ -292,6 +312,7 @@ def list_option_expirations_with_gateway(
             endpoint="option_expiration",
             **expiration_limit.call_kwargs(),
             call=_call_expiration_dates,
+            **controls,
         ),
         no_retry=no_retry,
         retry_max_attempts=retry_max_attempts,
@@ -299,7 +320,9 @@ def list_option_expirations_with_gateway(
         retry_base_delay_sec=retry_base_delay_sec,
         retry_max_delay_sec=retry_max_delay_sec,
         quiet=False,
+        **controls,
     )
+    check_fetch_control(deadline, cancelled)
     if not isinstance(df_e, pd.DataFrame):
         raise OptionExpirationParseError(
             "option expiration response must be a DataFrame"
@@ -376,6 +399,10 @@ def fetch_symbol_option_chain(
     retry_call: Callable[..., Any] = retry_futu_gateway_call,
     rate_limited_call: Callable[..., Any] = rate_limited_opend_call,
 ) -> SymbolOptionChainResult:
+    deadline = getattr(request, "deadline", None)
+    cancelled = getattr(request, "cancelled", None)
+    check_fetch_control(deadline, cancelled)
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
     expiration_fetch_meta: dict[str, Any] = {
         "expiration_opend_calls": 0,
         "expiration_cache_hits": 0,
@@ -397,6 +424,7 @@ def fetch_symbol_option_chain(
             rate_limited_call=rate_limited_call,
             asof_date=today.isoformat(),
             metrics=expiration_fetch_meta,
+            **controls,
         )
 
     expirations_pick = select_symbol_expirations(
@@ -447,6 +475,7 @@ def fetch_symbol_option_chain(
                 retry_time_budget_sec=float(request.retry_time_budget_sec),
                 retry_base_delay_sec=float(request.retry_base_delay_sec),
                 retry_max_delay_sec=float(request.retry_max_delay_sec),
+                **controls,
             ),
             retry_call=retry_call,
         )

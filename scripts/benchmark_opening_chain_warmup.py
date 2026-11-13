@@ -21,7 +21,7 @@ import os
 from pathlib import Path
 import tempfile
 import threading
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 from unittest.mock import patch
 
 import pandas as pd
@@ -189,7 +189,10 @@ class FakeGateway:
     def close(self) -> None:
         self.provider.record("close")
 
-    def get_snapshot(self, codes: list[str]) -> pd.DataFrame:
+    def get_snapshot(
+        self, codes: list[str], *, deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> pd.DataFrame:
         self.provider.record("snapshot", codes=list(codes))
         self.provider.clock.advance(0.2)
         return pd.DataFrame([
@@ -198,12 +201,18 @@ class FakeGateway:
             for code in codes
         ])
 
-    def get_market_state(self, codes: list[str]) -> pd.DataFrame:
+    def get_market_state(
+        self, codes: list[str], *, deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> pd.DataFrame:
         self.provider.record("market_state", codes=list(codes))
         self.provider.clock.advance(0.2)
         return pd.DataFrame([{"code": code, "market_state": "MORNING"} for code in codes])
 
-    def get_option_expiration_dates(self, code: str) -> pd.DataFrame:
+    def get_option_expiration_dates(
+        self, code: str, *, deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> pd.DataFrame:
         self.provider.record("expiration", code=code)
         self.provider.clock.advance(0.2)
         return pd.DataFrame({"strike_time": EXPIRATIONS})

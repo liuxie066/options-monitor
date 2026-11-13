@@ -120,7 +120,16 @@ def test_fallback_fills_missing_iv_when_batch_fails(monkeypatch, tmp_path: Path)
     assert payload["meta"]["snapshot_missing_code_set"] == []
     assert payload["meta"]["snapshot_fallback_filled"] == 2
     assert payload["meta"]["snapshot_fallback_failed"] == 0
-    assert payload["meta"]["snapshot_errors"]
+    assert payload["meta"]["snapshot_errors"] == []
+    snapshots = payload["meta"]["research_prescreen"]["snapshots"]
+    assert len(snapshots["attempt_errors"]) == 1
+    assert snapshots["attempt_errors"][0]["stage"] == "market_snapshot"
+    assert snapshots["attempt_errors"][0]["batch_size"] == 2
+    assert snapshots["attempt_errors"][0]["message"] == "main snapshot failed"
+    assert snapshots["errors"] == []
+    assert [receipt["status"] for receipt in snapshots["batch_receipts"]] == ["failed", "received", "received"]
+    assert snapshots["batch_receipts"][0]["error_code"] == "RuntimeError"
+    assert all(receipt["provider_call_started"] for receipt in snapshots["batch_receipts"])
 
 
 def test_fallback_respects_max_codes_budget(monkeypatch, tmp_path: Path) -> None:

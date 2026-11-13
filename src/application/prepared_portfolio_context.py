@@ -45,6 +45,8 @@ from src.application.payload_helpers import required_text
 from functools import partial
 from src.application.payload_helpers import readable_json_bytes as _json_file_bytes
 from src.application.current_fx_run import load_run_fx_snapshot
+from src.application.runtime_trigger_context import tick_subprocess_env
+from src.infrastructure.futu_gateway import check_fetch_control
 from src.infrastructure.exchange_rates import (
     project_exchange_rate_snapshot,
 )
@@ -75,6 +77,8 @@ def prepare_portfolio_contexts(
     python_executable: Path | None = None,
     kill_grace_sec: float = DEFAULT_KILL_GRACE_SEC,
     popen_factory: Callable[..., subprocess.Popen[Any]] = subprocess.Popen,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Prepare all account contexts under one shared absolute deadline."""
 
@@ -111,11 +115,14 @@ def prepare_portfolio_contexts(
                 "account prepared state path is outside the current run"
             )
         states_by_account[account] = expected_state_dir
-    timeout_value = max(0.001, float(timeout_sec))
+    check_fetch_control(deadline, cancelled)
     started_at_utc = datetime.now(timezone.utc)
-    deadline_at_utc = started_at_utc + timedelta(seconds=timeout_value)
     started_monotonic = time.monotonic()
-    deadline_monotonic = started_monotonic + timeout_value
+    deadline_monotonic = started_monotonic + max(0.001, float(timeout_sec))
+    if deadline is not None:
+        deadline_monotonic = min(deadline_monotonic, deadline)
+    timeout_value = max(0.0, deadline_monotonic - started_monotonic)
+    deadline_at_utc = started_at_utc + timedelta(seconds=timeout_value)
     result_payloads: dict[str, dict[str, Any]] = {}
     child_finished_at_utc: dict[str, str] = {}
     worker_accounts: list[str] = []
@@ -283,6 +290,7 @@ def prepare_portfolio_contexts(
             atomic_write_json(request_path, request_payload)
             worker_requests[account] = request_payload
             try:
+                check_fetch_control(deadline_monotonic, cancelled)
                 processes[account] = popen_factory(
                     [
                         str(python),
@@ -292,7 +300,10 @@ def prepare_portfolio_contexts(
                         str(request_path),
                     ],
                     cwd=str(Path(repo_root).resolve()),
-                    env=dict(os.environ, PYTHONPATH=str(Path(repo_root).resolve())),
+                    env=tick_subprocess_env(
+                        deadline=deadline_monotonic,
+                        environ=dict(os.environ, PYTHONPATH=str(Path(repo_root).resolve())),
+                    ),
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
@@ -308,6 +319,7 @@ def prepare_portfolio_contexts(
                 ).isoformat()
 
         while len(accepted) < len(processes):
+            check_fetch_control(None, cancelled)
             for account, process in processes.items():
                 if account in accepted:
                     continue

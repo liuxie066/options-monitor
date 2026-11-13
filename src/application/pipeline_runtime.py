@@ -339,6 +339,7 @@ def main(argv: list[str] | None = None) -> int:
         report_repo.ensure_report_dir(report_dir)
 
         from src.application.pipeline_watchlist import run_watchlist_pipeline_default
+        from src.application.runtime_trigger_context import resolve_tick_deadline
 
         required_data_dir = Path(shared_required_data).resolve() if shared_required_data else (runtime_root / "output_shared" / "required_data").resolve()
 
@@ -355,6 +356,7 @@ def main(argv: list[str] | None = None) -> int:
                 top_n=top_n,
                 symbol_timeout_sec=symbol_timeout_sec,
                 portfolio_timeout_sec=portfolio_timeout_sec,
+                deadline=resolve_tick_deadline(),
                 want_scan=_want("scan"),
                 no_context=bool(getattr(args, "no_context", False)),
                 symbols_arg=getattr(args, "symbols", None),

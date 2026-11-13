@@ -741,13 +741,21 @@ def test_prefetch_fails_closed_when_global_expiration_discovery_is_incomplete(
         lambda symbol, **kwargs: fetch_calls.append(symbol),
     )
 
-    with pytest.raises(RuntimeError, match="global required-data plan incomplete"):
-        _prefetch(
-            tmp_path,
-            cfg={"runtime": {"prefetch": {"execution_mode": "inprocess"}}},
-        )
+    result = _prefetch(
+        tmp_path,
+        cfg={"runtime": {"prefetch": {"execution_mode": "inprocess"}}},
+    )
 
     assert fetch_calls == []
+    assert result["errors"] == 1
+    plan = result["global_required_data_plan"]
+    assert plan["planning_complete"] is False
+    assert plan["discovery_complete"] is False
+    assert plan["symbols_count"] == 1
+    item = plan["symbols"][0]
+    assert item["projection_outcome"] == "provider_error"
+    assert item["expected_fetch_contract"] is None
+    assert "discovery unavailable" in item["fetch_plan"]["expiration_discovery"]["error"]
 
 
 def test_prefetch_fails_closed_before_gateway_for_symbol_without_demand(
