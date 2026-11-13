@@ -15,6 +15,35 @@ class EventRejected(ValueError):
     """A stable reason code, never the original payload or message text."""
 
 
+def _classify_delivery_outcome(
+    started: bool, response: object = None, exc: Exception | None = None,
+) -> str:
+    """Classify a reply result without sending or persisting delivery state."""
+    if exc is not None:
+        from src.infrastructure.feishu_bitable import (
+            FeishuAuthError, FeishuPermanentError, FeishuPermissionError, FeishuRateLimitError,
+        )
+        # The transport owner distinguishes explicit rejection from uncertain delivery.
+        explicit_failure = isinstance(
+            exc, (FeishuAuthError, FeishuPermissionError, FeishuRateLimitError)) or (
+            isinstance(exc, FeishuPermanentError) and (
+                exc.code is not None or
+                (isinstance(exc.response, dict)
+                 and isinstance(exc.response.get("http_status"), int)
+                 and 400 <= exc.response["http_status"] < 500)))
+        return "failed" if not started or explicit_failure else "outcome_unknown"
+    if not started:
+        return "outcome_unknown"
+    if (isinstance(response, dict) and type(response.get("code")) is int
+            and response["code"] == 0 and isinstance(response.get("data"), dict)
+            and isinstance(response["data"].get("message_id"), str)
+            and response["data"]["message_id"].strip()):
+        return "acknowledged"
+    if isinstance(response, dict) and type(response.get("code")) is int and response["code"] != 0:
+        return "failed"
+    return "outcome_unknown"
+
+
 @dataclass(frozen=True)
 class VerifiedGroupEvent:
     app_id: str
