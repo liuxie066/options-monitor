@@ -933,6 +933,45 @@ def test_account_head_query_uses_case_account_index_and_reads_no_attempt_rows(
     assert all("trade_lifecycle_attempt_audits" not in detail for detail in details)
 
 
+@pytest.mark.parametrize("queried_case", ["case-a", "case-b"])
+def test_case_verifier_requires_integrity_before_reporting_absent(
+    tmp_path: Path, queried_case: str,
+) -> None:
+    repo = _case_repo(tmp_path)
+    repo.upsert_trade_lifecycle_case(_case("case-b", account="sy"))
+    assert repo.verify_trade_lifecycle_attempt_audit_case(case_id=queried_case)["status"] == "absent"
+    assert repo.get_trade_lifecycle_attempt_audit_by_invocation(
+        case_id="case-a", invocation_id=INVOCATION_ID,
+    ) is None
+    failure = _envelope(
+        outcome_kind="stale_generation_after_call", reason_code="generation_changed",
+    )
+    record_lifecycle_attempt_audit_atomically(repo, attempt_audit=failure)
+    assert repo.verify_trade_lifecycle_attempt_audit_case(case_id="case-a")["status"] == "valid"
+    seal = _seal(heads=repo.list_trade_lifecycle_attempt_audit_heads_for_account(account="lx"))
+    with pytest.raises(sqlite3.IntegrityError), repo._connect() as conn:  # noqa: SLF001
+        assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        conn.execute("DELETE FROM trade_lifecycle_attempt_audit_heads WHERE case_id = 'case-a'")
+    with repo._connect() as conn:  # noqa: SLF001 - simulate externally damaged storage
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("DELETE FROM trade_lifecycle_attempt_audit_heads WHERE case_id = 'case-a'")
+        assert conn.execute("SELECT COUNT(*) FROM trade_lifecycle_attempt_audits").fetchone()[0] == 1
+        assert len(conn.execute("PRAGMA foreign_key_check").fetchall()) == 1
+    with pytest.raises(RuntimeError, match="SQLite foreign key check failed"):
+        repo.assert_foreign_keys_clean()
+    sealed = verify_lifecycle_attempt_run_seal(
+        seal, current_heads=repo.list_trade_lifecycle_attempt_audit_heads_for_account(account="lx"),
+    )
+    assert sealed["status"] == "invalid"
+    assert sealed["mismatch_samples"] == [{"code": "sealed_head_missing", "case_id": "case-a"}]
+    assert repo.get_trade_lifecycle_attempt_audit_by_invocation(
+        case_id="case-a", invocation_id=INVOCATION_ID,
+    ) is None
+
+    with pytest.raises(RuntimeError, match="SQLite foreign key check failed"):
+        repo.verify_trade_lifecycle_attempt_audit_case(case_id=queried_case)
+
+
 def test_offline_verifier_replays_chain_and_detects_head_or_span_corruption(
     tmp_path: Path,
 ) -> None:

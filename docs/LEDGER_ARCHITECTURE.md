@@ -68,6 +68,21 @@ SQLite checkpoint 续算预览在应用候选前，在同一只读事务内有�
 
 生命周期 outbox 的领取、过期恢复、CAS、结算和人工核对由现有 ledger owner 持有；批次与成员的更新保持原有事务边界。`trades/lifecycle_outbox.py` 保留兼容接口、消息 renderer 注入及发送编排，provider 发送在账本事务之外。发送开始前冻结正文并校验摘要，重试复用原正文；结果不明保持 `unknown`，仅经既有人工核对流程决定补发。renderer 只读取冻结 payload 并返回正文，不执行 I/O 或修改 payload。
 
+### Lifecycle attempt 审计的局部核验与缺失判断
+
+`SQLiteOptionPositionsRepository.verify_trade_lifecycle_attempt_audit_case` 对已有
+head 保持 case 级链、span 和引用核验；其他 case 的 sidecar 损坏不改变该核验范围。
+没有 head 时，审计行不含可独立恢复的 `case_id`，因此在返回 `absent` 前复用
+`assert_foreign_keys_clean` 检查当前库的外键完整性。若存在孤儿行或其他外键异常，
+该前置检查抛出 `RuntimeError`，不会将其当作零条审计记录，也不会猜测孤儿行所属
+case 或账户。只有无 head 的离线缺失判断增加这次库级检查。
+
+`get_trade_lifecycle_attempt_audit_by_invocation` 返回 `None` 只表示没有找到能归属到
+所请求 case 的 invocation，不构成物理记录不存在的证明。恢复路径在 provider
+结果无法由审计证明时保持 `ambiguous_provider_result`。即使局部核验返回 `absent`，
+也不能证明历史从未存在；核对先前保存的 run seal 才能检出封存 head 的丢失，
+包括 head 与其审计行一起丢失而未留下外键异常的情况。
+
 ## 多源输入与历史留存
 
 ### 范围与权威
