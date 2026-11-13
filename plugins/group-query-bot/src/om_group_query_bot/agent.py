@@ -33,6 +33,7 @@ from .contracts import ContractError, REQUEST_SCHEMA, SCENARIO_METHODS, normaliz
 from .feishu import (
     EventRejected,
     VerifiedGroupEvent,
+    _classify_delivery_outcome,
     message_text,
     normalize_sdk_event,
 )
@@ -906,31 +907,9 @@ class BotService:
                 message_id=event.message_id, text=reply.text,
                 uuid=row["delivery_uuid"], reply_in_thread=bool(event.thread_id),
                 before_send=before_send)
-            if not started:
-                state = "outcome_unknown"
-            elif (isinstance(response, dict) and type(response.get("code")) is int
-                  and response["code"] == 0 and isinstance(response.get("data"), dict)
-                  and isinstance(response["data"].get("message_id"), str)
-                  and response["data"]["message_id"].strip()):
-                state = "acknowledged"
-            elif isinstance(response, dict) and type(response.get("code")) is int \
-                    and response["code"] != 0:
-                state = "failed"
-            else:
-                state = "outcome_unknown"
+            state = _classify_delivery_outcome(started, response=response)
         except Exception as exc:
-            from src.infrastructure.feishu_bitable import (
-                FeishuAuthError, FeishuPermanentError, FeishuPermissionError,
-                FeishuRateLimitError,
-            )
-            explicit_failure = isinstance(
-                exc, (FeishuAuthError, FeishuPermissionError, FeishuRateLimitError)) or (
-                isinstance(exc, FeishuPermanentError) and (
-                    exc.code is not None or
-                    (isinstance(exc.response, dict)
-                     and isinstance(exc.response.get("http_status"), int)
-                     and 400 <= exc.response["http_status"] < 500)))
-            state = "failed" if not started or explicit_failure else "outcome_unknown"
+            state = _classify_delivery_outcome(started, exc=exc)
         self.deliveries.finish(row["message_key"], state)
         return {"status": state, "scope_sha256": scope,
                 "agent_status": reply.status}

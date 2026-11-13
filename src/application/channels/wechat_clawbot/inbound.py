@@ -46,7 +46,8 @@ from src.application.channels.wechat_clawbot.message import (
     response_message_id,
     response_success,
 )
-from src.application.channels.wechat_clawbot.state import DEFAULT_WECHAT_CLAWBOT_LABEL, resolve_wechat_clawbot_state_dir
+from src.application.channels.wechat_clawbot._state import _load_store_json, _state_store
+from src.application.channels.wechat_clawbot.state import DEFAULT_WECHAT_CLAWBOT_LABEL
 from src.application.channels.wechat_clawbot.state_store import WechatClawbotStateStore
 from src.application.conversation_scope import wechat_window_conversation_id
 from src.application.bot.host_store import BotHostStore
@@ -1240,18 +1241,6 @@ def _bot_settings(*, bot_config_path: str | None = None) -> Any:
             llm=configured.llm,
         )
     return BotSettings()
-
-
-def _state_store(*, base: Path, label: str, state_dir: str | None = None) -> WechatClawbotStateStore:
-    notifications = {"wechat_clawbot_state_dir": state_dir} if state_dir else None
-    return WechatClawbotStateStore(resolve_wechat_clawbot_state_dir(base=base, label=label, notifications=notifications))
-
-
-def _load_store_json(load_fn: Callable[..., dict[str, Any]], *, default: dict[str, Any] | None = None) -> dict[str, Any]:
-    try:
-        return load_fn(default=default)
-    except ValueError as exc:
-        raise AgentToolError(code="STATE_ERROR", message=str(exc)) from exc
 
 
 def _normalize_config_key(value: str | None) -> str | None:

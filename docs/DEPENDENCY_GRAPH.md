@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1526 (`src`: 621, `domain`: 99, `scripts`: 31, `tests`: 771)
-- Internal import edges: 13704 total, 4631 production/script edges excluding tests
+- Python files scanned: 1528 (`src`: 623, `domain`: 99, `scripts`: 31, `tests`: 771)
+- Internal import edges: 13711 total, 4638 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|745| domain
+  application -->|746| domain
   application -->|4| domain_services
   application -->|213| infrastructure
   application -->|2| om_strategy_core
@@ -65,7 +65,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 745 |
+| application | domain | 746 |
 | interfaces | application | 249 |
 | application | infrastructure | 213 |
 | scripts | application | 97 |
@@ -105,7 +105,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 
 | from | to | imports |
 |---|---|---|
-| src.application | domain.domain | 322 |
+| src.application | domain.domain | 323 |
 | src.interfaces | src.application | 198 |
 | src.application.ledger | domain.domain | 184 |
 | src.application | src.infrastructure | 147 |
@@ -225,7 +225,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.tick_notification_flow | 31 |
 | src.interfaces.cli.option_positions | 31 |
 | src.application.agent_tools.positions | 30 |
-| src.application.channels.wechat_clawbot.inbound | 29 |
+| src.application.channels.wechat_clawbot.inbound | 30 |
 
 ## Reading
 
