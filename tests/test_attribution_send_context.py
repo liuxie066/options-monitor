@@ -17,6 +17,7 @@ from src.application.daily_decision_brief_repository import (
 )
 from src.application.notification_delivery_route import notification_reminder_route_key
 from test_attribution_reminders import _next_fixed_request, _patch_pending_tick
+from test_daily_decision_brief_notification_flow import _run_flow
 
 
 def _wechat_fixture(tmp_path, monkeypatch):
@@ -36,7 +37,7 @@ def _wechat_fixture(tmp_path, monkeypatch):
         label="default", state_dir=state_dir, base_url="https://example.invalid",
         bot_token="fixture-in-memory-auth",
     ))
-    monkeypatch.setattr(flow, "finalize_multi_tick_run", lambda **kw: 1 if kw.get("notify_failures") else 0)
+    monkeypatch.setattr("src.application.multi_account_tick.finalize_multi_tick_run", lambda **kw: 1 if kw.get("notify_failures") else 0)
     return flow, fixture, config, bind
 
 
@@ -81,14 +82,14 @@ def test_real_wechat_binding_switch_persists_actual_send_not_pre_or_post_metadat
             actual_b.append(notification_reminder_route_key(config=config, base=tmp_path))
 
     _install_real_wechat_adapter(flow, monkeypatch, FakeClient, before_send)
-    assert flow.run_tick_notification_flow(fixture._request(tmp_path, run_id="prepared-A-sent-B", config=config).request) == 0
+    assert _run_flow(fixture._request(tmp_path, run_id="prepared-A-sent-B", config=config).request) == 0
     envelope = _fixed_envelopes(tmp_path, fixture)[fixture.FIXED_TARGET]
     assert calls[0]["to_user_id"] == "fixture-B"
     assert envelope["render_context"]["attribution_route_key"] == prepared_a
     assert envelope["confirmed_attribution_route_key"] == actual_b[0] != prepared_a
     assert read_confirmed_attribution_render_context(base=tmp_path, account="lx", market="US") == {}
     bind("fixture-A")
-    assert flow.run_tick_notification_flow(_next_fixed_request(
+    assert _run_flow(_next_fixed_request(
         fixture, tmp_path, run_id="A-never-saw-detail", config=config)) == 0
     assert calls[1]["to_user_id"] == "fixture-A"
     assert "TCOM0 2026" in calls[1]["text"]
@@ -114,7 +115,7 @@ def test_two_accounts_persist_their_own_actual_sender_context(tmp_path, monkeypa
         keys.append(notification_reminder_route_key(config=config, base=tmp_path))
 
     _install_real_wechat_adapter(flow, monkeypatch, FakeClient, before_send)
-    assert flow.run_tick_notification_flow(fixture._request(
+    assert _run_flow(fixture._request(
         tmp_path, run_id="two-account-context", config=config, accounts=("lx", "sy")).request) == 0
     assert [c["to_user_id"] for c in calls] == ["fixture-A", "fixture-B"]
     assert keys[0] == key_a != keys[1]
@@ -144,7 +145,7 @@ def test_unconfirmed_or_unproven_actual_context_never_advances_seen(tmp_path, mo
         def fail_write(**kwargs):
             raise OSError("fixture receipt write failure")
         monkeypatch.setattr(flow, "confirm_daily_decision_brief_delivery_v2", fail_write)
-    assert flow.run_tick_notification_flow(fixture._request(tmp_path, run_id=outcome, config=config).request) == (
+    assert _run_flow(fixture._request(tmp_path, run_id=outcome, config=config).request) == (
         0 if outcome == "unknown_success" else 1)
     assert read_confirmed_attribution_render_context(base=tmp_path, account="lx", market="US") == {}
     envelope = _fixed_envelopes(tmp_path, fixture)[fixture.FIXED_TARGET]
@@ -192,21 +193,49 @@ def test_real_wechat_exact_retry_preserves_frozen_payload_and_records_current_ac
     _install_real_wechat_adapter(flow, monkeypatch, FakeClient)
     original_execute = flow.execute_per_account_delivery
     monkeypatch.setattr(flow, "execute_per_account_delivery", lambda **kw: original_execute(**kw, sleep_fn=lambda _: None))
-    assert flow.run_tick_notification_flow(fixture._request(tmp_path, run_id="failed-A", config=config).request) == 1
+    assert _run_flow(fixture._request(tmp_path, run_id="failed-A", config=config).request) == 1
     pending = _fixed_envelopes(tmp_path, fixture)[fixture.FIXED_TARGET]
+    original_call_count = len(calls)
+    original_route = pending["render_context"]["attribution_route_key"]
+    assert original_route == notification_reminder_route_key(config=config, base=tmp_path)
     bind("fixture-B")
     actual_b = notification_reminder_route_key(config=config, base=tmp_path)
-    response.update(ret=0, message_id="fixture-retry-B")
-    assert flow.run_tick_notification_flow(fixture._request(
+    assert actual_b != original_route
+    response.update(ret=0, message_id="fixture-retry-A")
+    assert _run_flow(fixture._request(
         tmp_path, run_id="retry-B", config=config, delivery_only=True).request) == 0
+    assert len(calls) == original_call_count
+    paused = _fixed_envelopes(tmp_path, fixture)[fixture.FIXED_TARGET]
+    assert paused["status"] == pending["status"]
+    for field in ("delivery_key", "source_digest", "message_sha256", "rendered_message", "render_context"):
+        assert paused[field] == pending[field]
+    assert read_confirmed_attribution_render_context(base=tmp_path, account="lx", market="US") == {}
+
+    bind("fixture-A")
+    assert _run_flow(fixture._request(
+        tmp_path, run_id="retry-A", config=config, delivery_only=True).request) == 0
     confirmed = _fixed_envelopes(tmp_path, fixture)[fixture.FIXED_TARGET]
-    assert calls[-1]["to_user_id"] == "fixture-B"
+    assert len(calls) == original_call_count + 1
+    assert calls[-1]["to_user_id"] == "fixture-A"
     assert all(call["text"] == pending["rendered_message"] for call in calls)
     assert len({call["client_id"] for call in calls}) == 1
+    assert confirmed["status"] == "confirmed"
     for field in ("delivery_key", "source_digest", "message_sha256", "rendered_message", "render_context"):
         assert confirmed[field] == pending[field]
-    assert confirmed["confirmed_attribution_route_key"] == actual_b
-    assert read_confirmed_attribution_render_context(base=tmp_path, account="lx", market="US") == {}
+    assert confirmed["confirmed_attribution_route_key"] == original_route
+    assert confirmed["confirmed_attribution_route_key"] == notification_reminder_route_key(config=config, base=tmp_path)
+    assert read_confirmed_attribution_render_context(
+        base=tmp_path, account="lx", market="US") == pending["render_context"]
+
+    # B never received A's frozen obligation and must still see the full reminder.
+    bind("fixture-B")
+    rebuilt = flow._rebuild_daily_brief_delivery(
+        request=_next_fixed_request(fixture, tmp_path, run_id="after-restored-retry", config=config),
+        account="lx", market="US", market_date=fixture.MARKET_DATE,
+        scheduler={"scheduled_target_market": "2026-07-21T11:00:00-04:00"}, daily_limits={},
+    )["envelope"]
+    assert "TCOM0 2026" in rebuilt["rendered_message"]
+    assert "1 笔未变化" not in rebuilt["rendered_message"]
 
 
 def test_wechat_process_normalization_and_fallback_keep_immutable_configured_scope(tmp_path, monkeypatch):
@@ -376,7 +405,7 @@ def _directory_fixture(tmp_path, monkeypatch):
             "bot_token": "synthetic-" + marker, "base_url": "https://example.invalid",
         }))
         directories.append(directory)
-    monkeypatch.setattr(flow, "finalize_multi_tick_run", lambda **kw: 1 if kw.get("notify_failures") else 0)
+    monkeypatch.setattr("src.application.multi_account_tick.finalize_multi_tick_run", lambda **kw: 1 if kw.get("notify_failures") else 0)
     return flow, fixture, config, directories
 
 
@@ -420,7 +449,7 @@ def test_pinned_directory_never_confirms_late_alias_or_suppresses_B_first_detail
             alias.symlink_to(directory_a.parent, target_is_directory=True)
 
     _install_real_wechat_adapter(flow, monkeypatch, _directory_client(calls), before_send)
-    assert flow.run_tick_notification_flow(fixture._request(tmp_path, run_id="prepare-B-auth-A", config=config).request) == 0
+    assert _run_flow(fixture._request(tmp_path, run_id="prepare-B-auth-A", config=config).request) == 0
     envelope = _fixed_envelopes(tmp_path, fixture)[fixture.FIXED_TARGET]
     assert source_reads == ["synthetic-A"]
     assert envelope["render_context"]["attribution_route_key"] == expected_b
@@ -431,7 +460,7 @@ def test_pinned_directory_never_confirms_late_alias_or_suppresses_B_first_detail
             recipient=["fixture-same-recipient", None, None])
     assert envelope["confirmed_attribution_route_key"] == key_a != expected_b
     assert not read_confirmed_attribution_render_context(base=tmp_path, account="lx", market="US")
-    assert flow.run_tick_notification_flow(_next_fixed_request(fixture, tmp_path, run_id="B-first", config=config)) == 0
+    assert _run_flow(_next_fixed_request(fixture, tmp_path, run_id="B-first", config=config)) == 0
     assert calls == [{"auth": "synthetic-A", "detail": True, "summary": False},
                      {"auth": "synthetic-B", "detail": True, "summary": False}]
     for descriptor in descriptors:
@@ -469,7 +498,7 @@ def test_directory_replacement_keeps_same_auth_snapshot_or_unknown_proof(tmp_pat
         monkeypatch.setattr(WechatClawbotStateStore, "_read_json_object", read)
 
     _install_real_wechat_adapter(flow, monkeypatch, _directory_client(calls), before_send)
-    assert flow.run_tick_notification_flow(fixture._request(tmp_path, run_id="directory-swap", config=config).request) == 0
+    assert _run_flow(fixture._request(tmp_path, run_id="directory-swap", config=config).request) == 0
     assert source_reads == ["synthetic-A"]
     envelope = _fixed_envelopes(tmp_path, fixture)[fixture.FIXED_TARGET]
     assert envelope["confirmed_attribution_route_key"] == (prepared_a if restore else None)
@@ -479,7 +508,7 @@ def test_directory_replacement_keeps_same_auth_snapshot_or_unknown_proof(tmp_pat
         directory_b.rename(directory_a)
     replacement_key = notification_reminder_route_key(config=config, base=tmp_path)
     assert replacement_key and replacement_key != prepared_a
-    assert flow.run_tick_notification_flow(_next_fixed_request(fixture, tmp_path, run_id="replacement-first", config=config)) == 0
+    assert _run_flow(_next_fixed_request(fixture, tmp_path, run_id="replacement-first", config=config)) == 0
     assert calls[1] == {"auth": "synthetic-B", "detail": True, "summary": False}
 
 

@@ -185,11 +185,11 @@ def test_manual_preview_reads_combo_evidence_for_target_date_only(tmp_path, monk
     call = next(row for row in rows["trade_events"] if row["event_type"] == "open"
                 and row["option_type"] == "call")
     checked = []
-    def read_one(**kwargs):
-        checked.append(kwargs["market_trading_date"])
-        return {"available": True, "complete": True, "delivery_available": True,
-                "reason": "ok", "exposures": []}
-    monkeypatch.setattr(attribution, "read_combo_candidate_exposures", read_one)
+    def read_dates(**kwargs):
+        checked.extend(kwargs["market_trading_dates"])
+        return {day: {"available": True, "complete": True, "delivery_available": True,
+                      "reason": "ok", "exposures": []} for day in kwargs["market_trading_dates"]}
+    monkeypatch.setattr(attribution, "read_combo_candidate_exposures_batch", read_dates)
     evidence = read_attribution_combo_evidence(rows, account="lx", runtime_root=tmp_path,
         now_ms=_ms("2026-10-01T00:00:00Z"), focus_open_event_id=call["event_id"])
     assert evidence["complete"] is True and len(checked) == 1
