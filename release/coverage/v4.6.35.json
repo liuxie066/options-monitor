@@ -1,0 +1,200 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.35",
+  "base": {
+    "tag": "v4.6.34",
+    "commit": "5fdb5890df9e5b94273c7f03fca2e6b44835016f"
+  },
+  "reviewed_head": "07e5649ab6ad864fdcb4972591814e52247ae3e2",
+  "commits": [
+    {
+      "sha": "0af6a0fbd652c734a6ebc2ee60357534fa1aba81",
+      "subject": "refactor(group-query-bot): share delivery outcome classification (#1168)"
+    },
+    {
+      "sha": "197c86d2fd61753c4bcdef4becfeb2e333a70f98",
+      "subject": "refactor(agent-tools): reuse domain quote snapshot normalization (#1169)"
+    },
+    {
+      "sha": "78f1d53f38f2461716771a3b420fa49552d31ec0",
+      "subject": "refactor(ledger): share lifecycle evidence filter construction (#1170)"
+    },
+    {
+      "sha": "52bfc885bf22027a9b6b57c1963ab5d8a1905668",
+      "subject": "refactor(wechat-clawbot): share private state access helpers (#1171)"
+    },
+    {
+      "sha": "a29337f719b475c600b0d88ba860c327740a9c59",
+      "subject": "perf(ledger): meet manual intervention latency and decoding budgets (#1172)"
+    },
+    {
+      "sha": "0c318487f0b23053ed5dcdf314366feb1beef946",
+      "subject": "fix(trades): use canonical lifecycle identity in zero-price previews (#1173)"
+    },
+    {
+      "sha": "fc167639f28a2f1063bda21d520faa05001161e7",
+      "subject": "fix(quality): atomically publish immutable cutover receipts (#1174)"
+    },
+    {
+      "sha": "c966670dee5164b73119f444d412e211fb54b5cc",
+      "subject": "fix(guardrails): resolve export helpers in assignment order (#1175)"
+    },
+    {
+      "sha": "7eb67552a5c86f37a43e7cbfad477334c9d14d81",
+      "subject": "docs(release): correct v3.5.1 implementation attribution (#1176)"
+    },
+    {
+      "sha": "5485dcb904ba628ca027c0cd6f5aae452a5aa09a",
+      "subject": "fix(experience): preserve complete opening results with unheld call scopes (#1177)"
+    },
+    {
+      "sha": "967498d3bf5039af8ed62a1ce808f265989f7856",
+      "subject": "fix(ledger): require integrity before reporting absent lifecycle audit (#1178)"
+    },
+    {
+      "sha": "07e5649ab6ad864fdcb4972591814e52247ae3e2",
+      "subject": "fix(ledger): preserve confirmed combo attribution after leg closures (#1179)"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "减少账本手工干预预览与执行中的重复读取和解码，缩短操作等待时间。（#1172）",
+      "commits": [
+        "a29337f719b475c600b0d88ba860c327740a9c59"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "零价平仓预览复用规范的生命周期身份与结算证据，避免已有结算证据时仍误报等待结算。（#1173）",
+      "commits": [
+        "0c318487f0b23053ed5dcdf314366feb1beef946"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "体验模式的开仓结果包含未持有正股的 Covered Call 范围时，保留已完成扫描的完整结果，避免误报数据不完整。（#1177）",
+      "commits": [
+        "5485dcb904ba628ca027c0cd6f5aae452a5aa09a"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "离线核验在报告生命周期审计记录缺失前检查外键完整性，避免把孤儿审计记录误报为无历史。（#1178）",
+      "commits": [
+        "967498d3bf5039af8ed62a1ce808f265989f7856"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "已确认组合平掉一条腿后保留原组合归属，避免剩余腿误报策略归属冲突。（#1179）",
+      "commits": [
+        "07e5649ab6ad864fdcb4972591814e52247ae3e2"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "0af6a0fbd652c734a6ebc2ee60357534fa1aba81",
+      "reason": "群查询投递结果分类的内部复用，保持现有回复与投递行为。"
+    },
+    {
+      "commit": "197c86d2fd61753c4bcdef4becfeb2e333a70f98",
+      "reason": "行情快照归一化复用已有领域实现，不新增对外能力。"
+    },
+    {
+      "commit": "78f1d53f38f2461716771a3b420fa49552d31ec0",
+      "reason": "账本生命周期证据过滤条件的内部复用，保持查询语义。"
+    },
+    {
+      "commit": "52bfc885bf22027a9b6b57c1963ab5d8a1905668",
+      "reason": "微信通道私有状态访问的内部复用，不改变用户流程。"
+    },
+    {
+      "commit": "fc167639f28a2f1063bda21d520faa05001161e7",
+      "reason": "开发质量检查的切换回执改为原子发布，不属于产品运行能力。"
+    },
+    {
+      "commit": "c966670dee5164b73119f444d412e211fb54b5cc",
+      "reason": "开发交付门禁按赋值顺序解析导出辅助函数，不改变产品行为。"
+    },
+    {
+      "commit": "7eb67552a5c86f37a43e7cbfad477334c9d14d81",
+      "reason": "更正历史 3.5.1 发布记录的实现归属，不是本版新增产品变化。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "0af6a0fbd652c734a6ebc2ee60357534fa1aba81",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1168"
+      ]
+    },
+    {
+      "commit": "197c86d2fd61753c4bcdef4becfeb2e333a70f98",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1169"
+      ]
+    },
+    {
+      "commit": "78f1d53f38f2461716771a3b420fa49552d31ec0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1170"
+      ]
+    },
+    {
+      "commit": "52bfc885bf22027a9b6b57c1963ab5d8a1905668",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1171"
+      ]
+    },
+    {
+      "commit": "a29337f719b475c600b0d88ba860c327740a9c59",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1172"
+      ]
+    },
+    {
+      "commit": "0c318487f0b23053ed5dcdf314366feb1beef946",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1173"
+      ]
+    },
+    {
+      "commit": "fc167639f28a2f1063bda21d520faa05001161e7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1174"
+      ]
+    },
+    {
+      "commit": "c966670dee5164b73119f444d412e211fb54b5cc",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1175"
+      ]
+    },
+    {
+      "commit": "7eb67552a5c86f37a43e7cbfad477334c9d14d81",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1176"
+      ]
+    },
+    {
+      "commit": "5485dcb904ba628ca027c0cd6f5aae452a5aa09a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1177"
+      ]
+    },
+    {
+      "commit": "967498d3bf5039af8ed62a1ce808f265989f7856",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1178"
+      ]
+    },
+    {
+      "commit": "07e5649ab6ad864fdcb4972591814e52247ae3e2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1179"
+      ]
+    }
+  ]
+}
