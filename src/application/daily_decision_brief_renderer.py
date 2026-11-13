@@ -3462,6 +3462,9 @@ def _query_status_lines(brief: Mapping[str, Any], *, context: Mapping[str, Any])
     today = now_utc.astimezone(market_tz).date().isoformat()
     effective = _lower(brief.get("actionability"))
     if trading_date == today and effective == "live_actionable":
+        attempt = context.get("latest_attempt")
+        if isinstance(attempt, Mapping) and attempt.get("reason") in {"scan_failed", "state_invalid"}:
+            return ["状态：最近成功扫描"]
         return ["状态：今日最新"]
     lines = ["状态：已过期，仅供计划参考"]
     if trading_date != today:

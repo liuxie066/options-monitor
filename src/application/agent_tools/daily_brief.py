@@ -51,7 +51,7 @@ _OUTPUT_CONTRACT: dict[str, Any] = {
     "freshness": "source_declared",
     "pagination": {"mode": "none"},
     "schema_version": "daily_decision_brief_read.output.v1",
-    "source_label": "OM local daily_decision_brief.v1 successful current state",
+    "source_label": "OM local daily_decision_brief.v1 successful content and latest attempt",
     "result_shape": "single_brief_or_aggregate_sections",
     "fact_fields": [
         "available",
@@ -69,6 +69,7 @@ _OUTPUT_CONTRACT: dict[str, Any] = {
         "coverage",
         "source",
         "freshness",
+        "latest_attempt",
         "brief.actions[]",
         "brief.positions[]",
         "brief.funds",
@@ -84,7 +85,7 @@ _OUTPUT_CONTRACT: dict[str, Any] = {
         "freshness.effective_actionability",
     ],
     "missing_data_fields": ["brief.data_gaps[]", "reason", "sections[].reason"],
-    "model_preview_fields": ["query", "available", "effective_actionability", "sections", "rendered_markdown"],
+    "model_preview_fields": ["query", "available", "effective_actionability", "latest_attempt", "sections", "rendered_markdown"],
 }
 
 
@@ -172,6 +173,17 @@ def _read_single_daily_brief_view(
         "market_trading_date": market_trading_date,
         "revision": revision,
     }
+    attempt_fields = {"latest_attempt": result["latest_attempt"]} if mode == "latest" else {}
+    notice = ""
+    if mode == "latest":
+        attempt = result["latest_attempt"]
+        if attempt["reason"] == "scan_failed":
+            notice = f"提醒｜最近一次扫描失败（{attempt['market_trading_date']}）。"
+            if result.get("available"):
+                notice += "以下内容来自最近成功扫描。"
+            notice += "\n\n"
+        elif attempt["reason"] == "state_invalid":
+            notice = "提醒｜最近一次扫描状态无法核验。\n\n"
     if not bool(result.get("available")):
         reason = str(result.get("reason") or "unavailable")
         effective = "unavailable"
@@ -185,7 +197,8 @@ def _read_single_daily_brief_view(
             "coverage": _coverage(None, reason=reason),
             "source": _source(result),
             "freshness": _freshness(None, effective_actionability=effective),
-            "rendered_markdown": _render_unavailable(query=query, reason=reason, heading_level=heading_level),
+            **attempt_fields,
+            "rendered_markdown": notice + _render_unavailable(query=query, reason=reason, heading_level=heading_level),
         }
 
     brief = dict(result["brief"])
@@ -202,9 +215,10 @@ def _read_single_daily_brief_view(
         "coverage": _coverage(brief, reason="ok"),
         "source": _source(result),
         "freshness": _freshness(brief, effective_actionability=effective),
-        "rendered_markdown": render_query_brief(
+        **attempt_fields,
+        "rendered_markdown": notice + render_query_brief(
             rendered_brief,
-            context={"query_time_utc": now_utc.isoformat()},
+            context={"query_time_utc": now_utc.isoformat(), **attempt_fields},
             heading_level=heading_level,
         ),
     }
@@ -356,7 +370,7 @@ def _utc_datetime(value: datetime | None) -> datetime:
 
 
 _BRIEF_SECTIONS = ("rendered_markdown", "brief", "actions", "positions", "funds", "capacity", "candidates", "rejections", "events", "data_gaps")
-_PAGE_FIELDS = ["available", "reason", "query", "section", "text", "body_range", "body_complete", "next_cursor", "continuation_status", "pagination", "brief_identity", "effective_actionability"]
+_PAGE_FIELDS = ["available", "reason", "query", "section", "text", "body_range", "body_complete", "next_cursor", "continuation_status", "pagination", "brief_identity", "effective_actionability", "latest_attempt", "sections[]"]
 _PAGE_CONTRACT = {
     "schema_version": "daily_decision_brief_read.page_output.v1", "evidence_type": "aggregate",
     "bounded_projection": "contract_fields", "coverage": "source_declared", "freshness": "source_declared",
@@ -381,11 +395,22 @@ def _page_daily_brief(data: dict[str, Any], payload: dict[str, Any], *, binding:
     section = str(payload.get("section") or "rendered_markdown")
     sections = data.get("sections") or [data]
     briefs = [item["brief"] for item in sections if isinstance(item.get("brief"), dict)]
-    source_hash = digest([{"query": item.get("query"), "brief": item.get("brief"), "reason": item.get("reason")} for item in sections])
+    source_hash = digest([
+        {"query": item.get("query"), "brief": item.get("brief"), "reason": item.get("reason"),
+         "latest_attempt": item.get("latest_attempt")}
+        for item in sections
+    ])
     if state and state.get("source_hash") != source_hash:
         raise AgentToolError("READ_ERROR", "source_changed", hint="Discard the old cursor and read the new report revision.")
     identities = [{key: brief.get(key) for key in ("brief_id", "account", "market", "run_id", "revision", "market_trading_date", "data_as_of_utc")} for brief in briefs]
     result = {key: data[key] for key in ("available", "reason", "query", "effective_actionability")}
+    if "latest_attempt" in data:
+        result["latest_attempt"] = data["latest_attempt"]
+    if "sections" in data:
+        result["sections"] = [
+            {"query": item.get("query"), "latest_attempt": item.get("latest_attempt")}
+            for item in data["sections"]
+        ]
     result.update(section=section, brief_identity=identities,
                   source={"label": "OM retained daily brief", "content_hash": source_hash},
                   scope={"account": payload.get("account"), "market": payload.get("market"), "section": section,

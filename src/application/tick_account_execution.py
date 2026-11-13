@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -62,6 +62,7 @@ from src.application.ledger.api import (
     resolve_position_data_config_path,
 )
 from src.application.quality.gate import QualityGateBlocked, assert_quality_allows
+from src.infrastructure.futu_gateway import check_fetch_control
 from src.application.required_data_snapshot import (
     retire_required_data_snapshot_shadows,
     seal_required_data_snapshot,
@@ -191,6 +192,8 @@ class TickAccountExecutionRequest:
     symbols_arg: str | None = None
     trigger_kind: str = "manual"
     experience: bool = False
+    deadline: float | None = None
+    cancelled: Callable[[], bool] | None = None
 
 
 @dataclass(frozen=True)
@@ -218,6 +221,7 @@ class TickAccountExecutionOutcome:
     runtime_portfolio_snapshot_shadow_tasks: tuple[
         RuntimePortfolioSnapshotShadowTask, ...
     ] = ()
+    scan_outcomes: dict[str, bool | None] = field(default_factory=dict)
 
 
 def _build_close_advice_barrier_plan(
@@ -582,6 +586,8 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 timeout_sec=portfolio_timeout_sec,
                 fx_snapshot_sha256=fx_snapshot_sha256,
                 python_executable=request.vpy,
+                deadline=request.deadline,
+                cancelled=request.cancelled,
             )
         except Exception as exc:
             prepared = _publish_unavailable_prepared_contexts(
@@ -939,6 +945,8 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 force_refresh=bool(request.force_mode),
                 producer_run_id=request.run_id,
                 scan_at_utc=run_started_at_utc,
+                deadline=request.deadline,
+                cancelled=request.cancelled,
             )
             if close_advice_required_data_plan_path is not None:
                 calendar_error = enrich_close_advice_required_data_plan_bounded(
@@ -946,6 +954,8 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                     expected_run_id=request.run_id,
                     python=request.vpy,
                     repo_root=request.repo_root or request.base,
+                    deadline=request.deadline,
+                    cancelled=request.cancelled,
                 )
                 if calendar_error:
                     request.runlog.safe_event(
@@ -1046,6 +1056,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
     def _run_account(acct: str) -> AccountRunOutcome:
         acct = str(acct).strip().lower()
         try:
+            check_fetch_control(request.deadline, request.cancelled)
             config_error = account_config_errors.get(acct)
             if config_error is not None:
                 raise config_error
@@ -1099,6 +1110,8 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                         else None
                     ),
                     experience=request.experience,
+                    deadline=request.deadline,
+                    cancelled=request.cancelled,
                     account_display_name=account_display_names.get(
                         acct,
                         "模拟账户名称不可用",
@@ -1197,12 +1210,14 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 acct_metrics=metrics,
                 prefetch_done=prefetch_done,
                 ran_pipeline=False,
+                scan_succeeded=False,
             )
 
     ran_any_pipeline = False
     ran_pipeline_accounts: list[str] = []
     results: list[Any] = []
     account_metrics: list[dict[str, Any]] = []
+    scan_outcomes: dict[str, bool | None] = {}
     record_tick_latency(
         runlog=request.runlog,
         stage="pre_account_execution",
@@ -1235,6 +1250,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
     for outcome in outcomes:
         ran_any_pipeline = bool(ran_any_pipeline or outcome.ran_pipeline)
         account = str(outcome.result.account)
+        scan_outcomes[account] = outcome.scan_succeeded
         if outcome.ran_pipeline:
             ran_pipeline_accounts.append(account)
         account_metrics.append(outcome.acct_metrics)
@@ -1266,6 +1282,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
         ran_any_pipeline=ran_any_pipeline,
         ran_pipeline_accounts=ran_pipeline_accounts,
         scheduled_scan_targets_by_account=scheduled_scan_targets_by_account,
+        scan_outcomes=scan_outcomes,
         prefetch_invocation_count=prefetch_invocation_count,
         snapshot_status=snapshot_status,
         snapshot_manifest_sha256=snapshot_manifest_sha256,
@@ -1540,6 +1557,7 @@ def _account_config_failure_outcome(
         acct_metrics=metrics,
         prefetch_done=prefetch_done,
         ran_pipeline=False,
+        scan_succeeded=False,
     )
 
 
@@ -1744,6 +1762,7 @@ def _terminal_barrier_outcomes(
                 acct_metrics=metrics,
                 prefetch_done=(barrier_reason == "required_data_snapshot_failed"),
                 ran_pipeline=False,
+                scan_succeeded=False,
             )
         )
     return outcomes

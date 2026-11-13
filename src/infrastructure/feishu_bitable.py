@@ -25,6 +25,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
+from src.infrastructure.fetch_control import check_fetch_control, wait_fetch_control
+
 
 # -----------------
 # Error hierarchy
@@ -222,6 +224,8 @@ def http_json(
     retry_max_attempts: int = 3,
     log_fn: Callable[[dict], Any] | None = None,
     log_success_attempts: bool = False,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict:
     """Unified HTTP JSON helper.
 
@@ -231,6 +235,7 @@ def http_json(
       FeishuError subclasses for Feishu API failures (HTTP error / business code).
     """
 
+    check_fetch_control(deadline, cancelled)
     req_headers = {"Content-Type": "application/json"}
     if headers:
         req_headers.update(headers)
@@ -243,10 +248,14 @@ def http_json(
     url_path = _log_path(url)
 
     for attempt in range(1, retry_max_attempts + 1):
+        check_fetch_control(deadline, cancelled)
+        request_timeout = timeout if deadline is None else min(timeout, max(0.0, deadline - time.monotonic()))
         req = urllib.request.Request(url, data=data, method=method, headers=req_headers)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with urllib.request.urlopen(req, timeout=request_timeout) as resp:
+                check_fetch_control(deadline, cancelled)
                 body_text = _decode_body(resp.read())
+                check_fetch_control(deadline, cancelled)
                 parsed = _try_parse_json(body_text)
                 if not isinstance(parsed, dict):
                     raise FeishuPermanentError(
@@ -275,6 +284,7 @@ def http_json(
                             message_id=(str(message_id) if message_id else None),
                         )
                     )
+                check_fetch_control(deadline, cancelled)
                 return parsed
 
         except urllib.error.HTTPError as e:
@@ -298,6 +308,7 @@ def http_json(
         except FeishuError as e:
             last_err = e
 
+        check_fetch_control(deadline, cancelled)
         # retry gate
         should_retry = isinstance(last_err, (FeishuTransientError, FeishuRateLimitError))
         if not should_retry or attempt >= retry_max_attempts:
@@ -326,7 +337,10 @@ def http_json(
             sleep_s=sleep_s,
         )
         _emit_log(log_fn, record, default_label="WARN")
-        time.sleep(sleep_s)
+        if deadline is None and cancelled is None:
+            time.sleep(sleep_s)
+        else:
+            wait_fetch_control(sleep_s, deadline=deadline, cancelled=cancelled)
 
     raise last_err or FeishuPermanentError("unknown error")
 
@@ -339,6 +353,8 @@ def get_tenant_access_token(
     timeout: int = 20,
     retry_max_attempts: int = 3,
     lock_timeout: float | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> str:
     """Get Feishu tenant_access_token with module-level cache.
 
@@ -351,6 +367,9 @@ def get_tenant_access_token(
     Default callers preserve the existing blocking refresh-lock behavior.
     """
 
+    check_fetch_control(deadline, cancelled)
+    controls = ({"deadline": deadline, "cancelled": cancelled}
+                if deadline is not None or cancelled is not None else {})
     cache_key = (str(app_id), str(app_secret))
 
     if lock_timeout is not None and not force_refresh:
@@ -360,17 +379,30 @@ def get_tenant_access_token(
         if token and expire_at and expire_at - _now_utc() >= timedelta(minutes=5):
             return token
 
-    if lock_timeout is None:
+    if controls:
+        lock_deadline = None if lock_timeout is None else time.monotonic() + max(0.0, float(lock_timeout))
+        while True:
+            check_fetch_control(deadline, cancelled)
+            wait = 0.05
+            for cutoff in (deadline, lock_deadline):
+                if cutoff is not None:
+                    wait = min(wait, max(0.0, cutoff - time.monotonic()))
+            acquired = _token_lock.acquire(timeout=wait)
+            if acquired or (lock_deadline is not None and time.monotonic() >= lock_deadline):
+                break
+    elif lock_timeout is None:
         acquired = _token_lock.acquire()
     else:
         acquired = _token_lock.acquire(timeout=max(0.0, float(lock_timeout)))
     if not acquired:
+        check_fetch_control(deadline, cancelled)
         raise FeishuTransientError(
             "tenant token refresh lock is busy",
             response={"error_type": "token_lock_timeout"},
         )
 
     try:
+        check_fetch_control(deadline, cancelled)
         # Re-check under lock (another thread may have refreshed).
         cached = _token_cache.get(cache_key) or {}
         expire_at = cached.get("expire_at")
@@ -387,7 +419,9 @@ def get_tenant_access_token(
             {"app_id": app_id, "app_secret": app_secret},
             timeout=timeout,
             retry_max_attempts=retry_max_attempts,
+            **controls,
         )
+        check_fetch_control(deadline, cancelled)
 
         # res is expected: {code, msg, tenant_access_token, expire}
         if res.get("code") != 0:
@@ -415,8 +449,13 @@ def with_tenant_token_retry(
     token_timeout: int | None = None,
     token_retry_max_attempts: int | None = None,
     token_lock_timeout: float | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> Any:
+    check_fetch_control(deadline, cancelled)
     token_kwargs: dict[str, Any] = {}
+    if deadline is not None or cancelled is not None:
+        token_kwargs.update(deadline=deadline, cancelled=cancelled)
     if token_timeout is not None:
         token_kwargs["timeout"] = int(token_timeout)
     if token_retry_max_attempts is not None:
@@ -425,16 +464,21 @@ def with_tenant_token_retry(
         token_kwargs["lock_timeout"] = float(token_lock_timeout)
 
     token = get_tenant_access_token(app_id, app_secret, **token_kwargs)
+    check_fetch_control(deadline, cancelled)
     try:
-        return fn(token)
+        result = fn(token)
     except FeishuAuthError:
+        check_fetch_control(deadline, cancelled)
         refreshed = get_tenant_access_token(
             app_id,
             app_secret,
             force_refresh=True,
             **token_kwargs,
         )
-        return fn(refreshed)
+        check_fetch_control(deadline, cancelled)
+        result = fn(refreshed)
+    check_fetch_control(deadline, cancelled)
+    return result
 
 
 # -----------------

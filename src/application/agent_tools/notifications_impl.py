@@ -24,6 +24,11 @@ def preview_notification_tool(
         "coverage": dict(view.get("coverage") or {}),
         "source": dict(view.get("source") or {}),
         "freshness": dict(view.get("freshness") or {}),
+        **({"latest_attempt": view["latest_attempt"]} if "latest_attempt" in view else {}),
+        "sections": [
+            {"query": dict(section.get("query") or {}), "latest_attempt": section.get("latest_attempt")}
+            for section in view.get("sections") or []
+        ],
         "renderer": "daily_decision_brief.query",
         "authority": "daily_decision_brief",
         "delivery_evidence": False,

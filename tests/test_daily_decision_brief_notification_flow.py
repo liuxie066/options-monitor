@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 import json
 from pathlib import Path
 from decision_history_fixtures import replace_history_payload
 from types import SimpleNamespace
+from typing import Callable
 from zoneinfo import ZoneInfo
 
 import pytest
 
 import src.application.tick_notification_flow as mod
+import src.application.tick_brief_preparation as brief_preparation
+import src.application.multi_account_tick as tick_owner
 from src.application.daily_decision_brief_repository import (
     persist_daily_decision_brief_success,
     read_daily_decision_brief_delivery_state,
@@ -25,6 +28,43 @@ MARKET_DATE = "2026-07-21"
 FIXED_TARGET = "2026-07-21T10:00:00-04:00"
 HALF_TARGET = "2026-07-21T10:30:00-04:00"
 IDENTITY = "candidate:v1:lx:US:NVDA:sell_put"
+
+
+@dataclass(frozen=True)
+class _RunFlowRequest(mod.TickNotificationRequest):
+    """Test callbacks belong to the composing Tick owner, never the delivery request."""
+    complete_tick_idempotency_fn: Callable = lambda **_kwargs: None
+    commit_scan_targets_fn: Callable | None = None
+    post_delivery_sidecars_fn: Callable | None = None
+
+
+def _run_flow(request: _RunFlowRequest) -> int:
+    return tick_owner._run_notification_with_post_delivery_fallback(
+        notification_request=request,
+        complete_tick_idempotency_fn=request.complete_tick_idempotency_fn,
+        commit_scan_targets_fn=request.commit_scan_targets_fn,
+        post_delivery_sidecars_fn=request.post_delivery_sidecars_fn,
+    )
+
+
+@brief_preparation.daily_brief_delivery_validation_scope()
+def _prepare_flow(request: _RunFlowRequest):
+    if request.delivery_only:
+        source = brief_preparation.TickBriefPreparation(markets=tuple(request.markets_to_run or request.scheduler_markets))
+    else:
+        source = brief_preparation.prepare_tick_briefs(
+            base=request.base, run_id=request.run_id, config=request.base_cfg,
+            markets=request.markets_to_run or request.scheduler_markets, results=request.results,
+            ran_pipeline_accounts=request.ran_pipeline_accounts,
+            scheduled_scan_targets_by_account=request.scheduled_scan_targets_by_account,
+            scheduler_decisions_by_account=request.scheduler_decisions_by_account,
+            scheduler_decision=request.scheduler_decision, runlog=request.runlog,
+            recovery_intent_factory=lambda account, market, scheduler, brief:
+                mod._daily_brief_recovery_intent_for_preparation(request, account, market, scheduler, brief),
+            deadline=request.deadline, cancelled=request.cancelled,
+        )
+        tick_owner.merge_scan_outcomes(request.tick_metrics, source.scan_outcomes_by_account)
+    return mod._prepare_daily_brief_notification(request, brief_preparation=source)
 
 
 class _RunLog:
@@ -189,7 +229,7 @@ def _request(
         }
         for account in accounts
     }
-    request = mod.TickNotificationRequest(
+    request = _RunFlowRequest(
         base=tmp_path,
         cfg_path=tmp_path / f"config.{markets_to_run[0].lower()}.json",
         state_path=tmp_path / "scheduler_state.json",
@@ -220,7 +260,7 @@ def _request(
 
 def _patch_assembler(monkeypatch, *, blocked: bool = False, candidate: bool = True) -> None:
     monkeypatch.setattr(
-        mod,
+        brief_preparation,
         "assemble_daily_decision_briefs",
         lambda *, base, run_id, account, markets_to_run, **_kwargs: {
             market: _brief(base=base, run_id=run_id, account=account, market=market, blocked=blocked, candidate=candidate)
@@ -292,7 +332,7 @@ def fixed_report_flow(monkeypatch, tmp_path):
             for market in markets_to_run
         }
 
-    monkeypatch.setattr(mod, "assemble_daily_decision_briefs", assemble)
+    monkeypatch.setattr(brief_preparation, "assemble_daily_decision_briefs", assemble)
     calls = []
 
     def send(**kwargs):
@@ -330,14 +370,14 @@ def test_current_fixed_report_precedes_older_pending_candidate_without_rewriting
     flow = fixed_report_flow
     flow.clock["now"] = "2026-07-21T13:30:30+00:00"
     if prior_attempt == "unattempted":
-        prepared = mod._prepare_daily_brief_notification(
+        prepared = _prepare_flow(
             flow.request(run_id="pending-candidate", target="2026-07-21T09:30:00-04:00", fixed=False).request,
         )
         assert prepared.lifecycles_by_account["lx"]["envelope"]["delivery_kind"] == "candidate_alert"
         assert flow.calls == []
     else:
         flow.clock["outcome"] = "failed"
-        assert mod.run_tick_notification_flow(
+        assert _run_flow(
             flow.request(run_id="failed-candidate", target="2026-07-21T09:30:00-04:00", fixed=False).request,
         ) == 1
     before = read_daily_decision_brief_delivery_state(
@@ -352,7 +392,7 @@ def test_current_fixed_report_precedes_older_pending_candidate_without_rewriting
     flow.clock.update(now="2026-07-21T14:00:30+00:00", candidate=candidate, outcome="confirmed")
     sent_before = len(flow.calls)
     fixed = flow.request(run_id="fixed-after-pending-candidate")
-    assert mod.run_tick_notification_flow(fixed.request) == 0
+    assert _run_flow(fixed.request) == 0
     day = read_daily_decision_brief_delivery_state(
         base=flow.base, account="lx", market="US",
     )["state"]["days"][MARKET_DATE]
@@ -366,7 +406,7 @@ def test_current_fixed_report_precedes_older_pending_candidate_without_rewriting
     assert day["candidate_delivery"] == frozen
     assert day["candidate_delivery_history"] == []
     assert envelope["candidate_identities"] == ([IDENTITY] if candidate else [])
-    assert mod.run_tick_notification_flow(flow.request(run_id="fixed-after-pending-replay").request) == 0
+    assert _run_flow(flow.request(run_id="fixed-after-pending-replay").request) == 0
     assert len(flow.calls) == sent_before + 1
     replayed = read_daily_decision_brief_delivery_state(
         base=flow.base, account="lx", market="US",
@@ -384,7 +424,7 @@ def test_identical_business_data_sends_each_fixed_batch_and_retries_same_batch_i
     flow = fixed_report_flow
     flow.clock["candidate"] = candidate
     first = flow.request(run_id="fixed-first")
-    assert mod.run_tick_notification_flow(first.request) == 0
+    assert _run_flow(first.request) == 0
     first_brief = read_latest_daily_decision_brief(base=flow.base, account="lx", market="US")["brief"]
     initial = read_daily_decision_brief_delivery_state(
         base=flow.base, account="lx", market="US",
@@ -392,13 +432,13 @@ def test_identical_business_data_sends_each_fixed_batch_and_retries_same_batch_i
     frozen_first = deepcopy(initial["fixed_reports"][FIXED_TARGET])
     assert frozen_first["status"] == "confirmed"
     assert len(flow.calls) == 1
-    assert mod.run_tick_notification_flow(flow.request(run_id="fixed-first-replay").request) == 0
+    assert _run_flow(flow.request(run_id="fixed-first-replay").request) == 0
     assert len(flow.calls) == 1
 
     next_target = "2026-07-21T11:00:00-04:00"
     flow.clock["now"] = "2026-07-21T15:00:30+00:00"
     second = flow.request(run_id="fixed-second", target=next_target)
-    assert mod.run_tick_notification_flow(second.request) == 0
+    assert _run_flow(second.request) == 0
     day = read_daily_decision_brief_delivery_state(
         base=flow.base, account="lx", market="US",
     )["state"]["days"][MARKET_DATE]
@@ -420,7 +460,7 @@ def test_identical_business_data_sends_each_fixed_batch_and_retries_same_batch_i
         build_notification_transport_key(envelope["delivery_key"])
         for envelope in (frozen_first, second_envelope)
     ]
-    assert mod.run_tick_notification_flow(
+    assert _run_flow(
         flow.request(run_id="fixed-second-replay", target=next_target).request,
     ) == 0
     assert len(flow.calls) == 2
@@ -442,7 +482,7 @@ def test_ambiguous_candidate_keeps_exact_retry_priority_over_new_fixed_batch(fix
 
     flow = fixed_report_flow
     flow.clock.update(now="2026-07-21T13:30:30+00:00", outcome="ambiguous")
-    assert mod.run_tick_notification_flow(
+    assert _run_flow(
         flow.request(run_id="ambiguous-candidate", target="2026-07-21T09:30:00-04:00", fixed=False).request,
     ) == 1
     frozen = deepcopy(read_daily_decision_brief_delivery_state(
@@ -450,7 +490,7 @@ def test_ambiguous_candidate_keeps_exact_retry_priority_over_new_fixed_batch(fix
     )["state"]["days"][MARKET_DATE]["candidate_delivery"])
     assert frozen["status"] == "ambiguous"
     flow.clock.update(now="2026-07-21T14:00:30+00:00", outcome="confirmed")
-    assert mod.run_tick_notification_flow(flow.request(run_id="fixed-with-ambiguous-candidate").request) == 0
+    assert _run_flow(flow.request(run_id="fixed-with-ambiguous-candidate").request) == 0
     day = read_daily_decision_brief_delivery_state(
         base=flow.base, account="lx", market="US",
     )["state"]["days"][MARKET_DATE]
@@ -472,7 +512,7 @@ def test_same_fixed_batch_retry_keeps_frozen_report_after_business_data_changes(
 
     flow = fixed_report_flow
     flow.clock["outcome"] = outcome
-    assert mod.run_tick_notification_flow(flow.request(run_id="fixed-unconfirmed").request) == 1
+    assert _run_flow(flow.request(run_id="fixed-unconfirmed").request) == 1
     frozen = deepcopy(read_daily_decision_brief_delivery_state(
         base=flow.base, account="lx", market="US",
     )["state"]["days"][MARKET_DATE]["fixed_reports"][FIXED_TARGET])
@@ -481,7 +521,7 @@ def test_same_fixed_batch_retry_keeps_frozen_report_after_business_data_changes(
     select = mod._select_daily_brief_delivery
     monkeypatch.setattr(mod, "_select_daily_brief_delivery", lambda *_args, **_kwargs: pytest.fail("must reuse frozen report"))
     sent_before = len(flow.calls)
-    assert mod.run_tick_notification_flow(flow.request(run_id="fixed-exact-retry").request) == 0
+    assert _run_flow(flow.request(run_id="fixed-exact-retry").request) == 0
     confirmed = read_daily_decision_brief_delivery_state(
         base=flow.base, account="lx", market="US",
     )["state"]["days"][MARKET_DATE]["fixed_reports"][FIXED_TARGET]
@@ -495,13 +535,13 @@ def test_same_fixed_batch_retry_keeps_frozen_report_after_business_data_changes(
     assert flow.calls[-1]["content"] == frozen["rendered_transport"]["transport"]["content"]
     assert flow.calls[-1]["uuid"] == build_notification_transport_key(frozen["delivery_key"])
     monkeypatch.setattr(mod, "_select_daily_brief_delivery", select)
-    assert mod.run_tick_notification_flow(flow.request(run_id="fixed-confirmed-replay").request) == 0
+    assert _run_flow(flow.request(run_id="fixed-confirmed-replay").request) == 0
     assert len(flow.calls) == sent_before + 1
 
 
 def test_scheduled_daily_brief_needs_no_renderer_enable_switch(monkeypatch, tmp_path: Path) -> None:
     _patch_assembler(monkeypatch)
-    result = mod._prepare_daily_brief_notification(
+    result = _prepare_flow(
         _request(tmp_path, run_id="enabled", config=_config()).request
     )
     assert result.lifecycles_by_account["lx"]["envelope"]["delivery_kind"] == "fixed_report"
@@ -533,7 +573,7 @@ def test_non_scheduled_scan_updates_current_without_delivery_side_effects(
         scheduled_scan_targets_by_account={"lx": target},
     )
 
-    assert mod.run_tick_notification_flow(bundle.request) == 0
+    assert _run_flow(bundle.request) == 0
     assert read_latest_daily_decision_brief(base=tmp_path, account="lx", market="US")["available"] is True
     assert read_daily_decision_brief_delivery_state(base=tmp_path, account="lx", market="US")["available"] is False
     assert calls == []
@@ -542,7 +582,7 @@ def test_non_scheduled_scan_updates_current_without_delivery_side_effects(
 
 def test_scheduled_scan_missing_exact_account_target_fails_before_prepare_or_send(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
-        mod,
+        brief_preparation,
         "assemble_daily_decision_briefs",
         lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must fail before prepare")),
     )
@@ -552,7 +592,7 @@ def test_scheduled_scan_missing_exact_account_target_fails_before_prepare_or_sen
     bundle.request = replace(bundle.request, scheduled_scan_targets_by_account={})
 
     with pytest.raises(RuntimeError, match="scheduled scan target missing for accounts: lx"):
-        mod.run_tick_notification_flow(bundle.request)
+        _run_flow(bundle.request)
     assert calls == []
     assert bundle.commits == []
     assert bundle.request.audit_helper.failures == [("SCHEDULED_SCAN_TARGET_MISSING", "validate_scan_targets")]
@@ -565,7 +605,7 @@ def test_fixed_scan_persists_commits_then_sends_full_and_confirms(monkeypatch, t
     calls: list[dict] = []
     _patch_sender(monkeypatch, calls=calls)
     bundle = _request(tmp_path, run_id="fixed")
-    assert mod.run_tick_notification_flow(bundle.request) == 0
+    assert _run_flow(bundle.request) == 0
     state = read_daily_decision_brief_delivery_state(base=tmp_path, account="lx", market="US")["state"]
     envelope = state["days"][MARKET_DATE]["fixed_reports"][FIXED_TARGET]
     assert envelope["status"] == "confirmed"
@@ -592,7 +632,7 @@ def test_feishu_fixed_scan_persists_and_sends_exact_card_transport(monkeypatch, 
         config=_feishu_config(),
     )
 
-    assert mod.run_tick_notification_flow(bundle.request) == 0
+    assert _run_flow(bundle.request) == 0
     state = read_daily_decision_brief_delivery_state(
         base=tmp_path,
         account="lx",
@@ -640,7 +680,7 @@ def test_confirmed_delivery_records_degraded_evidence_when_tick_metrics_write_fa
     )
     bundle = _request(tmp_path, run_id="metrics-degraded")
 
-    assert mod.run_tick_notification_flow(bundle.request) == 0
+    assert _run_flow(bundle.request) == 0
     degraded = [
         event
         for event in bundle.request.runlog.events
@@ -675,7 +715,7 @@ def test_no_send_four_way_matrix_updates_snapshot_without_publishing_envelope(
 ) -> None:
     _patch_assembler(monkeypatch, candidate=candidate)
     bundle = _request(tmp_path, run_id=f"no-send-{fixed}-{candidate}", fixed=fixed, no_send=True)
-    assert mod.run_tick_notification_flow(bundle.request) == 0
+    assert _run_flow(bundle.request) == 0
     assert read_latest_daily_decision_brief(base=tmp_path, account="lx", market="US")["available"] is True
     retry = read_retryable_daily_decision_brief_delivery(base=tmp_path, account="lx", market="US", market_trading_date=MARKET_DATE)
     assert retry["envelope"] is None
@@ -693,7 +733,7 @@ def test_quiet_hours_keeps_durable_fixed_envelope(monkeypatch, tmp_path: Path, c
     config = _config()
     config["notifications"]["target"] = "wechat:private-recipient-test"
     bundle = _request(tmp_path, run_id="quiet", config=config)
-    assert mod.run_tick_notification_flow(bundle.request) == 0
+    assert _run_flow(bundle.request) == 0
     stdout = capsys.readouterr().out
     assert mod.notification_target_reference(config["notifications"]["target"]) in stdout
     assert config["notifications"]["target"] not in stdout
@@ -705,7 +745,7 @@ def test_quiet_hours_keeps_durable_fixed_envelope(monkeypatch, tmp_path: Path, c
 def test_nonfixed_new_candidate_prepares_candidate_alert(monkeypatch, tmp_path: Path) -> None:
     _patch_assembler(monkeypatch)
     bundle = _request(tmp_path, run_id="candidate", fixed=False)
-    prep = mod._prepare_daily_brief_notification(bundle.request)
+    prep = _prepare_flow(bundle.request)
     envelope = prep.lifecycles_by_account["lx"]["envelope"]
     assert envelope["delivery_kind"] == "candidate_alert"
     assert envelope["candidate_identities"] == [IDENTITY]
@@ -717,7 +757,7 @@ def test_nonfixed_new_candidate_prepares_candidate_alert(monkeypatch, tmp_path: 
 def test_pipeline_failure_fixed_sends_explicit_failure_without_advancing_current(monkeypatch, tmp_path: Path) -> None:
     _patch_assembler(monkeypatch, blocked=True)
     bundle = _request(tmp_path, run_id="failed", pipeline_ok=False)
-    prep = mod._prepare_daily_brief_notification(bundle.request)
+    prep = _prepare_flow(bundle.request)
     envelope = prep.lifecycles_by_account["lx"]["envelope"]
     assert envelope["delivery_kind"] == "fixed_failure"
     assert "数据异常 · 22:00 批次失败" in envelope["rendered_message"]
@@ -734,13 +774,13 @@ def test_pending_fixed_failure_without_provider_attempt_is_preserved(
         run_id="failed-before-provider",
         pipeline_ok=False,
     )
-    failed_prep = mod._prepare_daily_brief_notification(failed.request)
+    failed_prep = _prepare_flow(failed.request)
     failed_envelope = failed_prep.lifecycles_by_account["lx"]["envelope"]
     assert failed_envelope["delivery_kind"] == "fixed_failure"
 
     _patch_assembler(monkeypatch)
     recovered = _request(tmp_path, run_id="recovered-before-provider")
-    recovered_prep = mod._prepare_daily_brief_notification(
+    recovered_prep = _prepare_flow(
         recovered.request
     )
     recovered_envelope = recovered_prep.lifecycles_by_account["lx"][
@@ -777,7 +817,7 @@ def test_pending_fixed_failure_after_definite_failure_is_retried_unchanged(
         run_id="failed-provider-attempt",
         pipeline_ok=False,
     )
-    assert mod.run_tick_notification_flow(failed.request) == 1
+    assert _run_flow(failed.request) == 1
     assert any(item["action"] == "notification_meta_signal" and item["status"] == "error"
                for item in failed.request.audit_helper.events)
 
@@ -785,7 +825,7 @@ def test_pending_fixed_failure_after_definite_failure_is_retried_unchanged(
     recovered_calls: list[dict] = []
     _patch_sender(monkeypatch, calls=recovered_calls)
     recovered = _request(tmp_path, run_id="recovered-provider-attempt")
-    assert mod.run_tick_notification_flow(recovered.request) == 0
+    assert _run_flow(recovered.request) == 0
 
     state = read_daily_decision_brief_delivery_state(
         base=tmp_path,
@@ -813,7 +853,7 @@ def test_scheduled_delivery_without_target_records_local_meta_alert(monkeypatch,
         "schedule": {"timezone": "America/New_York"},
     })
     with pytest.raises(SystemExit, match="CONFIG_ERROR"):
-        mod.run_tick_notification_flow(bundle.request)
+        _run_flow(bundle.request)
     assert capsys.readouterr().err.count("<3>SYSTEM_META_ALERT") == 1
     assert any(item["action"] == "notification_meta_signal" and item["extra"]["reason"] == "route_missing"
                for item in bundle.request.audit_helper.events)
@@ -842,13 +882,13 @@ def test_ambiguous_fixed_failure_retries_same_frozen_delivery_idempotently(
         run_id="ambiguous-provider-attempt",
         pipeline_ok=False,
     )
-    assert mod.run_tick_notification_flow(failed.request) == 1
+    assert _run_flow(failed.request) == 1
 
     _patch_assembler(monkeypatch)
     recovered_calls: list[dict] = []
     _patch_sender(monkeypatch, calls=recovered_calls)
     recovered = _request(tmp_path, run_id="ambiguous-recovery")
-    assert mod.run_tick_notification_flow(recovered.request) == 0
+    assert _run_flow(recovered.request) == 0
 
     state = read_daily_decision_brief_delivery_state(
         base=tmp_path,
@@ -891,7 +931,7 @@ def test_lx_normal_and_sy_failure_are_prepared_and_sent_independently(
             out[market] = brief
         return out
 
-    monkeypatch.setattr(mod, "assemble_daily_decision_briefs", assemble)
+    monkeypatch.setattr(brief_preparation, "assemble_daily_decision_briefs", assemble)
     calls: list[dict] = []
     _patch_sender(monkeypatch, calls=calls)
     bundle = _request(
@@ -900,7 +940,7 @@ def test_lx_normal_and_sy_failure_are_prepared_and_sent_independently(
         accounts=("lx", "sy"),
     )
 
-    assert mod.run_tick_notification_flow(bundle.request) == 1
+    assert _run_flow(bundle.request) == 1
     assert bundle.completions[-1]["status"] == "failed"
     assert bundle.request.audit_helper.successes == 0
 
@@ -945,7 +985,7 @@ def test_lx_normal_and_sy_failure_are_prepared_and_sent_independently(
 def test_fixed_report_without_candidates_still_contains_positions_and_funds(monkeypatch, tmp_path: Path) -> None:
     _patch_assembler(monkeypatch, candidate=False)
     bundle = _request(tmp_path, run_id="fixed-empty")
-    prep = mod._prepare_daily_brief_notification(bundle.request)
+    prep = _prepare_flow(bundle.request)
     message = prep.lifecycles_by_account["lx"]["envelope"]["rendered_message"]
 
     assert "【CSP】\n暂无合适合约" in message
@@ -959,7 +999,7 @@ def test_fixed_report_without_candidates_still_contains_positions_and_funds(monk
 def test_pipeline_failure_nonfixed_is_quiet_and_keeps_scan_retryable(monkeypatch, tmp_path: Path) -> None:
     _patch_assembler(monkeypatch, blocked=True)
     bundle = _request(tmp_path, run_id="failed-half", fixed=False, pipeline_ok=False)
-    assert mod.run_tick_notification_flow(bundle.request) == 1
+    assert _run_flow(bundle.request) == 1
     assert bundle.completions[-1]["status"] == "failed"
     assert bundle.request.audit_helper.successes == 0
     assert bundle.commits == []
@@ -973,7 +1013,7 @@ def test_commit_failure_prevents_provider_call_and_leaves_brief_recoverable(monk
     bundle = _request(tmp_path, run_id="commit-fail")
     bundle.request = replace(bundle.request, commit_scan_targets_fn=lambda _targets: (_ for _ in ()).throw(OSError("state write failed")))
     with pytest.raises(OSError, match="state write failed"):
-        mod.run_tick_notification_flow(bundle.request)
+        _run_flow(bundle.request)
     assert calls == []
     pending = read_retryable_daily_decision_brief_delivery(
         base=tmp_path,
@@ -981,7 +1021,11 @@ def test_commit_failure_prevents_provider_call_and_leaves_brief_recoverable(monk
         market="US",
         market_trading_date=MARKET_DATE,
     )["envelope"]
-    assert pending is None
+    # Freeze the obligation before committing the scan target, so a commit
+    # failure leaves the exact pending message available for recovery.
+    assert pending is not None
+    assert pending["status"] == "pending"
+    assert pending["source_run_id"] == "commit-fail"
     assert read_latest_daily_decision_brief(
         base=tmp_path,
         account="lx",
@@ -991,7 +1035,7 @@ def test_commit_failure_prevents_provider_call_and_leaves_brief_recoverable(monk
     retry_calls: list[dict] = []
     _patch_sender(monkeypatch, calls=retry_calls)
     retry = _request(tmp_path, run_id="commit-recovery")
-    assert mod.run_tick_notification_flow(retry.request) == 0
+    assert _run_flow(retry.request) == 0
     assert retry.commits == [{"lx": FIXED_TARGET}]
     delivery = read_daily_decision_brief_delivery_state(
         base=tmp_path,
@@ -1028,7 +1072,7 @@ def test_post_delivery_sidecar_runs_after_provider_before_tick_completion(
         complete_tick_idempotency_fn=complete,
     )
 
-    assert mod.run_tick_notification_flow(bundle.request) == 0
+    assert _run_flow(bundle.request) == 0
     assert order == [
         "commit",
         "provider",
@@ -1041,8 +1085,8 @@ def test_post_delivery_sidecar_runs_after_provider_before_tick_completion(
         if event.get("step") == "tick_latency"
     ]
     assert latency_stages == [
-        "scheduler_target_commit",
         "daily_brief_prepare",
+        "scheduler_target_commit",
         "provider_delivery",
     ]
 
@@ -1071,7 +1115,7 @@ def test_post_delivery_sidecar_failure_is_degraded_before_tick_completion(
         complete_tick_idempotency_fn=complete,
     )
 
-    assert mod.run_tick_notification_flow(bundle.request) == 0
+    assert _run_flow(bundle.request) == 0
     assert order == ["sidecar", "complete"]
     degraded = [
         event
@@ -1089,13 +1133,13 @@ def test_provider_definite_failure_stays_pending_for_exact_delivery_only_retry(m
     calls: list[dict] = []
     _patch_sender(monkeypatch, calls=calls, result={"ok": False, "command_ok": False, "delivery_confirmed": False, "returncode": 1, "error_code": "SEND_FAILED"})
     first = _request(tmp_path, run_id="send-fail")
-    assert mod.run_tick_notification_flow(first.request) == 1
+    assert _run_flow(first.request) == 1
     retry_before = read_retryable_daily_decision_brief_delivery(base=tmp_path, account="lx", market="US", market_trading_date=MARKET_DATE)["envelope"]
 
     retry_calls: list[dict] = []
     _patch_sender(monkeypatch, calls=retry_calls)
     second = _request(tmp_path, run_id="delivery-only", delivery_only=True)
-    assert mod.run_tick_notification_flow(second.request) == 0
+    assert _run_flow(second.request) == 0
     phase_ends = [e for e in second.request.runlog.events
                   if e["step"] == "daily_brief_phase" and e["status"] == "ok"]
     assert {"account_prepare", "history_validate"} <= {e["data"]["phase"] for e in phase_ends}
@@ -1147,7 +1191,7 @@ def test_delivery_only_blocks_retired_ai_payload_without_mutating_retry_state(
         },
     )
     first = _request(tmp_path, run_id="retired-ai-seed")
-    assert mod.run_tick_notification_flow(first.request) == 1
+    assert _run_flow(first.request) == 1
     retry = read_retryable_daily_decision_brief_delivery(
         base=tmp_path,
         account="lx",
@@ -1186,7 +1230,7 @@ def test_delivery_only_blocks_retired_ai_payload_without_mutating_retry_state(
     _patch_sender(monkeypatch, calls=retry_calls)
     second = _request(tmp_path, run_id="retired-ai-delivery-only", delivery_only=True)
 
-    assert mod.run_tick_notification_flow(second.request) == 2
+    assert _run_flow(second.request) == 2
     assert retry_calls == []
     assert delivery_path.read_bytes() == state_before
     audit = second.request.tick_metrics["daily_brief"]["prepared"][0]
@@ -1208,7 +1252,7 @@ def test_delivery_only_blocks_retired_ai_payload_without_mutating_retry_state(
     post_scan_calls: list[dict] = []
     _patch_sender(monkeypatch, calls=post_scan_calls)
     post_scan = _request(tmp_path, run_id="retired-ai-post-scan")
-    assert mod.run_tick_notification_flow(post_scan.request) == 2
+    assert _run_flow(post_scan.request) == 2
     assert post_scan_calls == []
     assert delivery_path.read_bytes() == state_before
     current_path = (
@@ -1247,7 +1291,7 @@ def test_retired_ai_blocker_does_not_suppress_clean_account_delivery(
         run_id="retired-ai-mixed-seed",
         accounts=("lx", "sy"),
     )
-    assert mod.run_tick_notification_flow(seed.request) == 1
+    assert _run_flow(seed.request) == 1
 
     lx_retry = read_retryable_daily_decision_brief_delivery(
         base=tmp_path,
@@ -1284,7 +1328,7 @@ def test_retired_ai_blocker_does_not_suppress_clean_account_delivery(
         delivery_only=True,
     )
 
-    assert mod.run_tick_notification_flow(retry.request) == 1
+    assert _run_flow(retry.request) == 1
     assert len(calls) == 1
     assert "sy" in calls[0]["message"]
     assert "lx" not in calls[0]["message"]
@@ -1318,7 +1362,7 @@ def test_candidate_display_evidence_acknowledges_only_surviving_details_or_summa
             brief["candidates"]["sell_put"].append({
                 **deepcopy(row), "symbol": symbol, "contract_symbol": contract, "rank": rank})
         return {"US": brief}
-    monkeypatch.setattr(mod, "assemble_daily_decision_briefs", assemble)
+    monkeypatch.setattr(brief_preparation, "assemble_daily_decision_briefs", assemble)
     actual_selection = mod.select_daily_brief_notification
     def select(*args, **kwargs):
         result = actual_selection(*args, **kwargs)
@@ -1335,7 +1379,7 @@ def test_candidate_display_evidence_acknowledges_only_surviving_details_or_summa
     calls: list[dict] = []
     _patch_sender(monkeypatch, calls=calls)
     bundle = _request(tmp_path, run_id="five-candidates", fixed=False)
-    assert mod.run_tick_notification_flow(bundle.request) == 0
+    assert _run_flow(bundle.request) == 0
     day = read_daily_decision_brief_delivery_state(
         base=tmp_path, account="lx", market="US")["state"]["days"][MARKET_DATE]
     envelope = day["candidate_delivery"]
@@ -1370,7 +1414,7 @@ def test_feishu_delivery_only_retry_reuses_frozen_card_transport(monkeypatch, tm
         run_id="feishu-card-send-fail",
         config=_feishu_config(),
     )
-    assert mod.run_tick_notification_flow(first.request) == 1
+    assert _run_flow(first.request) == 1
     retry_before = read_retryable_daily_decision_brief_delivery(
         base=tmp_path,
         account="lx",
@@ -1391,7 +1435,7 @@ def test_feishu_delivery_only_retry_reuses_frozen_card_transport(monkeypatch, tm
         delivery_only=True,
         config=changed_config,
     )
-    assert mod.run_tick_notification_flow(second.request) == 0
+    assert _run_flow(second.request) == 0
 
     assert retry_calls[0]["message"] == retry_before["rendered_message"]
     assert retry_calls[0]["transport_envelope"] == retry_before["rendered_transport"]
@@ -1405,13 +1449,13 @@ def test_feishu_delivery_only_retry_reuses_frozen_card_transport(monkeypatch, tm
 def test_delivery_only_no_send_keeps_pending_envelope_without_claiming_send(monkeypatch, tmp_path: Path) -> None:
     _patch_assembler(monkeypatch)
     seed = _request(tmp_path, run_id="seed-pending")
-    mod._prepare_daily_brief_notification(seed.request)
+    _prepare_flow(seed.request)
 
     calls: list[dict] = []
     _patch_sender(monkeypatch, calls=calls)
     retry = _request(tmp_path, run_id="delivery-only-no-send", delivery_only=True, no_send=True)
 
-    assert mod.run_tick_notification_flow(retry.request) == 0
+    assert _run_flow(retry.request) == 0
     assert calls == []
     assert retry.completions == [{"status": "skipped", "message": "delivery_only_no_send"}]
     pending = read_retryable_daily_decision_brief_delivery(
@@ -1425,9 +1469,9 @@ def test_delivery_only_no_send_keeps_pending_envelope_without_claiming_send(monk
 
 
 def test_delivery_only_without_envelope_is_read_only_and_skips_assembler(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(mod, "assemble_daily_decision_briefs", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not assemble")))
+    monkeypatch.setattr(brief_preparation, "assemble_daily_decision_briefs", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not assemble")))
     bundle = _request(tmp_path, run_id="delivery-only-empty", delivery_only=True)
-    assert mod.run_tick_notification_flow(bundle.request) == 0
+    assert _run_flow(bundle.request) == 0
     assert bundle.completions == [{"status": "skipped", "message": "no_retryable_delivery"}]
     assert not (tmp_path / "output_runs").exists()
 
@@ -1446,8 +1490,10 @@ def test_delivery_only_rebuilds_missing_envelope_from_committed_brief(
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("render failed")),
     )
     with pytest.raises(RuntimeError, match="render failed"):
-        mod.run_tick_notification_flow(first.request)
-    assert first.commits == [{"lx": FIXED_TARGET}]
+        _run_flow(first.request)
+    # Rendering did not freeze its obligation, so the scheduler target cannot
+    # advance even though the source history append is already durable.
+    assert first.commits == []
     assert read_retryable_daily_decision_brief_delivery(
         base=tmp_path,
         account="lx",
@@ -1485,7 +1531,7 @@ def test_delivery_only_rebuilds_missing_envelope_from_committed_brief(
     _patch_sender(monkeypatch, calls=calls)
     retry = _request(tmp_path, run_id="delivery-recovery", delivery_only=True)
 
-    assert mod.run_tick_notification_flow(retry.request) == 0
+    assert _run_flow(retry.request) == 0
     phase_ends = [e for e in retry.request.runlog.events
                   if e["step"] == "daily_brief_phase" and e["status"] == "ok"]
     assert {"account_prepare", "history_validate", "render", "persist", "lock_wait"} <= {
@@ -1517,13 +1563,13 @@ def test_delivery_only_rebuilds_missing_envelope_from_committed_brief(
 
 def test_multi_market_scan_fails_before_snapshot_or_outbound(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
-        mod,
+        brief_preparation,
         "assemble_daily_decision_briefs",
         lambda **_kwargs: (_ for _ in ()).throw(AssertionError("multi-market must fail before assemble")),
     )
     bundle = _request(tmp_path, run_id="multi")
     bundle.request = replace(bundle.request, markets_to_run=("US", "HK"), scheduler_markets=("US", "HK"))
-    prep = mod._prepare_daily_brief_notification(bundle.request)
+    prep = _prepare_flow(bundle.request)
     assert prep.multi_market_delivery_unsupported is True
     assert prep.prepared_messages.messages_by_account == {}
     assert read_latest_daily_decision_brief(base=tmp_path, account="lx", market="US")["available"] is False
@@ -1532,7 +1578,7 @@ def test_multi_market_scan_fails_before_snapshot_or_outbound(monkeypatch, tmp_pa
 
 def test_scheduled_renderer_uses_beijing_batch_time_without_leaking_revision(monkeypatch, tmp_path: Path) -> None:
     _patch_assembler(monkeypatch)
-    prep = mod._prepare_daily_brief_notification(_request(tmp_path, run_id="render").request)
+    prep = _prepare_flow(_request(tmp_path, run_id="render").request)
     message = prep.prepared_messages.messages_by_account["lx"]
     assert "22:00 批次" in message
     assert "状态｜22:00 批次" in message
@@ -1542,9 +1588,9 @@ def test_scheduled_renderer_uses_beijing_batch_time_without_leaking_revision(mon
 
 def test_later_nonfixed_scan_preserves_existing_pending_candidate_envelope(monkeypatch, tmp_path: Path) -> None:
     _patch_assembler(monkeypatch)
-    first = mod._prepare_daily_brief_notification(_request(tmp_path, run_id="candidate-1", fixed=False).request)
+    first = _prepare_flow(_request(tmp_path, run_id="candidate-1", fixed=False).request)
     first_envelope = first.lifecycles_by_account["lx"]["envelope"]
-    second = mod._prepare_daily_brief_notification(_request(tmp_path, run_id="candidate-2", fixed=False).request)
+    second = _prepare_flow(_request(tmp_path, run_id="candidate-2", fixed=False).request)
     second_envelope = second.lifecycles_by_account["lx"]["envelope"]
     assert second_envelope["delivery_key"] == first_envelope["delivery_key"]
     assert second_envelope["message_sha256"] == first_envelope["message_sha256"]
@@ -1560,7 +1606,7 @@ def test_planning_scan_preserves_frozen_live_candidate_with_existing_retry_rules
 
     monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_test")
     _patch_assembler(monkeypatch)
-    first = mod._prepare_daily_brief_notification(
+    first = _prepare_flow(
         _request(tmp_path, run_id="live-candidate", fixed=False, config=_feishu_config()).request,
     )
     original = first.lifecycles_by_account["lx"]["envelope"]
@@ -1581,14 +1627,17 @@ def test_planning_scan_preserves_frozen_live_candidate_with_existing_retry_rules
         brief.update(actionability="planning_only", candidate_index=[])
         return {market: {**brief, "market": market} for market in markets_to_run}
 
-    monkeypatch.setattr(mod, "assemble_daily_decision_briefs", planning)
+    monkeypatch.setattr(brief_preparation, "assemble_daily_decision_briefs", planning)
     second = _request(tmp_path, run_id="new-planning", fixed=False, config=_feishu_config())
-    prepared = mod._prepare_daily_brief_notification(second.request)
+    prepared = _prepare_flow(second.request)
     day = read_daily_decision_brief_delivery_state(
         base=tmp_path, account="lx", market="US",
     )["state"]["days"][MARKET_DATE]
     assert day["pending_candidates"] == {}
     assert day["candidate_delivery"] == frozen
+    assert second.commits == []
+    # Only the composing Tick owner may advance the prepared scan target.
+    assert _run_flow(replace(second.request, no_send=True)) == 0
     assert second.commits == [{"lx": HALF_TARGET}]
     retry = read_retryable_daily_decision_brief_delivery(
         base=tmp_path, account="lx", market="US", market_trading_date=MARKET_DATE,
@@ -1601,7 +1650,7 @@ def test_planning_scan_preserves_frozen_live_candidate_with_existing_retry_rules
         calls = []
         _patch_sender(monkeypatch, calls=calls)
         idle = _request(tmp_path, run_id="exact-retry", delivery_only=True, config=_feishu_config())
-        assert mod.run_tick_notification_flow(idle.request) == 0
+        assert _run_flow(idle.request) == 0
         assert len(calls) == 1
         assert calls[0]["idempotency_key"] == build_notification_transport_key(frozen["delivery_key"])
         assert calls[0]["message"] == frozen["rendered_message"]
@@ -1627,11 +1676,11 @@ def test_planning_fixed_report_and_manual_snapshot_keep_existing_delivery_scope(
         brief.update(actionability="planning_only", candidate_index=[])
         return {market: {**brief, "market": market} for market in markets_to_run}
 
-    monkeypatch.setattr(mod, "assemble_daily_decision_briefs", planning)
+    monkeypatch.setattr(brief_preparation, "assemble_daily_decision_briefs", planning)
     calls = []
     _patch_sender(monkeypatch, calls=calls)
     bundle = _request(tmp_path, run_id="planning-fixed", trigger_kind=trigger_kind)
-    assert mod.run_tick_notification_flow(bundle.request) == 0
+    assert _run_flow(bundle.request) == 0
     brief = read_latest_daily_decision_brief(base=tmp_path, account="lx", market="US")["brief"]
     assert brief["actions"] and brief["candidate_index"] == []
     assert brief["actionability"] == "planning_only"
@@ -1677,14 +1726,14 @@ def test_later_half_hour_sends_new_candidate_after_prior_candidate_confirmation(
             brief["candidates"]["sell_put"].append(candidate)
         return {market: {**brief, "market": market} for market in markets_to_run}
 
-    monkeypatch.setattr(mod, "assemble_daily_decision_briefs", assemble)
+    monkeypatch.setattr(brief_preparation, "assemble_daily_decision_briefs", assemble)
     calls: list[dict] = []
     _patch_sender(monkeypatch, calls=calls)
 
     first = _request(tmp_path, run_id="candidate-1", fixed=False)
     second = _request(tmp_path, run_id="candidate-2", fixed=False)
-    assert mod.run_tick_notification_flow(first.request) == 0
-    assert mod.run_tick_notification_flow(second.request) == 0
+    assert _run_flow(first.request) == 0
+    assert _run_flow(second.request) == 0
 
     assert len(calls) == 2
     assert "NVDA" in calls[0]["message"]
@@ -1710,9 +1759,9 @@ def test_multi_market_flow_records_terminal_failure_and_nonzero_exit(monkeypatch
         markets_to_run=("US", "HK"),
         scheduler_markets=("US", "HK"),
     )
-    monkeypatch.setattr(mod, "finalize_no_account_notification", lambda **kwargs: int(kwargs.get("return_code") or 0))
+    monkeypatch.setattr(tick_owner, "finalize_no_account_notification", lambda **kwargs: int(kwargs.get("return_code") or 0))
 
-    assert mod.run_tick_notification_flow(bundle.request) == 2
+    assert _run_flow(bundle.request) == 2
     assert bundle.completions == [{
         "status": "unsupported_failed",
         "message": "daily_brief_multi_market_delivery_unsupported",
@@ -1731,7 +1780,7 @@ def test_report_reference_requires_confirmed_delivery(monkeypatch, tmp_path: Pat
             raise OSError('controlled confirmation failure')
         monkeypatch.setattr(mod, 'confirm_daily_decision_brief_delivery_v2', fail_confirmation)
     bundle = _request(tmp_path, run_id='unconfirmed-report', no_send=failure == 'no_send')
-    mod.run_tick_notification_flow(bundle.request)
+    _run_flow(bundle.request)
     events = [item['extra'] for item in bundle.request.audit_helper.events
               if item['action'] == 'notification_delivery_completed']
     assert events or failure == 'no_send'
@@ -1746,7 +1795,7 @@ def test_idle_delivery_only_validates_history_once(monkeypatch, tmp_path):
     calls = []
     _patch_sender(monkeypatch, calls=calls)
     seed = _request(tmp_path, run_id='completed-before-idle')
-    assert mod.run_tick_notification_flow(seed.request) == 0
+    assert _run_flow(seed.request) == 0
     original = repository._normalize_delivery_state
     validations = []
     def counted(*args, **kwargs):
@@ -1754,7 +1803,7 @@ def test_idle_delivery_only_validates_history_once(monkeypatch, tmp_path):
         return original(*args, **kwargs)
     monkeypatch.setattr(repository, '_normalize_delivery_state', counted)
     idle = _request(tmp_path, run_id='idle-history', delivery_only=True)
-    assert mod.run_tick_notification_flow(idle.request) == 0
+    assert _run_flow(idle.request) == 0
     assert validations == ['lx']
     assert len(calls) == 1
     assert idle.completions == [{'status': 'skipped', 'message': 'no_retryable_delivery'}]
@@ -1766,7 +1815,7 @@ def test_ordinary_empty_scan_has_durable_terminal_and_no_send(monkeypatch, tmp_p
     calls = []
     _patch_sender(monkeypatch, calls=calls)
     bundle = _request(tmp_path, run_id='empty-scan-terminal', fixed=False)
-    assert mod.run_tick_notification_flow(bundle.request) == 0
+    assert _run_flow(bundle.request) == 0
     assert calls == []
     assert bundle.request.tick_metrics['sent'] is False
     assert bundle.request.tick_metrics['reason'] == 'no_daily_brief_delivery'
@@ -1793,7 +1842,7 @@ def test_ordinary_empty_scan_exposes_degraded_final_write(monkeypatch, tmp_path)
     monkeypatch.setattr(mod.state_repo, 'write_tick_metrics',
                         lambda *a, **kw: (_ for _ in ()).throw(OSError('fixture write failure')))
     bundle = _request(tmp_path, run_id='empty-scan-degraded', fixed=False)
-    assert mod.run_tick_notification_flow(bundle.request) == 0
+    assert _run_flow(bundle.request) == 0
     assert calls == []
     assert len([e for e in bundle.request.runlog.events if e['step'] == 'run_end']) == 1
     assert any(e['step'] == 'finalize' and e['status'] == 'degraded'
@@ -1802,17 +1851,20 @@ def test_ordinary_empty_scan_exposes_degraded_final_write(monkeypatch, tmp_path)
 
 @pytest.mark.parametrize('error', [ValueError, KeyboardInterrupt])
 def test_prepare_failure_records_start_error_and_reraises(monkeypatch, tmp_path, error):
-    monkeypatch.setattr(mod, '_prepare_daily_brief_notification',
-                        lambda *_: (_ for _ in ()).throw(error('fixture failure')))
+    _patch_assembler(monkeypatch)
+    monkeypatch.setattr(tick_owner, '_prepare_daily_brief_notification',
+                        lambda *_, **_kwargs: (_ for _ in ()).throw(error('fixture failure')))
     bundle = _request(tmp_path, run_id='prepare-failed')
     with pytest.raises(error):
-        mod.run_tick_notification_flow(bundle.request)
+        _run_flow(bundle.request)
     stages = [e for e in bundle.request.runlog.events if e['step'] == 'daily_brief_prepare']
     assert [e['status'] for e in stages] == ['start', 'error']
     assert stages[-1]['data'] == {'error_type': error.__name__}
     latency = next(e for e in bundle.request.runlog.events if e['step'] == 'tick_latency')
     assert latency['data']['outcome'] == 'error'
-    assert bundle.completions == [] and bundle.request.audit_helper.successes == 0
+    assert bundle.completions == [{"status": "failed", "message": "fixture failure", "ok": False,
+                                   "error_code": "DAILY_BRIEF_PREPARE_FAILED"}]
+    assert bundle.request.audit_helper.successes == 0
 
 
 def test_normal_prepare_shares_only_prewrite_reads_and_refreshes_after_writes(monkeypatch, tmp_path):
@@ -1821,12 +1873,12 @@ def test_normal_prepare_shares_only_prewrite_reads_and_refreshes_after_writes(mo
 
     _patch_assembler(monkeypatch)
     _patch_sender(monkeypatch)
-    assert mod.run_tick_notification_flow(_request(tmp_path, run_id="scope-seed").request) == 0
+    assert _run_flow(_request(tmp_path, run_id="scope-seed").request) == 0
     observations = []
     normalizations = []
     writes = []
     original_normalize = repository._normalize_delivery_state
-    original_persist = mod.persist_daily_decision_brief_success
+    original_persist = brief_preparation.persist_daily_decision_brief_success
 
     def normalized(*args, **kwargs):
         normalizations.append(bool(writes))
@@ -1849,21 +1901,25 @@ def test_normal_prepare_shares_only_prewrite_reads_and_refreshes_after_writes(mo
     observe("read_daily_decision_brief_fixed_recovery")
     observe("read_confirmed_attribution_render_context")
     monkeypatch.setattr(repository, "_normalize_delivery_state", normalized)
-    monkeypatch.setattr(mod, "persist_daily_decision_brief_success", persist)
+    monkeypatch.setattr(brief_preparation, "persist_daily_decision_brief_success", persist)
     next_request = _request(tmp_path, run_id="scope-next").request
     scheduler = deepcopy(next_request.scheduler_decisions_by_account)
     scheduler["lx"]["scheduled_target_market"] = "2026-07-21T11:00:00-04:00"
     scheduler["lx"]["scheduled_scan_target_market"] = "2026-07-21T11:00:00-04:00"
-    mod._prepare_daily_brief_notification(replace(next_request, scheduler_decisions_by_account=scheduler))
-    prewrite = [item for item in observations if not item[2]]
-    assert [item[0] for item in prewrite] == [
+    _prepare_flow(replace(next_request, scheduler_decisions_by_account=scheduler))
+    # Source persistence now precedes all notification selection reads. The
+    # selection's shared observation starts after that write; later binding
+    # writes still require independent reads instead of reusing it.
+    assert not [item for item in observations if not item[2]], observations
+    postwrite = [item for item in observations if item[2]]
+    scoped = [item for item in postwrite if item[1] is not None]
+    assert [item[0] for item in scoped] == [
         "read_retryable_daily_decision_brief_delivery", "read_daily_decision_brief_fixed_recovery",
     ]
-    assert prewrite[0][1] is not None and prewrite[0][1] is prewrite[1][1]
-    postwrite = [item for item in observations if item[2]]
-    assert postwrite and all(scope is None for _, scope, _ in postwrite)
+    assert scoped[0][1] is scoped[1][1]
+    assert any(scope is None for _, scope, _ in postwrite)
     assert "read_confirmed_attribution_render_context" in [name for name, _, _ in postwrite]
-    assert normalizations.count(False) == 1
+    assert normalizations.count(False) == 0
     assert normalizations.count(True) >= 2
 
 
@@ -1876,7 +1932,7 @@ def test_phase_timing_binds_two_accounts_without_changing_prepared_state(monkeyp
     monkeypatch.setattr(mod, "utc_now", lambda: datetime(2026, 7, 21, 14, 0, 30, tzinfo=timezone.utc))
     _patch_assembler(monkeypatch)
     measured = _request(tmp_path / "timed", run_id="same-run", accounts=("lx", "sy"))
-    actual = mod._prepare_daily_brief_notification(measured.request)
+    actual = _prepare_flow(measured.request)
     phases = [e for e in measured.request.runlog.events if e["step"] == "daily_brief_phase"]
     for account in ("lx", "sy"):
         account_events = [e for e in phases if e["data"]["account"] == account]
@@ -1889,8 +1945,9 @@ def test_phase_timing_binds_two_accounts_without_changing_prepared_state(monkeyp
             e["data"]["phase"] for e in account_events if e["status"] == "ok"
         }
     monkeypatch.setattr(mod, "daily_brief_timing_scope", lambda **_: nullcontext())
+    monkeypatch.setattr(brief_preparation, "daily_brief_timing_scope", lambda **_: nullcontext())
     unmeasured = _request(tmp_path / "unscoped", run_id="same-run", accounts=("lx", "sy"))
-    expected = mod._prepare_daily_brief_notification(unmeasured.request)
+    expected = _prepare_flow(unmeasured.request)
     assert actual == expected
     assert measured.commits == unmeasured.commits
     assert measured.request.tick_metrics == unmeasured.request.tick_metrics
@@ -1903,10 +1960,10 @@ def test_phase_timing_binds_two_accounts_without_changing_prepared_state(monkeyp
 @pytest.mark.parametrize("error_type", [RuntimeError, KeyboardInterrupt])
 def test_account_phase_failure_does_not_claim_later_account_success(monkeypatch, tmp_path, error_type):
     error = error_type("assembly failed")
-    monkeypatch.setattr(mod, "assemble_daily_decision_briefs", lambda **_: (_ for _ in ()).throw(error))
+    monkeypatch.setattr(brief_preparation, "assemble_daily_decision_briefs", lambda **_: (_ for _ in ()).throw(error))
     bundle = _request(tmp_path, run_id="account-failed", accounts=("lx", "sy"))
     with pytest.raises(error_type) as caught:
-        mod._prepare_daily_brief_notification(bundle.request)
+        _prepare_flow(bundle.request)
     assert caught.value is error
     phases = [e for e in bundle.request.runlog.events if e["step"] == "daily_brief_phase"]
     assert phases[-1]["data"]["phase"] == "account_prepare"
@@ -1929,7 +1986,7 @@ def test_phase_logging_failure_does_not_prevent_send_or_confirmation(monkeypatch
         return original(step, status, **kwargs)
 
     bundle.request.runlog.safe_event = logger
-    assert mod.run_tick_notification_flow(bundle.request) == 0
+    assert _run_flow(bundle.request) == 0
     assert len(calls) == 1
     state = read_daily_decision_brief_delivery_state(base=tmp_path, account="lx", market="US")["state"]
     assert state["days"][MARKET_DATE]["fixed_reports"][FIXED_TARGET]["status"] == "confirmed"
@@ -1941,7 +1998,7 @@ def test_actual_run_is_retained_before_no_send(tmp_path, monkeypatch, blocked, c
     from src.infrastructure.decision_history_sqlite import DecisionHistoryStore, history_path
     _patch_assembler(monkeypatch, blocked=blocked, candidate=candidate)
     context = _request(tmp_path, run_id="history-run", no_send=True, pipeline_ok=not blocked)
-    mod.run_tick_notification_flow(context.request)
+    _run_flow(context.request)
     row = DecisionHistoryStore(history_path(tmp_path)).get(account="lx", market="US", run_id=context.request.run_id)
     assert row is not None
     assert bool(row["successful"]) is (not blocked)
@@ -1951,7 +2008,7 @@ def test_actual_run_is_retained_before_no_send(tmp_path, monkeypatch, blocked, c
 def test_delivery_retry_does_not_create_a_decision(tmp_path, monkeypatch):
     from src.infrastructure.decision_history_sqlite import history_path
     context = _request(tmp_path, run_id="history-retry", delivery_only=True, no_send=True)
-    mod.run_tick_notification_flow(context.request)
+    _run_flow(context.request)
     assert not history_path(tmp_path).exists()
 
 
@@ -1964,7 +2021,7 @@ def test_history_save_error_is_not_a_successful_run(tmp_path, monkeypatch):
     monkeypatch.setattr(DecisionHistoryStore, "append", fail)
     context = _request(tmp_path, run_id="failed-save", no_send=True)
     with pytest.raises(DailyDecisionBriefStateError, match="disk_failed"):
-        mod.run_tick_notification_flow(context.request)
+        _run_flow(context.request)
     assert context.commits == []
 
 
@@ -1986,7 +2043,7 @@ def test_confirmed_delivery_preserved_when_metrics_finalization_fails(
     )
     bundle = _request(tmp_path, run_id="history-degraded")
 
-    assert mod.run_tick_notification_flow(bundle.request) == 0
+    assert _run_flow(bundle.request) == 0
     assert len(calls) == 1
     degraded = [
         event
@@ -2017,7 +2074,7 @@ def test_failed_scan_remains_failed_across_all_notification_paths(monkeypatch, t
         monkeypatch.setattr(mod, "evaluate_dnd_quiet_hours", lambda **kwargs: {"is_quiet": True, "quiet_window": "all", "parse_error": None})
     bundle = _request(tmp_path, run_id="failure-run", pipeline_ok=False, config=config,
                       no_send=path == "no_send", trigger_kind="manual" if path == "manual" else "scheduled")
-    assert mod.run_tick_notification_flow(bundle.request) == 1
+    assert _run_flow(bundle.request) == 1
     assert bundle.completions[-1] == {"status": "failed", "message": "SCAN_FAILED", "ok": False, "error_code": "SCAN_FAILED"}
     assert bundle.request.audit_helper.successes == 0
     assert bundle.request.tick_metrics["scan_outcomes"] == {"lx": False}
@@ -2030,10 +2087,10 @@ def test_failed_scan_remains_failed_across_all_notification_paths(monkeypatch, t
 def test_retry_delivery_failure_records_terminal_idempotency_without_scan_outcome(monkeypatch, tmp_path):
     _patch_assembler(monkeypatch)
     first = _request(tmp_path, run_id="pending")
-    mod._prepare_daily_brief_notification(first.request)
+    _prepare_flow(first.request)
     _patch_sender(monkeypatch, result={"ok": False, "delivery_confirmed": False, "error_code": "test_send_failed"})
     retry = _request(tmp_path, run_id="retry", delivery_only=True)
-    assert mod.run_tick_notification_flow(retry.request) == 1
+    assert _run_flow(retry.request) == 1
     assert retry.completions[-1]["status"] == "failed"
     assert retry.completions[-1]["error_code"] == "NOTIFY_FAILED"
     assert retry.request.tick_metrics["scan_outcomes"] == {}
@@ -2050,7 +2107,7 @@ def test_terminal_write_failure_does_not_mark_scan_recovered(monkeypatch, tmp_pa
         complete_tick_idempotency_fn=lambda **_kwargs: (_ for _ in ()).throw(OSError("terminal disk full")),
     )
     with pytest.raises(OSError, match="terminal disk full"):
-        mod.run_tick_notification_flow(bundle.request)
+        _run_flow(bundle.request)
     assert bundle.request.audit_helper.successes == 0
     assert len(calls) == (0 if no_send else 1)
 
@@ -2078,7 +2135,7 @@ def test_late_candidate_flow_ignores_old_snapshot_and_preserves_exact_retry(
     _patch_assembler(monkeypatch)
     frozen = None
     if frozen_kind != "none":
-        prepared = mod._prepare_daily_brief_notification(
+        prepared = _prepare_flow(
             _request(tmp_path, run_id="frozen-source", fixed=frozen_kind.startswith("fixed_")).request,
         )
         frozen = prepared.lifecycles_by_account["lx"]["envelope"]
@@ -2120,7 +2177,7 @@ def test_late_candidate_flow_ignores_old_snapshot_and_preserves_exact_retry(
     calls: list[dict] = []
     _patch_sender(monkeypatch, calls=calls)
     bundle = _request(tmp_path, run_id="late-candidate", fixed=False)
-    assert mod.run_tick_notification_flow(bundle.request) == 0
+    assert _run_flow(bundle.request) == 0
     assert len(interleaved) == 1
     assert bundle.commits == [{"lx": HALF_TARGET}]
     audit = bundle.request.tick_metrics["daily_brief"]["prepared"][0]
@@ -2177,7 +2234,7 @@ def test_feishu_large_fallback_is_frozen_and_retried_without_rerender(monkeypatc
         'returncode': 1, 'error_code': 'FEISHU_SEND_UNKNOWN', 'ambiguous_send': True,
     })
     bundle = _request(tmp_path, run_id='freeze-long-fallback', config=_feishu_config(), fixed=fixed)
-    assert mod.run_tick_notification_flow(bundle.request) == 1
+    assert _run_flow(bundle.request) == 1
     retry = read_retryable_daily_decision_brief_delivery(base=tmp_path, account='lx', market='US', market_trading_date=MARKET_DATE)
     envelope = retry['envelope']
     text = envelope['rendered_message']
@@ -2201,12 +2258,12 @@ def test_feishu_large_fallback_is_frozen_and_retried_without_rerender(monkeypatc
         pytest.fail('unknown-result retry must reuse the frozen payload, not rerender')
 
     monkeypatch.setattr(mod, 'render_feishu_notification_card', forbidden)
-    monkeypatch.setattr(mod, 'assemble_daily_decision_briefs', forbidden)
+    monkeypatch.setattr(brief_preparation, 'assemble_daily_decision_briefs', forbidden)
     monkeypatch.setattr(mod, 'select_daily_brief_notification', forbidden)
     calls.clear()
     _patch_sender(monkeypatch, calls=calls)
     again = _request(tmp_path, run_id='retry-long-fallback', delivery_only=True, config=_feishu_config(), fixed=fixed)
-    assert mod.run_tick_notification_flow(again.request) == 0
+    assert _run_flow(again.request) == 0
     assert calls[0]['transport_envelope'] == frozen
     assert calls[0]['message'] == text
 
@@ -2223,7 +2280,7 @@ def test_wechat_prepares_plain_text_without_feishu_projection(monkeypatch, tmp_p
     monkeypatch.setattr(mod, 'render_fixed_report_card_blocks', forbidden)
     monkeypatch.setattr(mod, 'render_candidate_alert_card_blocks', forbidden)
     bundle = _request(tmp_path, run_id=f'plain-{kind}', fixed=kind != 'candidate_alert', pipeline_ok=kind != 'failure')
-    assert mod.run_tick_notification_flow(bundle.request) == (1 if kind == 'failure' else 0)
+    assert _run_flow(bundle.request) == (1 if kind == 'failure' else 0)
     assert len(calls) == 1
     message = calls[0]['message']
     assert message.startswith('【OM · 决策简报 · lx】')
@@ -2238,3 +2295,46 @@ def test_wechat_prepares_plain_text_without_feishu_projection(monkeypatch, tmp_p
         assert '【事件】' in message and '最多 1 手' in message
         if kind == 'fixed':
             assert '【持仓】' in message and '【资金】' in message
+
+
+def test_cancel_after_provider_failure_interrupts_outer_retry_and_keeps_scan_fact(monkeypatch, tmp_path):
+    _patch_assembler(monkeypatch)
+    calls = []
+    _patch_sender(monkeypatch, calls=calls, result={
+        "ok": False, "command_ok": False, "delivery_confirmed": False,
+        "returncode": 1, "error_code": "SEND_FAILED",
+    })
+    adapter = mod.select_notification_delivery_adapter("wechat_clawbot")
+    send = adapter.send_fn
+    stopped = False
+
+    def fail_and_cancel(**kwargs):
+        nonlocal stopped
+        result = send(**kwargs)
+        stopped = True
+        return result
+
+    adapter.send_fn = fail_and_cancel
+    monkeypatch.setattr(mod, "select_notification_delivery_adapter", lambda _provider: adapter)
+    waits = []
+    wait = mod.wait_fetch_control
+
+    def controlled_wait(seconds, **controls):
+        waits.append(seconds)
+        return wait(seconds, **controls)
+
+    monkeypatch.setattr(mod, "wait_fetch_control", controlled_wait)
+    bundle = _request(tmp_path, run_id="cancel-outer-retry")
+    sidecars = []
+    request = replace(bundle.request, cancelled=lambda: stopped,
+                      post_delivery_sidecars_fn=lambda: sidecars.append("finished"))
+    with pytest.raises(TimeoutError, match="cancelled"):
+        _run_flow(request)
+    assert len(calls) == 1
+    assert waits == [1.0]
+    assert request.tick_metrics["scan_outcomes"] == {"lx": True}
+    assert bundle.commits == [{"lx": FIXED_TARGET}]
+    assert sidecars == ["finished"]
+    assert bundle.completions[-1]["ok"] is False
+    assert bundle.completions[-1]["error_code"] == "NOTIFY_FAILED"
+    assert read_latest_daily_decision_brief(base=tmp_path, account="lx", market="US")["available"] is True

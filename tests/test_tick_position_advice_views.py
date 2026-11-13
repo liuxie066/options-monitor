@@ -17,7 +17,7 @@ from src.application.daily_decision_brief_repository import (
     read_daily_decision_brief_delivery_state, read_retryable_daily_decision_brief_delivery,
 )
 from test_daily_decision_brief_notification_flow import (
-    MARKET_DATE, _brief, _config, _patch_sender, _request,
+    MARKET_DATE, _brief, _config, _patch_sender, _request, _run_flow, _prepare_flow,
 )
 from test_daily_decision_brief_service import _account_dir, _assemble, _write_close_report
 
@@ -85,7 +85,7 @@ def patch_roll_assembler(monkeypatch, *, rows=None):
         if kw.get("scheduler_decision", {}).get("in_run_window") is False:
             brief["actionability"] = "planning_only"
         return {market: brief for market in kw["markets_to_run"]}
-    monkeypatch.setattr(flow, "assemble_daily_decision_briefs", assemble)
+    monkeypatch.setattr("src.application.tick_brief_preparation.assemble_daily_decision_briefs", assemble)
     monkeypatch.setattr(flow, "utc_now", lambda: datetime(2026, 7, 21, 14, 0, 30, tzinfo=timezone.utc))
 
 
@@ -278,12 +278,12 @@ def test_roll_only_scheduled_alert_dedup_and_new_old_lot(monkeypatch, tmp_path: 
     patch_roll_assembler(monkeypatch, rows=rows)
     calls = []
     _patch_sender(monkeypatch, calls=calls)
-    assert flow.run_tick_notification_flow(_request(tmp_path, run_id="first", fixed=False).request) == 0
+    assert _run_flow(_request(tmp_path, run_id="first", fixed=False).request) == 0
     assert len(calls) == 1 and "持仓" in calls[0]["message"] and "CC 向上移仓" in calls[0]["message"]
-    assert flow.run_tick_notification_flow(_request(tmp_path, run_id="again", fixed=False).request) == 0
+    assert _run_flow(_request(tmp_path, run_id="again", fixed=False).request) == 0
     assert len(calls) == 1
     rows.append(position_row(lot="other-lot"))
-    assert flow.run_tick_notification_flow(_request(tmp_path, run_id="new-lot", fixed=False).request) == 0
+    assert _run_flow(_request(tmp_path, run_id="new-lot", fixed=False).request) == 0
     assert len(calls) == 2
     assert "other-lot" not in calls[1]["message"]
     state = read_daily_decision_brief_delivery_state(base=tmp_path, account="lx", market="US")
@@ -295,15 +295,15 @@ def test_roll_retry_reuses_exact_payload_and_does_not_ack_failed_send(monkeypatc
     calls = []
     _patch_sender(monkeypatch, calls=calls, result={"ok": False, "command_ok": False,
         "delivery_confirmed": False, "returncode": 1, "error_code": "SEND_FAILED"})
-    assert flow.run_tick_notification_flow(_request(tmp_path, run_id="failed", fixed=False).request) == 1
+    assert _run_flow(_request(tmp_path, run_id="failed", fixed=False).request) == 1
     pending = read_retryable_daily_decision_brief_delivery(base=tmp_path, account="lx", market="US", market_trading_date=MARKET_DATE)["envelope"]
     assert pending["delivery_kind"] == "candidate_alert"
     state = read_daily_decision_brief_delivery_state(base=tmp_path, account="lx", market="US")
     assert not state["state"]["days"][MARKET_DATE]["alerted_candidates"]
     retries = []
     _patch_sender(monkeypatch, calls=retries)
-    monkeypatch.setattr(flow, "assemble_daily_decision_briefs", lambda **kw: pytest.fail("retry must not scan"))
-    assert flow.run_tick_notification_flow(_request(tmp_path, run_id="retry", delivery_only=True).request) == 0
+    monkeypatch.setattr("src.application.tick_brief_preparation.assemble_daily_decision_briefs", lambda **kw: pytest.fail("retry must not scan"))
+    assert _run_flow(_request(tmp_path, run_id="retry", delivery_only=True).request) == 0
     assert retries[0]["message"] == pending["rendered_message"]
     assert retries[0]["idempotency_key"] == calls[0]["idempotency_key"]
 
@@ -313,7 +313,7 @@ def test_grouped_roll_alert_acknowledges_all_lots_and_does_not_repeat(monkeypatc
     patch_roll_assembler(monkeypatch, rows=rows)
     calls = []
     _patch_sender(monkeypatch, calls=calls)
-    assert flow.run_tick_notification_flow(_request(tmp_path, run_id="grouped", fixed=False).request) == 0
+    assert _run_flow(_request(tmp_path, run_id="grouped", fixed=False).request) == 0
     state = read_daily_decision_brief_delivery_state(base=tmp_path, account="lx", market="US")["state"]["days"][MARKET_DATE]
     assert set(state["alerted_candidates"]) == daily_brief_roll_notification_identities(
         roll_brief(base=tmp_path, rows=rows))
@@ -323,7 +323,7 @@ def test_grouped_roll_alert_acknowledges_all_lots_and_does_not_repeat(monkeypatc
     assert "合计 3 手" in calls[0]["message"]
     assert "每手净收取：USD 95.00" in calls[0]["message"]
     assert "共 3 笔" not in calls[0]["message"] and "合计净收取" not in calls[0]["message"]
-    assert flow.run_tick_notification_flow(_request(tmp_path, run_id="grouped-again", fixed=False).request) == 0
+    assert _run_flow(_request(tmp_path, run_id="grouped-again", fixed=False).request) == 0
     assert len(calls) == 1
 
 
@@ -335,7 +335,7 @@ def test_display_budget_acknowledges_only_shown_roll_positions(monkeypatch, tmp_
     patch_roll_assembler(monkeypatch, rows=list(reversed(rows)))
     calls = []
     _patch_sender(monkeypatch, calls=calls)
-    assert flow.run_tick_notification_flow(_request(tmp_path, run_id="many", fixed=False).request) == 0
+    assert _run_flow(_request(tmp_path, run_id="many", fixed=False).request) == 0
     state = read_daily_decision_brief_delivery_state(base=tmp_path, account="lx", market="US")["state"]["days"][MARKET_DATE]
     assert len(state["alerted_candidates"]) == 3
     assert len(state["pending_candidates"]) == 4
@@ -371,7 +371,7 @@ def test_tick_roll_section_omissions_preserve_eligibility_and_acknowledgements(
     config = _feishu_config() if provider == "feishu_app" else _config()
     request = _request(tmp_path, run_id="roll-section-limit", fixed=fixed, config=config).request
 
-    assert flow.run_tick_notification_flow(request) == 0
+    assert _run_flow(request) == 0
     assert len(calls) == 1
     message = calls[0]["message"]
     shown = min(row_count, 3)
@@ -397,7 +397,7 @@ def test_truncated_message_does_not_ack_cut_off_roll(monkeypatch, tmp_path: Path
     patch_roll_assembler(monkeypatch)
     monkeypatch.setattr(renderer, "_MAX_MESSAGE_CHARS", 200)
     with pytest.raises(ValueError, match="render_unavailable"):
-        flow._prepare_daily_brief_notification(_request(tmp_path, run_id="truncated", fixed=False).request)
+        _prepare_flow(_request(tmp_path, run_id="truncated", fixed=False).request)
     state = read_daily_decision_brief_delivery_state(base=tmp_path, account="lx", market="US")
     day = state["state"]["days"][MARKET_DATE]
     assert not day["alerted_candidates"]
@@ -503,7 +503,7 @@ def test_final_combo_metadata_uses_shared_budget_after_roll_removal(
         captured.append(brief)
         return {"US": brief}
 
-    monkeypatch.setattr(flow, "assemble_daily_decision_briefs", assemble)
+    monkeypatch.setattr("src.application.tick_brief_preparation.assemble_daily_decision_briefs", assemble)
     monkeypatch.setattr(flow, "utc_now", lambda: datetime(2026, 7, 21, 14, 0, 30, tzinfo=timezone.utc))
     if remove_rolls == "transport":
         actual_fits = flow.feishu_notification_blocks_fit
@@ -526,7 +526,7 @@ def test_final_combo_metadata_uses_shared_budget_after_roll_removal(
         }]
     request = _request(tmp_path, run_id="combo-budget", config=config).request
 
-    preparation = flow._prepare_daily_brief_notification(request)
+    preparation = _prepare_flow(request)
 
     if explicit_routes:
         from src.application.daily_decision_brief_repository import read_daily_brief_fanout_children
@@ -597,7 +597,7 @@ def test_final_card_and_fallback_ack_only_the_same_visible_rolls(
             "attribution_route_key": notification_reminder_route_key(
                 config={"notifications": kw["notifications"]}, base=tmp_path)}
 
-    monkeypatch.setattr(flow, "assemble_daily_decision_briefs", assemble)
+    monkeypatch.setattr("src.application.tick_brief_preparation.assemble_daily_decision_briefs", assemble)
     monkeypatch.setattr(renderer, "_MAX_MESSAGE_CHARS", 2_000)
     monkeypatch.setattr(flow, "utc_now", lambda: datetime(2026, 7, 21, 14, 0, 30, tzinfo=timezone.utc))
     monkeypatch.setattr(plugins, "channel_plugin_installed", lambda _provider: True)
@@ -610,7 +610,7 @@ def test_final_card_and_fallback_ack_only_the_same_visible_rolls(
     if explicit_routes:
         config["notifications"]["routes"] = [{"id": "a", "provider": "feishu_app",
             "target": "ou_fixture", "accounts": ["lx"]}]
-    assert flow.run_tick_notification_flow(_request(tmp_path, run_id="first", config=config).request) == 0
+    assert _run_flow(_request(tmp_path, run_id="first", config=config).request) == 0
     brief = _many_candidate_roll_brief(base=tmp_path, run_id="first")
     all_rolls = daily_brief_roll_notification_identities(brief)
     if explicit_routes:
@@ -636,7 +636,7 @@ def test_final_card_and_fallback_ack_only_the_same_visible_rolls(
 
     # A larger later budget can deliver the previously omitted actions.
     monkeypatch.setattr(renderer, "_MAX_MESSAGE_CHARS", 12_000)
-    assert flow.run_tick_notification_flow(_request(tmp_path, run_id="followup", fixed=False, config=config).request) == 0
+    assert _run_flow(_request(tmp_path, run_id="followup", fixed=False, config=config).request) == 0
     if explicit_routes:
         children = read_daily_brief_fanout_children(base=tmp_path, account="lx", market="US", market_trading_date=MARKET_DATE)
         assert len(children) == 2 and all(child["delivery_confirmed"] for child in children)
@@ -687,9 +687,9 @@ def test_roll_alert_preserves_notification_gates(monkeypatch, tmp_path: Path, ga
         bundle.request = replace(bundle.request, scheduler_decisions_by_account={"lx": scheduler})
     if gate == "missing_target":
         with pytest.raises(SystemExit, match="notifications.target is required"):
-            flow.run_tick_notification_flow(bundle.request)
+            _run_flow(bundle.request)
     else:
-        flow.run_tick_notification_flow(bundle.request)
+        _run_flow(bundle.request)
     assert calls == []
     state = read_daily_decision_brief_delivery_state(base=tmp_path, account="lx", market="US")
     if state.get("available"):

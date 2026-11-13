@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from pathlib import Path
 from threading import RLock
 from typing import Any, Callable, Iterator, Mapping
@@ -113,7 +113,7 @@ class DecisionHistoryStore:
 
     def get(self, *, account: str, market: str, market_date: str | None = None,
             revision: int | None = None, run_id: str | None = None,
-            successful: bool = False) -> dict[str, Any] | None:
+            successful: bool = False, conn: sqlite3.Connection | None = None) -> dict[str, Any] | None:
         conditions, values = ["account=?", "market=?"], [account, market]
         for key, val in (("market_date", market_date), ("revision", revision), ("run_id", run_id)):
             if val is not None:
@@ -121,13 +121,14 @@ class DecisionHistoryStore:
                 values.append(val)
         if successful:
             conditions.append("successful=1")
-        with self.connect() as conn:
-            return self.decode(conn.execute("SELECT * FROM decisions WHERE " + " AND ".join(conditions) +
-                                            " ORDER BY market_date DESC,revision DESC LIMIT 1", values).fetchone())
+        with (self.connect() if conn is None else nullcontext(conn)) as connection:
+            return self.decode(connection.execute("SELECT * FROM decisions WHERE " + " AND ".join(conditions) +
+                                                  " ORDER BY market_date DESC,revision DESC LIMIT 1", values).fetchone())
 
-    def revisions(self, *, account: str, market: str, market_date: str) -> list[int]:
-        with self.connect() as conn:
-            return [int(row[0]) for row in conn.execute(
+    def revisions(self, *, account: str, market: str, market_date: str,
+                  conn: sqlite3.Connection | None = None) -> list[int]:
+        with (self.connect() if conn is None else nullcontext(conn)) as connection:
+            return [int(row[0]) for row in connection.execute(
                 "SELECT revision FROM decisions WHERE account=? AND market=? AND market_date=? ORDER BY revision",
                 (account, market, market_date))]
 

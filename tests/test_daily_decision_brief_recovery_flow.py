@@ -8,6 +8,7 @@ import pytest
 
 import src.application.daily_decision_brief_repository as repo
 import src.application.tick_notification_flow as mod
+import src.application.tick_brief_preparation as brief_preparation
 from test_daily_decision_brief_notification_flow import (
     FIXED_TARGET,
     MARKET_DATE,
@@ -15,6 +16,7 @@ from test_daily_decision_brief_notification_flow import (
     _brief,
     _patch_sender,
     _request,
+    _run_flow,
 )
 
 
@@ -43,10 +45,10 @@ def recovery(monkeypatch, tmp_path):
             for market in markets_to_run
         }
 
-    monkeypatch.setattr(mod, "assemble_daily_decision_briefs", assemble)
+    monkeypatch.setattr("src.application.tick_brief_preparation.assemble_daily_decision_briefs", assemble)
     _patch_sender(monkeypatch, calls=calls)
     failed = _request(tmp_path, run_id="failed", pipeline_ok=False)
-    assert mod.run_tick_notification_flow(failed.request) == 1
+    assert _run_flow(failed.request) == 1
     assert len(calls) == 1
     original = _day(tmp_path)["fixed_reports"][FIXED_TARGET].copy()
     assert original["status"] == "confirmed"
@@ -68,7 +70,7 @@ def _recovery(base):
 def test_recovery_sends_full_report_once_and_preserves_failed_receipt(recovery, tmp_path):
     clock, _, calls, original = recovery
     restored = _request(tmp_path, run_id="restored", fixed=False)
-    assert mod.run_tick_notification_flow(restored.request) == 0
+    assert _run_flow(restored.request) == 0
     supplement = _recovery(tmp_path)
     assert supplement["status"] == "confirmed"
     assert supplement["delivery_kind"] == "fixed_recovery_report"
@@ -78,18 +80,18 @@ def test_recovery_sends_full_report_once_and_preserves_failed_receipt(recovery, 
     assert _day(tmp_path)["fixed_reports"][FIXED_TARGET] == original
     assert IDENTITY in _day(tmp_path)["alerted_candidates"]
     clock["now"] = "2026-07-21T14:40:30+00:00"
-    assert mod.run_tick_notification_flow(_request(tmp_path, run_id="again", fixed=False).request) == 0
+    assert _run_flow(_request(tmp_path, run_id="again", fixed=False).request) == 0
     assert len(calls) == 2
 
 
 def test_continued_failure_no_send_and_manual_do_not_create_recovery(recovery, tmp_path):
     _, blocked, calls, _ = recovery
     blocked["value"] = True
-    mod.run_tick_notification_flow(_request(tmp_path, run_id="still-failed", fixed=False, pipeline_ok=False).request)
+    _run_flow(_request(tmp_path, run_id="still-failed", fixed=False, pipeline_ok=False).request)
     assert len(calls) == 1
     blocked["value"] = False
-    mod.run_tick_notification_flow(_request(tmp_path, run_id="preview", fixed=False, no_send=True).request)
-    mod.run_tick_notification_flow(_request(tmp_path, run_id="manual", fixed=False, trigger_kind="manual").request)
+    _run_flow(_request(tmp_path, run_id="preview", fixed=False, no_send=True).request)
+    _run_flow(_request(tmp_path, run_id="manual", fixed=False, trigger_kind="manual").request)
     assert not _day(tmp_path).get("recovery_reports")
     assert len(calls) == 1
 
@@ -100,9 +102,11 @@ def test_render_crash_rebuilds_bound_revision_without_scan(recovery, monkeypatch
     monkeypatch.setattr(mod, "select_daily_brief_notification", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("render crash")))
     restored = _request(tmp_path, run_id="bound", fixed=False)
     with pytest.raises(RuntimeError, match="render crash"):
-        mod.run_tick_notification_flow(restored.request)
-    assert restored.commits
+        _run_flow(restored.request)
+    # Source and obligation preparation precede scheduler commit in the new root contract.
+    assert not restored.commits
     bound = _recovery(tmp_path).copy()
+    assert bound["source_run_id"] == "bound" and bound["status"] == "pending"
     clock["now"] = "2026-07-21T14:40:30+00:00"
     newer = {**_brief(base=tmp_path, run_id="newer", candidate=False), "generated_at_utc": clock["now"]}
     persisted = repo.persist_daily_decision_brief_success(base=tmp_path, brief=newer)
@@ -114,8 +118,8 @@ def test_render_crash_rebuilds_bound_revision_without_scan(recovery, monkeypatch
         forbidden.append(True)
         raise AssertionError("delivery-only must not scan")
 
-    monkeypatch.setattr(mod, "assemble_daily_decision_briefs", forbid)
-    assert mod.run_tick_notification_flow(_request(tmp_path, run_id="retry-bound", delivery_only=True).request) == 0
+    monkeypatch.setattr("src.application.tick_brief_preparation.assemble_daily_decision_briefs", forbid)
+    assert _run_flow(_request(tmp_path, run_id="retry-bound", delivery_only=True).request) == 0
     assert not forbidden
     assert _recovery(tmp_path)["revision"] == bound["revision"]
     assert "22:30 扫描" in calls[-1]["message"]
@@ -130,7 +134,7 @@ def test_next_fixed_report_replaces_expired_recovery(recovery, monkeypatch, tmp_
             mod, "select_daily_brief_notification", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("render crash"))
         )
         with pytest.raises(RuntimeError):
-            mod.run_tick_notification_flow(_request(tmp_path, run_id="bind", fixed=False).request)
+            _run_flow(_request(tmp_path, run_id="bind", fixed=False).request)
         monkeypatch.setattr(mod, "select_daily_brief_notification", renderer)
     else:
         _patch_sender(
@@ -143,7 +147,7 @@ def test_next_fixed_report_replaces_expired_recovery(recovery, monkeypatch, tmp_
                 "returncode": 1,
             },
         )
-        mod.run_tick_notification_flow(_request(tmp_path, run_id="definite-failure", fixed=False).request)
+        _run_flow(_request(tmp_path, run_id="definite-failure", fixed=False).request)
         assert _recovery(tmp_path)["status"] == "pending"
     clock["now"] = "2026-07-21T15:00:00+00:00"
     _patch_sender(monkeypatch, calls=calls)
@@ -159,7 +163,7 @@ def test_next_fixed_report_replaces_expired_recovery(recovery, monkeypatch, tmp_
         scheduler_decisions_by_account={"lx": decision},
         scheduled_scan_targets_by_account={"lx": decision["scheduled_scan_target_market"]},
     )
-    assert mod.run_tick_notification_flow(request) == 0
+    assert _run_flow(request) == 0
     assert _recovery(tmp_path)["status"] == "expired_unconfirmed"
     assert "状态｜23:00 批次" in calls[-1]["message"]
     assert "恢复补报" not in calls[-1]["message"]
@@ -179,12 +183,12 @@ def test_unknown_outcome_keeps_exact_message_after_next_fixed_point(recovery, mo
             "returncode": 1,
         },
     )
-    mod.run_tick_notification_flow(_request(tmp_path, run_id="ambiguous", fixed=False).request)
+    _run_flow(_request(tmp_path, run_id="ambiguous", fixed=False).request)
     frozen = _recovery(tmp_path).copy()
     assert frozen["status"] == "ambiguous"
     clock["now"] = "2026-07-21T15:00:00+00:00"
     _patch_sender(monkeypatch, calls=calls)
-    mod.run_tick_notification_flow(_request(tmp_path, run_id="retry-unknown", delivery_only=True).request)
+    _run_flow(_request(tmp_path, run_id="retry-unknown", delivery_only=True).request)
     assert calls[-1]["message"] == frozen["rendered_message"]
     assert _recovery(tmp_path)["delivery_key"] == frozen["delivery_key"]
     assert _recovery(tmp_path)["status"] == "confirmed"
@@ -200,7 +204,7 @@ def test_cutoff_is_rechecked_immediately_before_provider(recovery, monkeypatch, 
         return adapter
 
     monkeypatch.setattr(mod, "select_notification_delivery_adapter", select)
-    assert mod.run_tick_notification_flow(_request(tmp_path, run_id="crossed-cutoff", fixed=False).request) == 1
+    assert _run_flow(_request(tmp_path, run_id="crossed-cutoff", fixed=False).request) == 1
     assert len(calls) == 1
     assert _recovery(tmp_path)["status"] == "expired_unconfirmed"
 
@@ -210,10 +214,10 @@ def test_expired_unrendered_binding_cannot_resurrect_as_candidate_delivery(recov
     renderer = mod.select_daily_brief_notification
     monkeypatch.setattr(mod, "select_daily_brief_notification", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("render crash")))
     with pytest.raises(RuntimeError):
-        mod.run_tick_notification_flow(_request(tmp_path, run_id="unrendered", fixed=False).request)
+        _run_flow(_request(tmp_path, run_id="unrendered", fixed=False).request)
     monkeypatch.setattr(mod, "select_daily_brief_notification", renderer)
     clock["now"] = "2026-07-21T15:00:00+00:00"
-    mod.run_tick_notification_flow(_request(tmp_path, run_id="late-delivery-only", delivery_only=True).request)
+    _run_flow(_request(tmp_path, run_id="late-delivery-only", delivery_only=True).request)
     assert len(calls) == 1
     assert _recovery(tmp_path)["status"] == "expired_unconfirmed"
 
@@ -244,7 +248,7 @@ def test_recovery_uses_actual_feishu_adapter_and_frozen_card(recovery, monkeypat
     monkeypatch.setattr(feishu_transport, "send_message", send_message)
     monkeypatch.setattr(feishu_transport, "send_post_message", forbid_fallback)
     assert (
-        mod.run_tick_notification_flow(
+        _run_flow(
             _request(tmp_path, run_id="real-adapter", fixed=False, config=_feishu_config()).request
         )
         == 0
@@ -261,7 +265,7 @@ def test_recovery_uses_actual_feishu_adapter_and_frozen_card(recovery, monkeypat
 def test_reliable_empty_result_still_sends_full_recovery(recovery, tmp_path):
     _, flags, calls, _ = recovery
     flags["candidate"] = False
-    assert mod.run_tick_notification_flow(_request(tmp_path, run_id="empty-recovery", fixed=False).request) == 0
+    assert _run_flow(_request(tmp_path, run_id="empty-recovery", fixed=False).request) == 0
     assert len(calls) == 2
     assert "恢复补报" in calls[-1]["message"]
     assert "【持仓】" in calls[-1]["message"] and "【资金】" in calls[-1]["message"]
@@ -288,12 +292,12 @@ def test_provider_process_exit_leaves_frozen_unknown_attempt(recovery, monkeypat
         ),
     )
     with pytest.raises(SystemExit, match="simulated process exit"):
-        mod.run_tick_notification_flow(_request(tmp_path, run_id="process-exit", fixed=False).request)
+        _run_flow(_request(tmp_path, run_id="process-exit", fixed=False).request)
     frozen = _recovery(tmp_path).copy()
     assert frozen["status"] == "ambiguous"
     clock["now"] = "2026-07-21T15:00:00+00:00"
     _patch_sender(monkeypatch, calls=calls)
-    mod.run_tick_notification_flow(_request(tmp_path, run_id="process-resume", delivery_only=True).request)
+    _run_flow(_request(tmp_path, run_id="process-resume", delivery_only=True).request)
     assert calls[-1]["message"] == frozen["rendered_message"]
     assert _recovery(tmp_path)["status"] == "confirmed"
 
@@ -308,7 +312,7 @@ def test_first_committed_recovery_source_survives_before_binding(
     delivery_only,
 ):
     clock, _, calls, original = recovery
-    persist, write = mod.persist_daily_decision_brief_success, repo._persist_json
+    persist, write = brief_preparation.persist_daily_decision_brief_success, repo._persist_json
 
     def exit_after_persist(**kwargs):
         persist(**kwargs)
@@ -320,10 +324,10 @@ def test_first_committed_recovery_source_survives_before_binding(
     if crash_boundary == "sqlite_commit":
         monkeypatch.setattr(repo, "_persist_json", exit_before_export)
     else:
-        monkeypatch.setattr(mod, "persist_daily_decision_brief_success", exit_after_persist)
+        monkeypatch.setattr(brief_preparation, "persist_daily_decision_brief_success", exit_after_persist)
     bundle = _request(tmp_path, run_id="first-source", fixed=False)
     with pytest.raises(SystemExit, match="source committed"):
-        mod.run_tick_notification_flow(bundle.request)
+        _run_flow(bundle.request)
     assert not bundle.commits
     assert not _day(tmp_path).get("recovery_reports")
     source = repo.read_daily_decision_brief_recovery_source(
@@ -337,7 +341,7 @@ def test_first_committed_recovery_source_survives_before_binding(
     )
     assert source["available"]
     assert "notification_recovery_intent" not in source["brief"]
-    monkeypatch.setattr(mod, "persist_daily_decision_brief_success", persist)
+    monkeypatch.setattr(brief_preparation, "persist_daily_decision_brief_success", persist)
     monkeypatch.setattr(repo, "_persist_json", write)
     clock["now"] = "2026-07-21T14:35:30+00:00"
     # A newer manual snapshot cannot become the recovery source.
@@ -351,9 +355,9 @@ def test_first_committed_recovery_source_survives_before_binding(
             forbidden.append(True)
             raise AssertionError("delivery-only must not scan")
 
-        monkeypatch.setattr(mod, "assemble_daily_decision_briefs", forbid)
+        monkeypatch.setattr("src.application.tick_brief_preparation.assemble_daily_decision_briefs", forbid)
     resumed = _request(tmp_path, run_id="resume-source", fixed=False, delivery_only=delivery_only)
-    assert mod.run_tick_notification_flow(resumed.request) == 0
+    assert _run_flow(resumed.request) == 0
     envelope = _recovery(tmp_path)
     assert envelope["revision"] == source["current_revision"]
     assert envelope["source_digest"] == source["current_brief_digest"]
@@ -370,17 +374,17 @@ def test_first_committed_recovery_source_survives_before_binding(
 
 def test_unmaterialized_source_intent_expires_before_delivery(recovery, monkeypatch, tmp_path):
     clock, _, calls, _ = recovery
-    persist = mod.persist_daily_decision_brief_success
+    persist = brief_preparation.persist_daily_decision_brief_success
 
     def exit_after_persist(**kwargs):
         persist(**kwargs)
         raise SystemExit("before binding")
 
-    monkeypatch.setattr(mod, "persist_daily_decision_brief_success", exit_after_persist)
+    monkeypatch.setattr(brief_preparation, "persist_daily_decision_brief_success", exit_after_persist)
     with pytest.raises(SystemExit):
-        mod.run_tick_notification_flow(_request(tmp_path, run_id="late-source", fixed=False).request)
-    monkeypatch.setattr(mod, "persist_daily_decision_brief_success", persist)
+        _run_flow(_request(tmp_path, run_id="late-source", fixed=False).request)
+    monkeypatch.setattr(brief_preparation, "persist_daily_decision_brief_success", persist)
     clock["now"] = "2026-07-21T15:00:00+00:00"
-    assert mod.run_tick_notification_flow(_request(tmp_path, run_id="late-resume", delivery_only=True).request) == 0
+    assert _run_flow(_request(tmp_path, run_id="late-resume", delivery_only=True).request) == 0
     assert len(calls) == 1
     assert _recovery(tmp_path)["status"] == "expired_unconfirmed"

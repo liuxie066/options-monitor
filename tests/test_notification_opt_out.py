@@ -115,26 +115,27 @@ def test_receipt_compensation_is_not_executable_while_disabled(tmp_path):
 
 def test_scheduled_tick_retains_local_preparation_and_skips_delivery(tmp_path, monkeypatch):
     import src.application.tick_notification_flow as mod
+    from test_daily_decision_brief_notification_flow import _RunFlowRequest, _run_flow
     prepared = []
-    def prepare(request):
+    def prepare(request, **_kwargs):
         prepared.append(request.run_id)
         return mod.DailyBriefNotificationPreparation(
             prepared_messages=SimpleNamespace(messages_by_account={"lx": "fixture"}),
             lifecycles_by_account={}, delivery_keys_by_account={}, markets=("US",))
-    monkeypatch.setattr(mod, "_prepare_daily_brief_notification", prepare)
+    monkeypatch.setattr("src.application.multi_account_tick._prepare_daily_brief_notification", prepare)
     monkeypatch.setattr(mod, "resolve_notification_delivery_route", forbidden)
     monkeypatch.setattr(mod, "execute_per_account_delivery", forbidden)
     finishes = []
-    monkeypatch.setattr(mod, "finalize_no_account_notification", lambda **kw: finishes.append(kw) or 0)
+    monkeypatch.setattr("src.application.multi_account_tick.finalize_no_account_notification", lambda **kw: finishes.append(kw) or 0)
     completions = []
-    request = mod.TickNotificationRequest(
+    request = _RunFlowRequest(
         base=tmp_path, cfg_path=tmp_path / "config.us.json", state_path=tmp_path / "state.json",
         scheduler_schedule_key="us", base_cfg=DISABLED, run_id="fixture-disabled",
         runlog=SimpleNamespace(safe_event=lambda *a, **kw: None), results=[], tick_metrics={}, no_send=False,
         bj_tz=ZoneInfo("Asia/Shanghai"), audit_helper=SimpleNamespace(audit=lambda *a, **kw: None,
         guard_mark_success=lambda: None), vpy=Path("python3"), complete_tick_idempotency_fn=lambda **kw: completions.append(kw),
         markets_to_run=("US",), scheduler_markets=("US",), trigger_kind="scheduled")
-    assert mod.run_tick_notification_flow(request) == 0
+    assert _run_flow(request) == 0
     assert prepared == ["fixture-disabled"]
     assert finishes[0]["reason"] == "notifications_disabled" and finishes[0]["no_send"] is True
     assert completions[0]["message"] == "notifications_disabled"

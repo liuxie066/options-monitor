@@ -134,23 +134,21 @@ def test_writer_lock_reads_fresh_and_attempt_confirmation_are_visible(tmp_path, 
 
 
 def test_notification_exception_discards_validation_scope(tmp_path, monkeypatch):
-    from test_daily_decision_brief_notification_flow import _request
-    from src.application import tick_notification_flow
+    from test_daily_decision_brief_notification_flow import _request, _run_flow
 
-    def fail(_request):
+    def fail(_request, **_kwargs):
         assert repo._DELIVERY_VALIDATION.get() is not None
         raise OSError("controlled preparation failure")
 
-    monkeypatch.setattr(tick_notification_flow, "_prepare_daily_brief_notification", fail)
+    monkeypatch.setattr("src.application.multi_account_tick._prepare_daily_brief_notification", fail)
     with pytest.raises(OSError, match="controlled preparation failure"):
-        tick_notification_flow.run_tick_notification_flow(_request(tmp_path, run_id="failed").request)
+        _run_flow(_request(tmp_path, run_id="failed").request)
     assert repo._DELIVERY_VALIDATION.get() is None
 
 
 def test_full_flow_normalizes_only_changed_days(tmp_path, monkeypatch):
     from daily_brief_history_fixtures import seed_delivery_history
-    from test_daily_decision_brief_notification_flow import _patch_assembler, _patch_sender, _request
-    from src.application import tick_notification_flow
+    from test_daily_decision_brief_notification_flow import _patch_assembler, _patch_sender, _request, _run_flow
 
     seed_delivery_history(tmp_path, days=3)
     _patch_assembler(monkeypatch)
@@ -164,7 +162,7 @@ def test_full_flow_normalizes_only_changed_days(tmp_path, monkeypatch):
         return original(raw, **kwargs)
 
     monkeypatch.setattr(repo, "_normalize_delivery_state", count)
-    assert tick_notification_flow.run_tick_notification_flow(_request(tmp_path, run_id="current").request) == 0
+    assert _run_flow(_request(tmp_path, run_id="current").request) == 0
     assert day_counts == [3, 1, 1]
     assert len(sends) == 1
     assert repo._DELIVERY_VALIDATION.get() is None

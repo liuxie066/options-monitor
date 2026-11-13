@@ -36,6 +36,7 @@ DEVELOPER_FILES = {
     ".gitattributes", ".gitignore", ".github/workflows/future.yml", ".githooks/pre-commit",
     ".devflow/scope.md", ".agents/skills/private/SKILL.md", "AGENTS.md", "CLAUDE.md",
     "Makefile", "LESSONS.md", "future_developer_tool.py", "future_tools/example.py",
+    "reports/example.json", "agent-runtime/example.py", ".tick-tools/example.py",
     "memory/decisions/example.md", "codex/example.md", "release/coverage/example.json",
     "tests/test_example.py", "plugins/feishu-channel/tests/test_example.py",
     "src/nested/AGENTS.md", "src/CLAUDE.md", "src/.agents/skills/example.md",
@@ -118,7 +119,7 @@ def test_git_cache_upgrade_materializes_only_product_files(tmp_path):
 def extracted_product(tmp_path_factory):
     root = tmp_path_factory.mktemp("om-source-archive")
     archive = root / "source.tar.gz"
-    # Snapshot tracked edits using disposable Git objects/index, preserving the real index.
+    # Snapshot current product sources in disposable Git objects/index, preserving the real index.
     objects = root / "objects"
     objects.mkdir()
     source_objects = subprocess.check_output(
@@ -129,6 +130,24 @@ def extracted_product(tmp_path_factory):
            "GIT_OBJECT_DIRECTORY": str(objects), "GIT_ALTERNATE_OBJECT_DIRECTORIES": source_objects}
     subprocess.run(["git", "-C", str(ROOT), "read-tree", "HEAD"], env=env, check=True)
     subprocess.run(["git", "-C", str(ROOT), "add", "--update"], env=env, check=True)
+    # Like dirty runtime-build QA, include new product inputs. Git archive's
+    # export-ignore contract also applies to every parent directory.
+    untracked = subprocess.check_output(
+        ["git", "-C", str(ROOT), "ls-files", "--others", "--exclude-standard", "-z"], env=env,
+    ).decode().split("\0")
+    paths = {path for name in untracked if name for path in (Path(name), *Path(name).parents)}
+    paths.discard(Path("."))
+    attributes = subprocess.check_output(
+        ["git", "-C", str(ROOT), "check-attr", "--cached", "-z", "--stdin", "export-ignore"],
+        env=env, input=("\0".join(sorted(path.as_posix() for path in paths)) + "\0").encode() if paths else b"",
+    ).decode().split("\0")
+    export_ignored = {attributes[i] for i in range(0, len(attributes) - 1, 3)
+                      if attributes[i + 2] == "set"}
+    additions = [name for name in untracked if name and not any(
+        path.as_posix() in export_ignored for path in (Path(name), *Path(name).parents)
+    )]
+    if additions:
+        subprocess.run(["git", "-C", str(ROOT), "add", "--", *additions], env=env, check=True)
     tree = subprocess.check_output(["git", "-C", str(ROOT), "write-tree"], env=env, text=True).strip()
     subprocess.run([
         "git", "-C", str(ROOT), "archive", "--format=tar.gz", "--output", str(archive), tree,
@@ -154,6 +173,9 @@ def test_extracted_product_dependency_inputs_are_complete(extracted_product):
         assert list((project.parent / "src").rglob("*.py"))
     assert (root / "docs/architecture/data-storage-runtime-source-inventory.v1.json").is_file()
     assert not any(name in file_inventory(root) for name in DEVELOPER_FILES)
+    for directory in ("reports", "agent-runtime", ".tick-tools", ".devflow",
+                      "docs/gateflow", "docs/reviews", "docs/plans"):
+        assert not (root / directory).exists(), directory
 
 
 def local_document_link_issues(root):

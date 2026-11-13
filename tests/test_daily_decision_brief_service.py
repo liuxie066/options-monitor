@@ -1717,7 +1717,7 @@ def test_real_completion_boundary_keeps_planning_snapshot_without_candidate_deli
 
     from domain.storage import paths
     from src.application import daily_decision_brief_service as service
-    from src.application import tick_notification_flow as flow
+    from src.application import tick_brief_preparation as brief_preparation
     from src.application.daily_decision_brief_repository import (
         read_daily_decision_brief_delivery_state,
         read_latest_daily_decision_brief,
@@ -1726,6 +1726,7 @@ def test_real_completion_boundary_keeps_planning_snapshot_without_candidate_deli
         _config as notification_config,
         _patch_sender,
         _request,
+        _run_flow,
     )
 
     _write_labeled_put_candidates(tmp_path)
@@ -1757,17 +1758,17 @@ def test_real_completion_boundary_keeps_planning_snapshot_without_candidate_deli
         scheduled_scan_targets_by_account={"lx": target},
     )
     persisted_results = []
-    persist = flow.persist_daily_decision_brief_success
+    persist = brief_preparation.persist_daily_decision_brief_success
 
     def capture_success(**kwargs):
         result = persist(**kwargs)
         persisted_results.append(result)
         return result
 
-    monkeypatch.setattr(flow, "persist_daily_decision_brief_success", capture_success)
+    monkeypatch.setattr(brief_preparation, "persist_daily_decision_brief_success", capture_success)
     calls = []
     _patch_sender(monkeypatch, calls=calls)
-    assert flow.run_tick_notification_flow(request) == 0
+    assert _run_flow(request) == 0
     assert len(persisted_results) == 1
     persisted = persisted_results[0]
     brief = persisted["brief"]

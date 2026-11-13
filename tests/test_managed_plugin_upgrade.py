@@ -813,6 +813,9 @@ def test_new_controller_cli_migrates_unmodified_four_package_release(
     ctx = managed_transition
     ctx.install("pm")
     shutil.rmtree(plugin_store(ctx.previous) / "market-opend")
+    # This shared helper did not exist in 86f0582's source or bundle inventory.
+    new_control_module = "src/infrastructure/fetch_control.py"
+    (ctx.previous / new_control_module).unlink()
     # Restore the actual baseline files, not a fake provider-era registry minus keys.
     for path in (ctx.previous / "src").rglob("*.py"):
         relative = path.relative_to(ctx.previous).as_posix()
@@ -828,6 +831,7 @@ def test_new_controller_cli_migrates_unmodified_four_package_release(
     if ctx.bundled:
         path = ctx.previous / runtime_bundle.MANIFEST
         manifest = json.loads(path.read_text())
+        manifest["files"].pop(new_control_module)
         manifest["files"] = {name: runtime_bundle.sha256(ctx.previous / name) for name in manifest["files"]}
         path.write_text(json.dumps(manifest))
     assert not upgrade._provider_catalog_supported(ctx.previous)

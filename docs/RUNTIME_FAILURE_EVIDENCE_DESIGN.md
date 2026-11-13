@@ -31,13 +31,17 @@
 
 ## 当前失败语义
 
+`tick-cron` 在预检之前确定同一轮的 monotonic 截止时间，预检、排队、子进程、重试与 SDK 等待共享剩余预算。超时的诊断宽限和 TERM/KILL/reap 清理单独计量；异常退出须停止自有进程组、回收直接 child 后再释放锁。wrapper 在原 run 的 `state/tick_process_timings.json` 保存 `business_wait_seconds`、`diagnostic_seconds` 和 `cleanup_seconds`；该诊断记录不构成业务成功或来源身份。
+
+Brief 准备和本轮发送沿同一较早截止继续执行；运行控制不进入 Brief 摘要、冻结消息或补报期限。SDK 与发送端共用 `src/infrastructure/fetch_control.py` 中的轻量检查／等待函数；网关保留原调用入口，渠道适配直接依赖该轻量模块。飞书／微信 HTTP 每次调用使用原 socket timeout 与本轮剩余时间的较小值，鉴权锁和退避可轮询取消；同步 HTTP 已在途时，取消回调不能立即唤醒阻塞读取，socket timeout 也不等同于完整响应体的绝对截止。整轮硬截止和进程组清理由 wrapper 负责；取消或超时不证明 provider 未接收消息，仍保留原待确认／ambiguous 身份。
+
 ### 1. Tick 终态
 
 `tick-cron` 在获得锁后生成 wrapper `run_id`。预检拒绝、子进程退出非零、超时或启动异常时，写一个 `event_type=tick_cron`、`action=failed` 的 run 级审计事件，并更新按市场 latest read model。顶层使用现有 `run_id/error_code/message/event_at_utc`；`extra` 放 `market/accounts/stage/trigger_source/rc/first_error_at`，其中对外字段 `failure_code` 与顶层 `error_code` 同值。外层码为 `TICK_PREFLIGHT_FAILED/TICK_EXEC_FAILED/TICK_TIMEOUT/TICK_START_FAILED`，阶段分别为 `preflight/child_exit/timeout/start`。外层不知道子进程内部错误码时不得猜测；内层 watchdog 的 run/audit 记录保留权威细码，用其来源、时间和账号关联，不凭外层通用码覆盖它。可截断消息且不记录密码、验证码、环境变量或完整子进程输出。
 
 失败写入顺序为 run、shared、按市场 latest：run 写失败不再声称满足 S1；每一步失败都保持原业务非零退出，在 stderr 的 ERROR 行报告 `FAILURE_RECORD_WRITE_FAILED` 与未完成阶段。latest 只有 durable run 证据存在后更新；shared 失败但 latest 可写时，latest 记录 `evidence_incomplete`，而不是旧 `ok`。latest 自身失败时无法由该文件自证，读取侧须交叉检查对应 systemd tick unit 的最近 `Result/ExecMainStatus` 与事件时间；unit 不可查则返回 `unknown`（并列明 latest 可能陈旧），绝不将旧 `ok` 宣称为本轮成功。这不是跨文件事务，重复恢复执行只允许新增带唯一 run ID 的事件，不回写或覆盖旧记录。进程被 SIGKILL、主机掉电、磁盘满无法保证写事件；systemd 的终态和下一次状态核对是后备证据。
 
-只有同市场、全账户范围、非诊断且非 `--no-send` 的计划 Tick 完成实际扫描，才能覆盖按市场 latest 为 `ok`。wrapper 与内层使用同一 runtime root，通过 `OM_TICK_CRON_RUN_ID` 绑定 wrapper ID；内层使用 Brief 准备阶段已判定的账户 `pipeline_reliable` 记录 `scan_outcomes`。局部可信的 degraded 与正常零候选均可成功；账户整体不可评估返回非零，失败通知送达不改变扫描结果。manual、no_send、关闭通知及静默早退保留相同扫描终态。
+只有同市场、全账户范围、非诊断且非 `--no-send` 的计划 Tick 完成实际扫描，才能覆盖按市场 latest 为 `ok`。wrapper 与内层使用同一 runtime root，通过 `OM_TICK_CRON_RUN_ID` 绑定 wrapper ID；内层先记录账户执行 owner 的成功、失败或正常 skip，再合并 Brief 准备阶段判定的 `pipeline_reliable`；已知执行失败不能被正向资格覆盖，`scan_outcomes` 不从通知是否发送推断。局部可信的 degraded 与正常零候选均可成功；账户整体不可评估返回非零，失败通知送达不改变扫描结果。manual、no_send、关闭通知及静默早退保留相同扫描终态。薄准备阶段只组装一次并保存成功／失败来源；后续账户准备失败或取消时，已完成资格判定并落盘的账户结果保留，未完成账户保持失败，整轮仍按失败收尾。通知阶段消费来源、冻结及发送任务，只返回投递事实。主入口和既有 finalizer 统一裁决 guard、run-end 与幂等终态，准备或发送抛错也执行必要收尾。
 
 内层完成幂等记录后，向 wrapper run 目录原子写现有 `state/child_tick_completion.json`，绑定 wrapper ID、inner run ID、市场、完整计划账户集合、`completed_at_utc`、`status` 和 `rc`。新增 `account_outcomes` 中每项保留 `account/scan_ok/notify_failed/failure_notification_confirmed`；最后一个字段仅表示本次 inner run 的失败简报已确认送达。扫描和投递均成功才是 `status=ok/rc=0`；已知业务失败也写 `status=failed` 收据。幂等或收据写入失败返回错误，不产生市场恢复证据。
 
