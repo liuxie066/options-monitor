@@ -202,9 +202,9 @@ def validate_strategy_identity(
         raise ValueError("invalid strategy policy identity") from exc
     if identity.get("identity_format"):
         expected = strategy.identity
-        # Older v2 baselines sealed 0.40. Accept that provenance label only
-        # when delta is the sole difference from today's baseline parameters.
-        if identity["policy_kind"] == "baseline" and strategy.config.max_abs_delta == DEFAULT_MAX_ABS_DELTA:
+        # Older v2 baselines sealed 0.30 or 0.40. Accept those provenance labels
+        # only when delta is the sole difference from today's baseline parameters.
+        if identity["policy_kind"] == "baseline" and strategy.config.max_abs_delta in (0.30, DEFAULT_MAX_ABS_DELTA):
             current_defaults = replace(strategy, config=replace(
                 strategy.config, max_abs_delta=default_max_abs_delta(mode),
             ))
@@ -352,6 +352,7 @@ def calculate_constraints(
         raise ValueError("constraint strategy mode mismatch")
     cfg = strategy.config if strategy else InsuranceUnderwritingConfig(
         min_strike=min_strike, min_strike_cost_multiplier=min_strike_cost_multiplier,
+        max_abs_delta=default_max_abs_delta(mode),
     )
     descriptor = _execution_template(strategy) if strategy else _lookup_template(
         f"{'csp' if mode == 'put' else 'cc'}_baseline", "0.2.0", mode,

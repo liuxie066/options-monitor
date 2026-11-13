@@ -32,14 +32,18 @@ def row(mode='put', **changes):
     ('put', -1, 0, True),
     ('put', -1, .2640, True),
     ('put', -1, .30, True),
-    ('put', -1, math.nextafter(.30, math.inf), False),
-    ('put', -1, .35, False),
+    ('put', -1, .3407, True),
+    ('put', -1, .35, True),
+    ('put', -1, math.nextafter(.35, math.inf), False),
+    ('put', -1, .3625, False),
     ('call', 1, 0, True),
     ('call', 1, .2640, True),
     ('call', 1, .30, True),
-    ('call', 1, math.nextafter(.30, math.inf), False),
-    ('call', 1, .3001, False),
-    ('call', 1, .35, False),
+    ('call', 1, .3001, True),
+    ('call', 1, .3407, True),
+    ('call', 1, .35, True),
+    ('call', 1, math.nextafter(.35, math.inf), False),
+    ('call', 1, .3625, False),
     ('call', 1, .40, False),
     ('call', 1, .4001, False),
 ])
@@ -101,17 +105,17 @@ def test_invalid_policy_never_disables(invalid):
 
 
 @pytest.mark.parametrize('resolver,default', [
-    (resolve_sell_put_underwriting_config, .30),
-    (resolve_covered_call_underwriting_config, .30),
+    (resolve_sell_put_underwriting_config, .35),
+    (resolve_covered_call_underwriting_config, .35),
 ])
-@pytest.mark.parametrize('value',[None,0,.35,.38,.4,1])
+@pytest.mark.parametrize('value',[None,0,.30,.35,.38,.4,1])
 def test_resolvers_and_config_validate_same_contract(resolver,default,value):
     assert resolver({}).max_abs_delta==default
     assert resolver({'max_abs_delta':value}).max_abs_delta==value
     _validate_opening_strategy_config({'max_abs_delta':value},'sell_call')
 
 
-@pytest.mark.parametrize('mode,delta,accepted', [('put', -.35, True), ('call', .35, True)])
+@pytest.mark.parametrize('mode,delta,accepted', [('put', -.37, True), ('call', .37, True)])
 def test_explicit_symbol_delta_cap_overrides_each_side_default(mode, delta, accepted):
     resolver = resolve_sell_put_underwriting_config if mode == 'put' else resolve_covered_call_underwriting_config
     configured = resolver({'max_abs_delta': .38})
@@ -124,7 +128,7 @@ def test_explicit_symbol_delta_cap_overrides_each_side_default(mode, delta, acce
 
 @pytest.mark.parametrize('check_capacity', [True, False])
 @pytest.mark.parametrize('symbol,strike,spot,delta,accepted', [
-    ('0700.HK', 380, 390, -.3407, False),
+    ('0700.HK', 380, 390, -.3407, True),
     ('9992.HK', 137.5, 140, -.3625, False),
     ('3690.HK', 65, 70, -.2640, True),
 ])
@@ -134,28 +138,29 @@ def test_hk_put_candidates_use_tighter_default(check_capacity, symbol, strike, s
     assert decision['accepted'] is accepted
     assert [item['reason'] for item in decision['rejects']] == ([] if accepted else ['risk_delta'])
     if not accepted:
-        assert decision['rejects'][0]['threshold'] == .30
+        assert decision['rejects'][0]['threshold'] == .35
     if not check_capacity:
         condition = next(item for item in decision['conditions'] if item['name'] == 'abs_delta')
-        assert condition['required'] == {'operator': 'lte', 'value': .30}
+        assert condition['required'] == {'operator': 'lte', 'value': .35}
     # A symbol-level cap and a row policy both retain explicit precedence.
     cap = resolve_sell_put_underwriting_config({'max_abs_delta': .38}).max_abs_delta
     assert evaluate_opening_candidate_policy(candidate, mode='put', max_abs_delta=cap)['accepted']
     assert evaluate_opening_candidate_policy({**candidate, 'policy_max_abs_delta': .38}, mode='put')['accepted']
 
 
-@pytest.mark.parametrize('mode,cap', [('put', .30), ('call', .30)])
-def test_constraints_without_strategy_use_side_default(mode, cap):
+@pytest.mark.parametrize('mode,cap', [('put', .35), ('call', .35)])
+@pytest.mark.parametrize('value,accepted', [(.3407, True), (.3625, False)])
+def test_constraints_without_strategy_use_side_default(mode, cap, value, accepted):
     from om_strategy_core import CurrencyConverter, ExchangeRates, ShortVolPortfolioContext, calculate_constraints
 
-    candidate = row(mode, delta=-.3407 if mode == 'put' else .3407)
+    candidate = row(mode, delta=-value if mode == 'put' else value)
     constrained = calculate_constraints(
         candidate, mode=mode, risk_ctx=ShortVolPortfolioContext(None, {}, {}, None),
         exchange_rate_converter=CurrencyConverter(ExchangeRates()),
     )
     assert 'policy_max_abs_delta' not in constrained
     decision = evaluate_opening_candidate_policy(constrained, mode=mode)
-    assert 'risk_delta' in [item['reason'] for item in decision['rejects']]
+    assert ('risk_delta' in [item['reason'] for item in decision['rejects']]) is (not accepted)
     strategy = resolve_strategy(mode=mode, config=InsuranceUnderwritingConfig(
         min_dte=7, max_dte=60, max_abs_delta=cap,
     ))
@@ -179,24 +184,28 @@ def test_custom_template_cannot_bypass_delta(monkeypatch):
 
 
 @pytest.mark.parametrize('mode', ['put', 'call'])
-def test_sealed_v2_baseline_keeps_its_original_delta_policy(mode):
-    # Historical v2 baselines sealed 0.40; preserve their original policy.
+@pytest.mark.parametrize('legacy_cap,delta,accepted', [(.30, .30, True), (.30, .3407, False), (.40, .3625, True)])
+def test_sealed_v2_baseline_keeps_its_original_delta_policy(mode, legacy_cap, delta, accepted):
+    # Historical v2 baselines retain their sealed cap, even when it is tighter.
     old_identity = resolve_strategy(mode=mode, account='lx', market='us',
-        config=InsuranceUnderwritingConfig(min_dte=7, max_dte=60, max_abs_delta=.40)).identity
+        config=InsuranceUnderwritingConfig(min_dte=7, max_dte=60, max_abs_delta=legacy_cap)).identity
     old_identity['policy_kind'] = 'baseline'
     frozen = deepcopy(old_identity)
-    transported = row(mode, delta=-.35 if mode == 'put' else .35,
+    transported = row(mode, delta=-delta if mode == 'put' else delta,
         strategy_core=old_identity, account='lx', market='us', effective_min_strike=100)
     restored = strategy_core.validate_strategy_identity(transported, mode=mode, account='lx', market='us')
-    assert restored.config.max_abs_delta == .40
+    assert restored.config.max_abs_delta == legacy_cap
     assert restored.identity['effective_policy_hash'] == old_identity['effective_policy_hash']
-    assert len(evaluate_candidates([transported], strategy=restored)['accepted']) == 1
+    assert len(evaluate_candidates([transported], strategy=restored)['accepted']) == int(accepted)
     assert rank_candidate_rows([transported], mode=mode) == [transported]
     assert old_identity == frozen
 
 
 @pytest.mark.parametrize('mode', ['put', 'call'])
-@pytest.mark.parametrize('changes', [{'max_abs_delta': .38}, {'max_abs_delta': .40, 'min_net_income': 51}])
+@pytest.mark.parametrize('changes', [
+    {'max_abs_delta': .38}, {'max_abs_delta': .30, 'min_net_income': 51},
+    {'max_abs_delta': .40, 'min_net_income': 51},
+])
 def test_sealed_baseline_compatibility_does_not_accept_custom_policy_labels(mode, changes):
     identity = resolve_strategy(mode=mode, config=InsuranceUnderwritingConfig(
         min_dte=7, max_dte=60, **changes)).identity
@@ -233,7 +242,7 @@ def test_survivor_rank_is_unchanged_and_cross_expiry():
     assert rank_candidate_rows(accepted,mode='put')==expected
 
 
-@pytest.mark.parametrize('override,expected', [(None, .30), (.38, .38)])
+@pytest.mark.parametrize('override,expected', [(None, .35), (.38, .38)])
 def test_yaml_put_default_and_symbol_override(tmp_path, override, expected):
     from test_config_yaml import _FUTU_ACCOUNTS_YAML, REPO_ROOT, _write_yaml
     from src.application.config_yaml import resolve_yaml_runtime_config
@@ -254,7 +263,7 @@ def test_yaml_put_default_and_symbol_override(tmp_path, override, expected):
     config, _ = resolve_yaml_runtime_config(repo_root=REPO_ROOT, market='hk', config_path=path)
     effective = apply_profiles(config['symbols'][0], config['templates'])
     assert resolve_sell_put_underwriting_config(effective['sell_put']).max_abs_delta == expected
-    assert resolve_covered_call_underwriting_config(effective['sell_call']).max_abs_delta == .30
+    assert resolve_covered_call_underwriting_config(effective['sell_call']).max_abs_delta == .35
 
 
 def test_yaml_build_covered_call_override_and_null_template(tmp_path):

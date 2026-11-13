@@ -86,7 +86,7 @@ def test_prepare_inheritance_overrides_defaults_and_known_route(configured, tmp_
     item = app._prepare(query, context, now)
     assert item.filters == {'strike': None, 'min_strike': 95, 'max_strike': 100, 'dte': [7, 45],
                             'strike_source': 'config', 'dte_source': 'config',
-                            'max_abs_delta': 0.3, 'max_abs_delta_source': 'config'}
+                            'max_abs_delta': 0.35, 'max_abs_delta_source': 'config'}
     explicit = app._prepare({**query, 'strike': 120, 'dte': [1, 90]}, context, now)
     assert explicit.filters['min_strike'] == explicit.filters['max_strike'] == 120
     assert explicit.filters['dte'] == [1, 90]

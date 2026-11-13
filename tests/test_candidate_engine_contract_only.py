@@ -67,7 +67,7 @@ def test_accepted_query_exposes_effective_numeric_gates_without_account_evidence
         "spread_ratio": (0.08, "lte", 0.40),
         "iv_rv_ratio": (1.50, "gte", 1.10),
         "iv_minus_rv": (0.12, "gte", 0.05),
-        "abs_delta": (0.30, "lte", 0.30),
+        "abs_delta": (0.30, "lte", 0.35),
     }
     for name, (actual, operator, value) in expected.items():
         assert conditions[name]["actual"] == actual
@@ -150,7 +150,7 @@ def test_capacity_switch_does_not_disable_earnings_gates():
     assert all(item["status"] == "pass" for item in decision["conditions"])
 
 
-@pytest.mark.parametrize("mode,cap", [("put", 0.30), ("call", 0.30)])
+@pytest.mark.parametrize("mode,cap", [("put", 0.35), ("call", 0.35)])
 @pytest.mark.parametrize("offset,status", [(0, "pass"), (0.0001, "fail"), (None, "unknown")])
 def test_contract_only_retains_delta_qualification(mode, cap, offset, status):
     value = None if offset is None else cap + offset
