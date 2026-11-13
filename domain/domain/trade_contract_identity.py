@@ -29,6 +29,8 @@ def _alias_lookup(aliases: dict[str, str], compact: str) -> str | None:
 
 
 def normalize_trade_side(value: Any) -> str | None:
+    if isinstance(value, str) and value in ("buy", "sell"):
+        return value
     compact = _compact_choice(value)
     aliases = {
         "buy": "buy",
@@ -71,6 +73,8 @@ def normalize_trade_side(value: Any) -> str | None:
 
 
 def normalize_asset_type(value: Any) -> str | None:
+    if isinstance(value, str) and value in ("stock", "option"):
+        return value
     compact = _compact_choice(value)
     if compact in {"stock", "equity", "etf", "share"}:
         return "stock"
@@ -80,6 +84,8 @@ def normalize_asset_type(value: Any) -> str | None:
 
 
 def normalize_quantity_unit(value: Any) -> str | None:
+    if isinstance(value, str) and value in ("share", "contract"):
+        return value
     compact = _compact_choice(value)
     if compact in {"share", "shares"}:
         return "share"
@@ -115,6 +121,8 @@ def derive_trade_side(position_effect: Any, position_side: Any) -> str | None:
 
 
 def normalize_position_effect(value: Any) -> str | None:
+    if isinstance(value, str) and value in ("open", "close", "void", "adjust"):
+        return value
     compact = _compact_choice(value)
     aliases = {
         "open": "open",

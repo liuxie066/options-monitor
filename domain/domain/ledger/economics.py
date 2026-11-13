@@ -33,16 +33,21 @@ def _allocation_id(open_event_id: str, close_event_id: str, sequence: int) -> st
     return f"alloc_{hashlib.sha256(seed).hexdigest()[:24]}"
 
 
-def _strategy_value(open_event: TradeEvent, close_event: TradeEvent, key: str) -> str | None:
+def _strategy_values(open_event: TradeEvent, close_event: TradeEvent) -> dict[str, str | None]:
+    values: dict[str, str | None] = dict.fromkeys(("strategy", "leg_role", "strategy_group_id"))
     for event in (close_event, open_event):
         payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
+        if "strategy_snapshot" not in payload and not any(key in payload for key in values):
+            continue
         resolved = resolve_strategy_metadata(payload, source_id=event.event_id)
         if resolved.issues:
             continue
-        raw = str(getattr(resolved.metadata, key) or "").strip()
-        if raw:
-            return raw
-    return None
+        for key in values:
+            if values[key] is None:
+                values[key] = str(getattr(resolved.metadata, key) or "").strip() or None
+        if all(values.values()):
+            break
+    return values
 
 
 def _settlement_ref(event: TradeEvent) -> str | None:
@@ -164,6 +169,7 @@ def build_option_economic_allocation(
 
     payload = close_event.raw_payload if isinstance(close_event.raw_payload, dict) else {}
     close_type = str(payload.get("close_type") or close_event.event_type).strip().lower()
+    strategy_values = _strategy_values(open_event, close_event)
     return (
         OptionEconomicAllocation(
             allocation_id=_allocation_id(open_event.event_id, close_event.event_id, sequence),
@@ -187,9 +193,9 @@ def build_option_economic_allocation(
             close_fee=close_fee,
             realized_pnl_net=realized_net,
             fee_quality=_fee_quality(allocated_open_fee, close_fee),
-            strategy=_strategy_value(open_event, close_event, "strategy"),
-            leg_role=_strategy_value(open_event, close_event, "leg_role"),
-            strategy_group_id=_strategy_value(open_event, close_event, "strategy_group_id"),
+            strategy=strategy_values["strategy"],
+            leg_role=strategy_values["leg_role"],
+            strategy_group_id=strategy_values["strategy_group_id"],
             settlement_ref=_settlement_ref(close_event),
         ),
         allocated_after,

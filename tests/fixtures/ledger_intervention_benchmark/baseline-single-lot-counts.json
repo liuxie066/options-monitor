@@ -1,0 +1,439 @@
+{
+  "schema": "ledger_interventions_benchmark.v1",
+  "source_sha": "5fdb5890df9e5b94273c7f03fca2e6b44835016f",
+  "python": "3.12.13 (main, Apr 18 2026, 13:17:39) [Clang 21.0.0 (clang-2100.0.123.102)]",
+  "executable": "python",
+  "executable_sha256": "f5be717f4f7ffe03ca175c7602313c4846301aa991673749f59b290ab6bee4af",
+  "sqlite": "3.54.0",
+  "host": "macOS-27.2.1-arm64-arm-64bit",
+  "machine": "arm64",
+  "warmups": 0,
+  "samples": 1,
+  "mode": "counts",
+  "fixed_clock_ms": 1800000500000,
+  "storage_settings": {
+    "memory": {
+      "journal_mode": "memory",
+      "synchronous": 1,
+      "temp_store": 0,
+      "cache_size": 2000
+    },
+    "disk": {
+      "journal_mode": "wal",
+      "synchronous": 1,
+      "temp_store": 0,
+      "cache_size": 2000
+    }
+  },
+  "results": [
+    {
+      "events": 501,
+      "active_lots": 1,
+      "fixture_sha256": "940481fcdd8afda6c4656b52208cb275eb1b791761641ea1d693f5a75c687aa7",
+      "storage": "memory",
+      "operation": "void_preview",
+      "ordinary_history_reads": 1,
+      "forced_full_history_reads": 0,
+      "all_history_reads": 1,
+      "conversion_calls": {
+        "_canonical_payload_to_ledger_event": 1505,
+        "list_trade_events": 1,
+        "stored_trade_event_to_ledger_event": 501,
+        "_stored_trade_event_payload_to_ledger_event": 1003,
+        "resolve_strategy_metadata": 3502
+      },
+      "conversion_sites": {
+        "_canonical_payload_to_ledger_event <- src/application/ledger/event_codec.py:152:trade_event_application_payload": 502,
+        "stored_trade_event_to_ledger_event <- src/application/ledger/event_codec.py:123:valid_void_target_event_id": 501,
+        "_stored_trade_event_payload_to_ledger_event <- src/application/ledger/event_codec.py:102:stored_trade_event_to_ledger_event": 501,
+        "_canonical_payload_to_ledger_event <- src/application/ledger/event_codec.py:109:_stored_trade_event_payload_to_ledger_event": 1003,
+        "_stored_trade_event_payload_to_ledger_event <- src/application/ledger/event_codec.py:57:iter_import_stored_trade_events": 502
+      }
+    },
+    {
+      "events": 501,
+      "active_lots": 1,
+      "fixture_sha256": "940481fcdd8afda6c4656b52208cb275eb1b791761641ea1d693f5a75c687aa7",
+      "storage": "memory",
+      "operation": "void_apply",
+      "ordinary_history_reads": 2,
+      "forced_full_history_reads": 1,
+      "all_history_reads": 3,
+      "conversion_calls": {
+        "_canonical_payload_to_ledger_event": 3514,
+        "list_trade_events": 2,
+        "stored_trade_event_to_ledger_event": 1004,
+        "_stored_trade_event_payload_to_ledger_event": 2008,
+        "resolve_strategy_metadata": 5252,
+        "list_position_projection_event_rows": 1
+      },
+      "conversion_sites": {
+        "_canonical_payload_to_ledger_event <- src/application/ledger/event_codec.py:152:trade_event_application_payload": 1506,
+        "stored_trade_event_to_ledger_event <- src/application/ledger/event_codec.py:123:valid_void_target_event_id": 1002,
+        "_stored_trade_event_payload_to_ledger_event <- src/application/ledger/event_codec.py:102:stored_trade_event_to_ledger_event": 1004,
+        "_canonical_payload_to_ledger_event <- src/application/ledger/event_codec.py:109:_stored_trade_event_payload_to_ledger_event": 2008,
+        "_stored_trade_event_payload_to_ledger_event <- src/application/ledger/event_codec.py:57:iter_import_stored_trade_events": 1004,
+        "stored_trade_event_to_ledger_event <- src/application/ledger/event_codec.py:31:encode_trade_event_for_storage": 2
+      }
+    },
+    {
+      "events": 501,
+      "active_lots": 1,
+      "fixture_sha256": "940481fcdd8afda6c4656b52208cb275eb1b791761641ea1d693f5a75c687aa7",
+      "storage": "memory",
+      "operation": "repair_preview",
+      "ordinary_history_reads": 1,
+      "forced_full_history_reads": 0,
+      "all_history_reads": 1,
+      "conversion_calls": {
+        "_canonical_payload_to_ledger_event": 2008,
+        "list_trade_events": 1,
+        "stored_trade_event_to_ledger_event": 1003,
+        "_stored_trade_event_payload_to_ledger_event": 1506,
+        "resolve_strategy_metadata": 3504
+      },
+      "conversion_sites": {
+        "_canonical_payload_to_ledger_event <- src/application/ledger/event_codec.py:152:trade_event_application_payload": 502,
+        "stored_trade_event_to_ledger_event <- src/application/ledger/event_codec.py:123:valid_void_target_event_id": 1002,
+        "_stored_trade_event_payload_to_ledger_event <- src/application/ledger/event_codec.py:102:stored_trade_event_to_ledger_event": 1003,
+        "_canonical_payload_to_ledger_event <- src/application/ledger/event_codec.py:109:_stored_trade_event_payload_to_ledger_event": 1506,
+        "stored_trade_event_to_ledger_event <- src/application/ledger/interventions.py:214:_preview_event_to_trade_event": 1,
+        "_stored_trade_event_payload_to_ledger_event <- src/application/ledger/event_codec.py:57:iter_import_stored_trade_events": 503
+      }
+    },
+    {
+      "events": 501,
+      "active_lots": 1,
+      "fixture_sha256": "940481fcdd8afda6c4656b52208cb275eb1b791761641ea1d693f5a75c687aa7",
+      "storage": "memory",
+      "operation": "repair_apply",
+      "ordinary_history_reads": 4,
+      "forced_full_history_reads": 1,
+      "all_history_reads": 5,
+      "conversion_calls": {
+        "list_trade_events": 4,
+        "_canonical_payload_to_ledger_event": 6531,
+        "stored_trade_event_to_ledger_event": 3015,
+        "_stored_trade_event_payload_to_ledger_event": 4021,
+        "resolve_strategy_metadata": 5256,
+        "list_position_projection_event_rows": 1
+      },
+      "conversion_sites": {
+        "_canonical_payload_to_ledger_event <- src/application/ledger/event_codec.py:152:trade_event_application_payload": 2510,
+        "stored_trade_event_to_ledger_event <- src/application/ledger/event_codec.py:123:valid_void_target_event_id": 3006,
+        "_stored_trade_event_payload_to_ledger_event <- src/application/ledger/event_codec.py:102:stored_trade_event_to_ledger_event": 3015,
+        "_canonical_payload_to_ledger_event <- src/application/ledger/event_codec.py:109:_stored_trade_event_payload_to_ledger_event": 4021,
+        "stored_trade_event_to_ledger_event <- src/application/ledger/interventions.py:214:_preview_event_to_trade_event": 5,
+        "_stored_trade_event_payload_to_ledger_event <- src/application/ledger/event_codec.py:57:iter_import_stored_trade_events": 1006,
+        "stored_trade_event_to_ledger_event <- src/application/ledger/event_codec.py:31:encode_trade_event_for_storage": 4
+      }
+    },
+    {
+      "events": 501,
+      "active_lots": 1,
+      "fixture_sha256": "940481fcdd8afda6c4656b52208cb275eb1b791761641ea1d693f5a75c687aa7",
+      "storage": "disk",
+      "operation": "void_preview",
+      "ordinary_history_reads": 1,
+      "forced_full_history_reads": 0,
+      "all_history_reads": 1,
+      "conversion_calls": {
+        "_canonical_payload_to_ledger_event": 1505,
+        "list_trade_events": 1,
+        "stored_trade_event_to_ledger_event": 501,
+        "_stored_trade_event_payload_to_ledger_event": 1003,
+        "resolve_strategy_metadata": 3502
+      },
+      "conversion_sites": {
+        "_canonical_payload_to_ledger_event <- src/application/ledger/event_codec.py:152:trade_event_application_payload": 502,
+        "stored_trade_event_to_ledger_event <- src/application/ledger/event_codec.py:123:valid_void_target_event_id": 501,
+        "_stored_trade_event_payload_to_ledger_event <- src/application/ledger/event_codec.py:102:stored_trade_event_to_ledger_event": 501,
+        "_canonical_payload_to_ledger_event <- src/application/ledger/event_codec.py:109:_stored_trade_event_payload_to_ledger_event": 1003,
+        "_stored_trade_event_payload_to_ledger_event <- src/application/ledger/event_codec.py:57:iter_import_stored_trade_events": 502
+      }
+    },
+    {
+      "events": 501,
+      "active_lots": 1,
+      "fixture_sha256": "940481fcdd8afda6c4656b52208cb275eb1b791761641ea1d693f5a75c687aa7",
+      "storage": "disk",
+      "operation": "void_apply",
+      "ordinary_history_reads": 2,
+      "forced_full_history_reads": 1,
+      "all_history_reads": 3,
+      "conversion_calls": {
+        "_canonical_payload_to_ledger_event": 3514,
+        "list_trade_events": 2,
+        "stored_trade_event_to_ledger_event": 1004,
+        "_stored_trade_event_payload_to_ledger_event": 2008,
+        "resolve_strategy_metadata": 5252,
+        "list_position_projection_event_rows": 1
+      },
+      "conversion_sites": {
+        "_canonical_payload_to_ledger_event <- src/application/ledger/event_codec.py:152:trade_event_application_payload": 1506,
+        "stored_trade_event_to_ledger_event <- src/application/ledger/event_codec.py:123:valid_void_target_event_id": 1002,
+        "_stored_trade_event_payload_to_ledger_event <- src/application/ledger/event_codec.py:102:stored_trade_event_to_ledger_event": 1004,
+        "_canonical_payload_to_ledger_event <- src/application/ledger/event_codec.py:109:_stored_trade_event_payload_to_ledger_event": 2008,
+        "_stored_trade_event_payload_to_ledger_event <- src/application/ledger/event_codec.py:57:iter_import_stored_trade_events": 1004,
+        "stored_trade_event_to_ledger_event <- src/application/ledger/event_codec.py:31:encode_trade_event_for_storage": 2
+      }
+    },
+    {
+      "events": 501,
+      "active_lots": 1,
+      "fixture_sha256": "940481fcdd8afda6c4656b52208cb275eb1b791761641ea1d693f5a75c687aa7",
+      "storage": "disk",
+      "operation": "repair_preview",
+      "ordinary_history_reads": 1,
+      "forced_full_history_reads": 0,
+      "all_history_reads": 1,
+      "conversion_calls": {
+        "_canonical_payload_to_ledger_event": 2008,
+        "list_trade_events": 1,
+        "stored_trade_event_to_ledger_event": 1003,
+        "_stored_trade_event_payload_to_ledger_event": 1506,
+        "resolve_strategy_metadata": 3504
+      },
+      "conversion_sites": {
+        "_canonical_payload_to_ledger_event <- src/application/ledger/event_codec.py:152:trade_event_application_payload": 502,
+        "stored_trade_event_to_ledger_event <- src/application/ledger/event_codec.py:123:valid_void_target_event_id": 1002,
+        "_stored_trade_event_payload_to_ledger_event <- src/application/ledger/event_codec.py:102:stored_trade_event_to_ledger_event": 1003,
+        "_canonical_payload_to_ledger_event <- src/application/ledger/event_codec.py:109:_stored_trade_event_payload_to_ledger_event": 1506,
+        "stored_trade_event_to_ledger_event <- src/application/ledger/interventions.py:214:_preview_event_to_trade_event": 1,
+        "_stored_trade_event_payload_to_ledger_event <- src/application/ledger/event_codec.py:57:iter_import_stored_trade_events": 503
+      }
+    },
+    {
+      "events": 501,
+      "active_lots": 1,
+      "fixture_sha256": "940481fcdd8afda6c4656b52208cb275eb1b791761641ea1d693f5a75c687aa7",
+      "storage": "disk",
+      "operation": "repair_apply",
+      "ordinary_history_reads": 4,
+      "forced_full_history_reads": 1,
+      "all_history_reads": 5,
+      "conversion_calls": {
+        "list_trade_events": 4,
+        "_canonical_payload_to_ledger_event": 6531,
+        "stored_trade_event_to_ledger_event": 3015,
+        "_stored_trade_event_payload_to_ledger_event": 4021,
+        "resolve_strategy_metadata": 5256,
+        "list_position_projection_event_rows": 1
+      },
+      "conversion_sites": {
+        "_canonical_payload_to_ledger_event <- src/application/ledger/event_codec.py:152:trade_event_application_payload": 2510,
+        "stored_trade_event_to_ledger_event <- src/application/ledger/event_codec.py:123:valid_void_target_event_id": 3006,
+        "_stored_trade_event_payload_to_ledger_event <- src/application/ledger/event_codec.py:102:stored_trade_event_to_ledger_event": 3015,
+        "_canonical_payload_to_ledger_event <- src/application/ledger/event_codec.py:109:_stored_trade_event_payload_to_ledger_event": 4021,
+        "stored_trade_event_to_ledger_event <- src/application/ledger/interventions.py:214:_preview_event_to_trade_event": 5,
+        "_stored_trade_event_payload_to_ledger_event <- src/application/ledger/event_codec.py:57:iter_import_stored_trade_events": 1006,
+        "stored_trade_event_to_ledger_event <- src/application/ledger/event_codec.py:31:encode_trade_event_for_storage": 4
+      }
+    },
+    {
+      "events": 2001,
+      "active_lots": 1,
+      "fixture_sha256": "916fae31c790e19fe9fb30af277e891978f31c692d8ea5f1153f22a027c6ad2a",
+      "storage": "memory",
+      "operation": "void_preview",
+      "ordinary_history_reads": 1,
+      "forced_full_history_reads": 0,
+      "all_history_reads": 1,
+      "conversion_calls": {
+        "_canonical_payload_to_ledger_event": 6005,
+        "list_trade_events": 1,
+        "stored_trade_event_to_ledger_event": 2001,
+        "_stored_trade_event_payload_to_ledger_event": 4003,
+        "resolve_strategy_metadata": 14002
+      },
+      "conversion_sites": {
+        "_canonical_payload_to_ledger_event <- src/application/ledger/event_codec.py:152:trade_event_application_payload": 2002,
+        "stored_trade_event_to_ledger_event <- src/application/ledger/event_codec.py:123:valid_void_target_event_id": 2001,
+        "_stored_trade_event_payload_to_ledger_event <- src/application/ledger/event_codec.py:102:stored_trade_event_to_ledger_event": 2001,
+        "_canonical_payload_to_ledger_event <- src/application/ledger/event_codec.py:109:_stored_trade_event_payload_to_ledger_event": 4003,
+        "_stored_trade_event_payload_to_ledger_event <- src/application/ledger/event_codec.py:57:iter_import_stored_trade_events": 2002
+      }
+    },
+    {
+      "events": 2001,
+      "active_lots": 1,
+      "fixture_sha256": "916fae31c790e19fe9fb30af277e891978f31c692d8ea5f1153f22a027c6ad2a",
+      "storage": "memory",
+      "operation": "void_apply",
+      "ordinary_history_reads": 2,
+      "forced_full_history_reads": 1,
+      "all_history_reads": 3,
+      "conversion_calls": {
+        "_canonical_payload_to_ledger_event": 14014,
+        "list_trade_events": 2,
+        "stored_trade_event_to_ledger_event": 4004,
+        "_stored_trade_event_payload_to_ledger_event": 8008,
+        "resolve_strategy_metadata": 21002,
+        "list_position_projection_event_rows": 1
+      },
+      "conversion_sites": {
+        "_canonical_payload_to_ledger_event <- src/application/ledger/event_codec.py:152:trade_event_application_payload": 6006,
+        "stored_trade_event_to_ledger_event <- src/application/ledger/event_codec.py:123:valid_void_target_event_id": 4002,
+        "_stored_trade_event_payload_to_ledger_event <- src/application/ledger/event_codec.py:102:stored_trade_event_to_ledger_event": 4004,
+        "_canonical_payload_to_ledger_event <- src/application/ledger/event_codec.py:109:_stored_trade_event_payload_to_ledger_event": 8008,
+        "_stored_trade_event_payload_to_ledger_event <- src/application/ledger/event_codec.py:57:iter_import_stored_trade_events": 4004,
+        "stored_trade_event_to_ledger_event <- src/application/ledger/event_codec.py:31:encode_trade_event_for_storage": 2
+      }
+    },
+    {
+      "events": 2001,
+      "active_lots": 1,
+      "fixture_sha256": "916fae31c790e19fe9fb30af277e891978f31c692d8ea5f1153f22a027c6ad2a",
+      "storage": "memory",
+      "operation": "repair_preview",
+      "ordinary_history_reads": 1,
+      "forced_full_history_reads": 0,
+      "all_history_reads": 1,
+      "conversion_calls": {
+        "_canonical_payload_to_ledger_event": 8008,
+        "list_trade_events": 1,
+        "stored_trade_event_to_ledger_event": 4003,
+        "_stored_trade_event_payload_to_ledger_event": 6006,
+        "resolve_strategy_metadata": 14004
+      },
+      "conversion_sites": {
+        "_canonical_payload_to_ledger_event <- src/application/ledger/event_codec.py:152:trade_event_application_payload": 2002,
+        "stored_trade_event_to_ledger_event <- src/application/ledger/event_codec.py:123:valid_void_target_event_id": 4002,
+        "_stored_trade_event_payload_to_ledger_event <- src/application/ledger/event_codec.py:102:stored_trade_event_to_ledger_event": 4003,
+        "_canonical_payload_to_ledger_event <- src/application/ledger/event_codec.py:109:_stored_trade_event_payload_to_ledger_event": 6006,
+        "stored_trade_event_to_ledger_event <- src/application/ledger/interventions.py:214:_preview_event_to_trade_event": 1,
+        "_stored_trade_event_payload_to_ledger_event <- src/application/ledger/event_codec.py:57:iter_import_stored_trade_events": 2003
+      }
+    },
+    {
+      "events": 2001,
+      "active_lots": 1,
+      "fixture_sha256": "916fae31c790e19fe9fb30af277e891978f31c692d8ea5f1153f22a027c6ad2a",
+      "storage": "memory",
+      "operation": "repair_apply",
+      "ordinary_history_reads": 4,
+      "forced_full_history_reads": 1,
+      "all_history_reads": 5,
+      "conversion_calls": {
+        "list_trade_events": 4,
+        "_canonical_payload_to_ledger_event": 26031,
+        "stored_trade_event_to_ledger_event": 12015,
+        "_stored_trade_event_payload_to_ledger_event": 16021,
+        "resolve_strategy_metadata": 21006,
+        "list_position_projection_event_rows": 1
+      },
+      "conversion_sites": {
+        "_canonical_payload_to_ledger_event <- src/application/ledger/event_codec.py:152:trade_event_application_payload": 10010,
+        "stored_trade_event_to_ledger_event <- src/application/ledger/event_codec.py:123:valid_void_target_event_id": 12006,
+        "_stored_trade_event_payload_to_ledger_event <- src/application/ledger/event_codec.py:102:stored_trade_event_to_ledger_event": 12015,
+        "_canonical_payload_to_ledger_event <- src/application/ledger/event_codec.py:109:_stored_trade_event_payload_to_ledger_event": 16021,
+        "stored_trade_event_to_ledger_event <- src/application/ledger/interventions.py:214:_preview_event_to_trade_event": 5,
+        "_stored_trade_event_payload_to_ledger_event <- src/application/ledger/event_codec.py:57:iter_import_stored_trade_events": 4006,
+        "stored_trade_event_to_ledger_event <- src/application/ledger/event_codec.py:31:encode_trade_event_for_storage": 4
+      }
+    },
+    {
+      "events": 2001,
+      "active_lots": 1,
+      "fixture_sha256": "916fae31c790e19fe9fb30af277e891978f31c692d8ea5f1153f22a027c6ad2a",
+      "storage": "disk",
+      "operation": "void_preview",
+      "ordinary_history_reads": 1,
+      "forced_full_history_reads": 0,
+      "all_history_reads": 1,
+      "conversion_calls": {
+        "_canonical_payload_to_ledger_event": 6005,
+        "list_trade_events": 1,
+        "stored_trade_event_to_ledger_event": 2001,
+        "_stored_trade_event_payload_to_ledger_event": 4003,
+        "resolve_strategy_metadata": 14002
+      },
+      "conversion_sites": {
+        "_canonical_payload_to_ledger_event <- src/application/ledger/event_codec.py:152:trade_event_application_payload": 2002,
+        "stored_trade_event_to_ledger_event <- src/application/ledger/event_codec.py:123:valid_void_target_event_id": 2001,
+        "_stored_trade_event_payload_to_ledger_event <- src/application/ledger/event_codec.py:102:stored_trade_event_to_ledger_event": 2001,
+        "_canonical_payload_to_ledger_event <- src/application/ledger/event_codec.py:109:_stored_trade_event_payload_to_ledger_event": 4003,
+        "_stored_trade_event_payload_to_ledger_event <- src/application/ledger/event_codec.py:57:iter_import_stored_trade_events": 2002
+      }
+    },
+    {
+      "events": 2001,
+      "active_lots": 1,
+      "fixture_sha256": "916fae31c790e19fe9fb30af277e891978f31c692d8ea5f1153f22a027c6ad2a",
+      "storage": "disk",
+      "operation": "void_apply",
+      "ordinary_history_reads": 2,
+      "forced_full_history_reads": 1,
+      "all_history_reads": 3,
+      "conversion_calls": {
+        "_canonical_payload_to_ledger_event": 14014,
+        "list_trade_events": 2,
+        "stored_trade_event_to_ledger_event": 4004,
+        "_stored_trade_event_payload_to_ledger_event": 8008,
+        "resolve_strategy_metadata": 21002,
+        "list_position_projection_event_rows": 1
+      },
+      "conversion_sites": {
+        "_canonical_payload_to_ledger_event <- src/application/ledger/event_codec.py:152:trade_event_application_payload": 6006,
+        "stored_trade_event_to_ledger_event <- src/application/ledger/event_codec.py:123:valid_void_target_event_id": 4002,
+        "_stored_trade_event_payload_to_ledger_event <- src/application/ledger/event_codec.py:102:stored_trade_event_to_ledger_event": 4004,
+        "_canonical_payload_to_ledger_event <- src/application/ledger/event_codec.py:109:_stored_trade_event_payload_to_ledger_event": 8008,
+        "_stored_trade_event_payload_to_ledger_event <- src/application/ledger/event_codec.py:57:iter_import_stored_trade_events": 4004,
+        "stored_trade_event_to_ledger_event <- src/application/ledger/event_codec.py:31:encode_trade_event_for_storage": 2
+      }
+    },
+    {
+      "events": 2001,
+      "active_lots": 1,
+      "fixture_sha256": "916fae31c790e19fe9fb30af277e891978f31c692d8ea5f1153f22a027c6ad2a",
+      "storage": "disk",
+      "operation": "repair_preview",
+      "ordinary_history_reads": 1,
+      "forced_full_history_reads": 0,
+      "all_history_reads": 1,
+      "conversion_calls": {
+        "_canonical_payload_to_ledger_event": 8008,
+        "list_trade_events": 1,
+        "stored_trade_event_to_ledger_event": 4003,
+        "_stored_trade_event_payload_to_ledger_event": 6006,
+        "resolve_strategy_metadata": 14004
+      },
+      "conversion_sites": {
+        "_canonical_payload_to_ledger_event <- src/application/ledger/event_codec.py:152:trade_event_application_payload": 2002,
+        "stored_trade_event_to_ledger_event <- src/application/ledger/event_codec.py:123:valid_void_target_event_id": 4002,
+        "_stored_trade_event_payload_to_ledger_event <- src/application/ledger/event_codec.py:102:stored_trade_event_to_ledger_event": 4003,
+        "_canonical_payload_to_ledger_event <- src/application/ledger/event_codec.py:109:_stored_trade_event_payload_to_ledger_event": 6006,
+        "stored_trade_event_to_ledger_event <- src/application/ledger/interventions.py:214:_preview_event_to_trade_event": 1,
+        "_stored_trade_event_payload_to_ledger_event <- src/application/ledger/event_codec.py:57:iter_import_stored_trade_events": 2003
+      }
+    },
+    {
+      "events": 2001,
+      "active_lots": 1,
+      "fixture_sha256": "916fae31c790e19fe9fb30af277e891978f31c692d8ea5f1153f22a027c6ad2a",
+      "storage": "disk",
+      "operation": "repair_apply",
+      "ordinary_history_reads": 4,
+      "forced_full_history_reads": 1,
+      "all_history_reads": 5,
+      "conversion_calls": {
+        "list_trade_events": 4,
+        "_canonical_payload_to_ledger_event": 26031,
+        "stored_trade_event_to_ledger_event": 12015,
+        "_stored_trade_event_payload_to_ledger_event": 16021,
+        "resolve_strategy_metadata": 21006,
+        "list_position_projection_event_rows": 1
+      },
+      "conversion_sites": {
+        "_canonical_payload_to_ledger_event <- src/application/ledger/event_codec.py:152:trade_event_application_payload": 10010,
+        "stored_trade_event_to_ledger_event <- src/application/ledger/event_codec.py:123:valid_void_target_event_id": 12006,
+        "_stored_trade_event_payload_to_ledger_event <- src/application/ledger/event_codec.py:102:stored_trade_event_to_ledger_event": 12015,
+        "_canonical_payload_to_ledger_event <- src/application/ledger/event_codec.py:109:_stored_trade_event_payload_to_ledger_event": 16021,
+        "stored_trade_event_to_ledger_event <- src/application/ledger/interventions.py:214:_preview_event_to_trade_event": 5,
+        "_stored_trade_event_payload_to_ledger_event <- src/application/ledger/event_codec.py:57:iter_import_stored_trade_events": 4006,
+        "stored_trade_event_to_ledger_event <- src/application/ledger/event_codec.py:31:encode_trade_event_for_storage": 4
+      }
+    }
+  ],
+  "projector_implementation_fingerprint": "c2c97f2727ef5f76374766e29b6b50f9b8e0dcf35113e84771faa15a2f6cb472"
+}
