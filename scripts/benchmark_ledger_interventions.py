@@ -30,6 +30,7 @@ from domain.domain.ledger import ContractKey, TradeEvent
 from src.application.ledger import api, interventions
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.ledger.repository_schema import initialize_ledger_connection
+from src.application.ledger.projector_implementation import loaded_projector_implementation_fingerprint
 
 NOW_MS = 1_800_000_500_000
 TARGET_ID = "active-000"
@@ -152,8 +153,11 @@ def count_operation(repo, operation: str, confirmation: str) -> dict:
 def compare_timing_reports(before: dict, after: dict) -> list[str]:
     """Check the issue's engineering budgets against a matching local baseline."""
     failures = []
-    for key in ("python", "sqlite", "host", "machine", "fixed_clock_ms"):
-        if before[key] != after[key]:
+    if before["mode"] != "timing" or after["mode"] != "timing":
+        return ["timing comparison requires two timing reports"]
+    for key in ("python", "sqlite", "host", "machine", "fixed_clock_ms",
+                "executable_sha256", "storage_settings"):
+        if before.get(key) != after.get(key):
             failures.append(f"environment differs: {key}")
     for report in (before, after):
         if report["mode"] != "timing" or report["warmups"] < 2 or report["samples"] < 20:
@@ -183,6 +187,61 @@ def compare_timing_reports(before: dict, after: dict) -> list[str]:
     return failures
 
 
+def check_count_budgets(report: dict) -> list[str]:
+    if report["mode"] != "counts":
+        return ["count acceptance requires a counts report"]
+    failures = []
+    ordinary_limits = {"void_preview": 1, "repair_preview": 1, "void_apply": 2, "repair_apply": 4}
+    conversion_limits = {"void_preview": (2, 2), "repair_preview": (2, 4),
+        "void_apply": (5, 7), "repair_apply": (7, 18)}
+    for row in report["results"]:
+        op, n = row["operation"], row["events"]
+        label = f"{row['storage']}/{n}/{row['active_lots']}/{op}"
+        if row["ordinary_history_reads"] > ordinary_limits[op]:
+            failures.append(f"ordinary history read budget exceeded: {label}")
+        if row["forced_full_history_reads"] != int(op.endswith("apply")):
+            failures.append(f"independent forced-full read budget violated: {label}")
+        if row["all_history_reads"] != row["ordinary_history_reads"] + row["forced_full_history_reads"]:
+            failures.append(f"inconsistent all-history read count: {label}")
+        factor, constant = conversion_limits[op]
+        canonical = row["conversion_calls"].get("_canonical_payload_to_ledger_event")
+        if canonical is None or canonical > factor * n + constant:
+            failures.append(f"canonical conversion budget exceeded: {label}")
+        if row["active_lots"] == 1 and op.startswith("repair"):
+            limit = 2 * n + 1 if op.endswith("preview") else 6 * n + 9
+            if row["conversion_calls"].get("stored_trade_event_to_ledger_event", 0) > limit:
+                failures.append(f"single-lot public conversion budget exceeded: {label}")
+    return failures
+
+
+def compare_count_reports(before: dict, after: dict) -> list[str]:
+    if before["mode"] != "counts" or after["mode"] != "counts":
+        return ["count comparison requires two counts reports"]
+    failures = check_count_budgets(after)
+    for key in ("python", "sqlite", "host", "machine", "fixed_clock_ms",
+                "executable_sha256", "storage_settings"):
+        if before.get(key) != after.get(key):
+            failures.append(f"environment differs: {key}")
+    def row_key(row):
+        return row["events"], row["active_lots"], row["storage"], row["operation"]
+    baseline = {row_key(row): row for row in before["results"]}
+    optimized = {row_key(row): row for row in after["results"]}
+    if set(baseline) != set(optimized):
+        failures.append("count comparison requires the same fixture matrix")
+    for key, row in optimized.items():
+        previous = baseline.get(key)
+        if previous is None:
+            continue
+        if row["fixture_sha256"] != previous["fixture_sha256"]:
+            failures.append(f"fixture differs: {key}")
+        for metric in ("ordinary_history_reads", "forced_full_history_reads", "all_history_reads"):
+            if row[metric] > previous[metric]:
+                failures.append(f"{metric} regressed: {key}")
+        if row["conversion_calls"].get("_canonical_payload_to_ledger_event", 0) > previous["conversion_calls"].get("_canonical_payload_to_ledger_event", 0):
+            failures.append(f"canonical conversions regressed: {key}")
+    return failures
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sizes", type=int, nargs="+", default=[1001, 8001, 20001])
@@ -193,15 +252,19 @@ def main() -> None:
     parser.add_argument("--warmups", type=int, default=2)
     parser.add_argument("--mode", choices=["timing", "counts", "profile"], default="timing")
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--baseline", type=Path, help="Compare a full timing run with unchanged-main timing")
+    parser.add_argument("--baseline", type=Path, help="Compare matching timing or counts reports")
     args = parser.parse_args()
+    if args.baseline is not None and args.mode == "profile":
+        parser.error("--baseline supports timing and counts modes")
     interventions.now_ms = lambda: NOW_MS
     report = {"schema": "ledger_interventions_benchmark.v1", "source_sha": subprocess.check_output(
         ["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip(),
         "python": sys.version, "executable": Path(sys.executable).name,
         "executable_sha256": hashlib.sha256(Path(sys.executable).read_bytes()).hexdigest(),
         "sqlite": sqlite3.sqlite_version, "host": platform.platform(),
-        "machine": platform.machine(), "warmups": args.warmups, "samples": args.samples,
+        "machine": platform.machine(), "warmups": args.warmups if args.mode == "timing" else 0,
+        "samples": args.samples if args.mode == "timing" else 1,
+        "projector_implementation_fingerprint": loaded_projector_implementation_fingerprint(),
         "mode": args.mode, "fixed_clock_ms": NOW_MS, "storage_settings": {}, "results": []}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="ledger-intervention-benchmark-") as tmp:
@@ -245,8 +308,12 @@ def main() -> None:
                     report["results"].append(row)
                     args.output.write_text(json.dumps(report, indent=2) + "\n")
                     print(json.dumps(row), flush=True)
-    if args.baseline is not None:
-        failures = compare_timing_reports(json.loads(args.baseline.read_text()), report)
+    if args.mode == "counts" or args.baseline is not None:
+        if args.baseline is None:
+            failures = check_count_budgets(report)
+        else:
+            compare = compare_count_reports if args.mode == "counts" else compare_timing_reports
+            failures = compare(json.loads(args.baseline.read_text()), report)
         report["acceptance"] = {"passed": not failures, "failures": failures}
         args.output.write_text(json.dumps(report, indent=2) + "\n")
         if failures:
