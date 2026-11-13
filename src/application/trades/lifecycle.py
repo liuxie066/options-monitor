@@ -220,10 +220,10 @@ def _resolve_zero_price_option_close(
     }
     try:
         if not apply_changes:
-            accept_option_close_evidence(
+            accepted = accept_option_close_evidence(
                 repo, contract_identity=contract_identity, evidence=evidence, apply_changes=False,
             )
-            return _preview_zero_price_option_close(deal, repo=repo)
+            return _preview_zero_price_option_close(accepted, repo=repo)
         accepted = record_zero_price_option_close(
             repo,
             deal=deal,
@@ -349,21 +349,27 @@ def _resolve_zero_price_option_close(
 
 
 def _preview_zero_price_option_close(
-    deal: NormalizedTradeDeal,
+    accepted: dict[str, Any],
     *,
     repo: Any,
 ) -> LifecycleTradeResolution:
-    case = _case_from_option_deal(deal)
-    evidence = _evidence_from_deal(
-        deal,
-        evidence_type="option_zero_price_close",
-        case_id=case["case_id"],
+    evidence = dict(accepted["lifecycle_evidence"])
+    case = _case_with_option_evidence_context(
+        dict(accepted["lifecycle_case"]), evidence,
     )
     stock_evidences = _find_matching_stock_evidences(
         repo,
         option_case=case,
         option_evidence=evidence,
+        preview=True,
     )
+    consumed = {
+        str(row.get("source_key") or "")
+        for row in repo.list_trade_lifecycle_source_consumptions(case_id=case["case_id"])
+        if row.get("source_role") == "stock_settlement"
+    }
+    stock_evidences = [row for row in stock_evidences
+        if str(row.get("source_event_id") or "") not in consumed]
     stock_evidence = stock_evidences[0] if len(stock_evidences) == 1 else None
     decision = _lifecycle_decision(case, stock_evidence=stock_evidence)
     diagnostics = {
@@ -1190,6 +1196,7 @@ def _find_matching_stock_evidences(
     *,
     option_case: dict[str, Any],
     option_evidence: dict[str, Any] | None = None,
+    preview: bool = False,
 ) -> list[dict[str, Any]]:
     list_fn = getattr(repo, "list_trade_lifecycle_evidence", None)
     if not callable(list_fn):
@@ -1208,6 +1215,19 @@ def _find_matching_stock_evidences(
             stock_evidence=dict(row),
             statuses=PENDING_STATUSES | FINAL_STATUSES,
         )
+        # Apply has persisted this validated case/evidence before matching. Preview
+        # includes that same candidate without hiding competing persisted cases.
+        if (
+            preview
+            and str(match_case.get("status") or "").strip().lower()
+            in PENDING_STATUSES | FINAL_STATUSES
+            and _stock_matches_lifecycle_close(_case_with_timing_policy(repo, match_case), row)
+            and not any(
+                str(item.get("case_id") or "") == str(match_case.get("case_id") or "")
+                for item in global_matches
+            )
+        ):
+            global_matches.append(match_case)
         if (
             len(global_matches) == 1
             and str(global_matches[0].get("case_id") or "").strip()
