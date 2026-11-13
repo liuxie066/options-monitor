@@ -7,6 +7,7 @@ from contextlib import closing, nullcontext
 from pathlib import Path
 from typing import Any
 
+from src.application.ledger._lifecycle_evidence_filters import _append_lifecycle_evidence_filters
 from src.application.ledger.event_codec import (
     stored_trade_event_to_ledger_event,
     trade_event_application_payload,
@@ -378,15 +379,9 @@ class _ReadOnlyTradeReconciliationEvidenceRepository:
     ) -> list[dict[str, Any]]:
         clauses: list[str] = []
         params: list[Any] = []
-        if case_id:
-            clauses.append("case_id = ?")
-            params.append(str(case_id).strip())
-        if account:
-            clauses.append("account = ?")
-            params.append(str(account).strip().lower())
-        if symbol:
-            clauses.append("symbol = ?")
-            params.append(str(symbol).strip().upper())
+        _append_lifecycle_evidence_filters(
+            clauses, params, case_id=case_id, account=account, symbol=symbol,
+        )
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         order = "ORDER BY created_at_ms ASC, evidence_id ASC" if clauses else ""
         with closing(self._connect()) as conn:

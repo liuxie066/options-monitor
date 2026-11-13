@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ._lifecycle_evidence_filters import _append_lifecycle_evidence_filters
 from .repository_schema import (
     Any,
     Mapping,
@@ -695,15 +696,9 @@ class LifecycleCaseRepositoryMixin:
     ) -> list[dict[str, Any]]:
         clauses: list[str] = []
         params: list[Any] = []
-        if case_id:
-            clauses.append("case_id = ?")
-            params.append(str(case_id).strip())
-        if account:
-            clauses.append("account = ?")
-            params.append(str(account).strip().lower())
-        if symbol:
-            clauses.append("symbol = ?")
-            params.append(str(symbol).strip().upper())
+        _append_lifecycle_evidence_filters(
+            clauses, params, case_id=case_id, account=account, symbol=symbol,
+        )
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._optional_conn(conn) as active_conn:
             rows = active_conn.execute(
