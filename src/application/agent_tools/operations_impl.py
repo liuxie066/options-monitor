@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, cast
 
+from domain.domain.assigned_stock import _normalize_quote_snapshots
+
 from src.application.secret_store import (
     INBOUND_OPERATION_HMAC_KEY,
     SecretError,
@@ -156,21 +158,7 @@ def _optional_path(value: Any) -> Path | None:
 
 
 def _quote_snapshot_rows(value: Any) -> list[dict[str, Any]]:
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return [dict(item) for item in value if isinstance(item, dict)]
-    if isinstance(value, dict):
-        rows: list[dict[str, Any]] = []
-        for key, item in value.items():
-            if isinstance(item, dict):
-                row = dict(item)
-                row.setdefault("symbol", key)
-                rows.append(row)
-            else:
-                rows.append({"symbol": key, "spot": item})
-        return rows
-    return []
+    return _normalize_quote_snapshots(value)
 
 
 def _assigned_stock_row_matches(
