@@ -37,16 +37,16 @@ def http_json(
         error = f"iLink network error: {type(exc).__name__}"
     # Raise outside the handler so response bodies/reasons cannot leak via a chain.
     if error:
-        raise WechatClawbotError(error)
+        raise WechatClawbotError(error, request_attempted=True)
 
     try:
         parsed = json.loads(body or "{}")
     except Exception as exc:
         error = f"iLink returned invalid JSON ({type(exc).__name__})"
     if error:
-        raise WechatClawbotError(error)
+        raise WechatClawbotError(error, request_attempted=True)
     if not isinstance(parsed, dict):
-        raise WechatClawbotError("iLink JSON response must be an object")
+        raise WechatClawbotError("iLink JSON response must be an object", request_attempted=True)
     return parsed
 
 

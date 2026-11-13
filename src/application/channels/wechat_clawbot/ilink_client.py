@@ -14,7 +14,9 @@ ILINK_CHANNEL_VERSION = "1.0.0"
 
 
 class WechatClawbotError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, request_attempted: bool = False):
+        super().__init__(message)
+        self.request_attempted = request_attempted
 
 
 def http_json(

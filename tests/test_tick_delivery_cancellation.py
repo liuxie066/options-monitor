@@ -386,6 +386,114 @@ def test_wechat_completed_response_survives_cancel_and_fallback_does_not_start(
     assert len(posts) == 1, "cancelled context fallback must not start a second POST"
 
 
+@pytest.mark.parametrize(
+    ("cancellation_stage", "expected_status"),
+    [("in_flight_failure", "ambiguous"), ("before_io", "pending")],
+)
+def test_wechat_cancel_preserves_durable_unknown(
+    monkeypatch, tmp_path, cancellation_stage, expected_status,
+):
+    from src.application.channels.wechat_clawbot import ilink_client
+
+    monkeypatch.setattr(flow, "report_system_meta_signal", lambda **_kwargs: "offline")
+    state_dir = _wechat_state(tmp_path)
+    config = shared._config()
+    config["notifications"]["wechat_clawbot_state_dir"] = str(state_dir)
+    stopped = threading.Event()
+    posts = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            stopped.set()
+            raise urllib.error.URLError("offline incomplete WeChat response")
+
+    def urlopen(request, **_kwargs):
+        posts.append(request)
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    actual_adapter = adapters.select_notification_delivery_adapter("wechat_clawbot")
+    send_calls = []
+
+    def send(**kwargs):
+        send_calls.append(kwargs["idempotency_key"])
+        if len(send_calls) == 1:
+            return dict(EXPLICIT_FAILURE)
+        return actual_adapter.send_fn(**kwargs)
+
+    monkeypatch.setattr(
+        flow,
+        "select_notification_delivery_adapter",
+        lambda _provider: SimpleNamespace(
+            send_fn=send,
+            normalize_fn=actual_adapter.normalize_fn,
+            failure_stage=actual_adapter.failure_stage,
+        ),
+    )
+    bundle = shared._request(
+        tmp_path,
+        run_id=f"wechat-unknown-{cancellation_stage}",
+        config=config,
+        accounts=("lx",),
+        fixed=True,
+        delivery_only=False,
+        pipeline_ok=True,
+        trigger_kind="scheduled",
+    )
+    deadline = monotonic() + 30
+    if cancellation_stage == "before_io":
+        shared._prepare_flow(bundle.request)
+        stopped.set()
+        # The actual low-level bridge and selected adapter must both retain the
+        # direct TimeoutError contract before dispatching any native request.
+        with pytest.raises(TimeoutError, match="cancelled"):
+            ilink_client.http_json(
+                "POST", "https://example.invalid/ilink/bot/sendmessage", {},
+                deadline=deadline, cancelled=stopped.is_set,
+            )
+        with pytest.raises(TimeoutError, match="cancelled"):
+            actual_adapter.send_fn(
+                base=tmp_path,
+                channel="wechat_clawbot",
+                target="wechat:ops",
+                message="unattempted pending obligation",
+                notifications=config["notifications"],
+                idempotency_key="wechat-unattempted-frozen-key",
+                deadline=deadline,
+                cancelled=stopped.is_set,
+            )
+    request = replace(bundle.request, cancelled=stopped.is_set, deadline=deadline)
+    _run_allowing_cancel(request)
+    envelope = _fixed_delivery(tmp_path)
+    observations = {
+        "stage": cancellation_stage,
+        "actual_status": envelope["status"],
+        "adapter_calls": len(send_calls),
+        "native_message_posts": len(posts),
+        "notify_failures": request.tick_metrics.get("notify_failures"),
+    }
+    assert stopped.is_set()
+    if cancellation_stage == "before_io":
+        assert send_calls == [], observations
+        assert posts == [], observations
+        assert not envelope.get("last_attempt_at_utc"), observations
+    else:
+        assert len(send_calls) == 2, observations
+        assert len(posts) == 1, observations
+    assert envelope["status"] == expected_status, observations
+    if cancellation_stage == "in_flight_failure":
+        failure, = request.tick_metrics["notify_failures"]
+        assert failure["ambiguous_send"] is True, observations
+
+
 @pytest.mark.parametrize("route_kind", ["legacy", "fanout"])
 @pytest.mark.parametrize("recovery", [False, True], ids=["failure", "recovery"])
 def test_health_meta_expired_deadline_keeps_local_transition_without_io(
