@@ -7,6 +7,7 @@ from typing import Any, Iterable, Mapping
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from src.application.candidate_snapshot_contract import (
+    BENIGN_OPENING_NOT_APPLICABLE_REASONS,
     CandidateSnapshotContractError,
     assert_current_candidate_artifact_boundary,
     combo_opening_status,
@@ -143,7 +144,11 @@ def _opening_status(scopes: list[dict[str, Any]], selected_count: int) -> str:
     if observed and all(row.get("reason_code") == "market_closed" for row in observed):
         return "market_closed"
     states = {str(row.get("status") or "") for row in scopes}
-    if states == {"completed"}:
+    if states <= {"completed", "not_applicable"} and all(
+        row.get("status") != "not_applicable"
+        or row.get("reason_code") in BENIGN_OPENING_NOT_APPLICABLE_REASONS
+        for row in scopes
+    ):
         if any(row.get("reason_code") == "partial_data" for row in scopes):
             return "partial_data"
         return "candidates_found" if selected_count else "no_candidate"

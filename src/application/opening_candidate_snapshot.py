@@ -26,6 +26,7 @@ from domain.domain.strategy_identity import candidate_ranking_profile, validate_
 from domain.domain.symbol_identity import symbol_market
 from domain.domain.risk_capacity import broker_capacity_binding
 from src.application.candidate_snapshot_contract import (
+    BENIGN_OPENING_NOT_APPLICABLE_REASONS as _BENIGN_ACCOUNT_NOT_APPLICABLE_REASONS,
     CandidateSnapshotContractError,
     OPENING_BROKER_SNAPSHOT_SCHEMA,
     assert_current_candidate_artifact_boundary,
@@ -79,10 +80,6 @@ _CLEAN_NO_CANDIDATE_REASONS = frozenset(
         "",
     }
 )
-_BENIGN_ACCOUNT_NOT_APPLICABLE_REASONS = frozenset(
-    {"covered_call_underlying_not_held"}
-)
-
 
 class OpeningCandidateSnapshotError(RuntimeError):
     """Raised when an opening-candidate snapshot cannot be trusted."""

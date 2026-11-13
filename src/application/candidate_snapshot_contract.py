@@ -11,6 +11,9 @@ from typing import Any, Iterable, Mapping
 
 
 OPENING_BROKER_SNAPSHOT_SCHEMA = "opening_candidate_snapshot.v4"
+BENIGN_OPENING_NOT_APPLICABLE_REASONS = frozenset(
+    {"covered_call_underlying_not_held"}
+)
 
 
 REQUIRED_CANDIDATE_DEPENDENCIES = frozenset(
@@ -573,6 +576,7 @@ def combo_opening_status(
 
 
 __all__ = [
+    "BENIGN_OPENING_NOT_APPLICABLE_REASONS",
     "CANDIDATE_RUN_MODE_FIELDS",
     "CANDIDATE_CAPTURE_STATUSES",
     "CandidateSnapshotContractError",
