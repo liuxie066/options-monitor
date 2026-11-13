@@ -1951,6 +1951,112 @@ def test_resolve_trade_lifecycle_stock_first_then_long_put_exercise_records_exer
     assert len([item for item in repo.list_trade_events() if item.get("event_type") == "exercise"]) == 1
 
 
+@pytest.mark.parametrize("existing_case", [False, True])
+@pytest.mark.parametrize("position_side,close_side,stock_side,action", [
+    ("short", "buy", "buy", "assignment"),
+    ("long", "sell", "sell", "exercise"),
+])
+@pytest.mark.parametrize("stock_account", [None, "REAL_1", "REAL_OTHER"])
+def test_zero_price_preview_uses_canonical_identity_without_writes(
+    tmp_path, existing_case, position_side, close_side, stock_side, action, stock_account,
+) -> None:
+    from contextlib import closing
+    from src.application.trades.lifecycle import _evidence_from_deal
+
+    repo = _open_lot(tmp_path, symbol="AAPL", side=position_side, contracts=1,
+        strike=180.0, premium_per_share=1.5)
+    option = _deal(deal_id="preview-option", symbol="AAPL", option_type="put",
+        side=close_side, contracts=1, price=0.0, strike=180.0,
+        expiration_ymd="2026-05-22", currency="USD", trade_time_ms=1779468493916)
+    if existing_case:
+        pending = resolve_trade_deal(option, repo=repo, state={}, apply_changes=True)
+        assert pending.reason == "close_reason_pending"
+    if stock_account:
+        stock = _deal(deal_id="preview-stock", symbol="AAPL", option_type=None,
+            futu_account_id=stock_account, side=stock_side, position_effect=None,
+            contracts=100, price=180.0, strike=None, multiplier=None,
+            expiration_ymd=None, currency="USD", trade_time_ms=1779468400000)
+        repo.upsert_trade_lifecycle_evidence(_evidence_from_deal(
+            stock, evidence_type="stock_settlement_leg", case_id=None))
+
+    with closing(repo._connect()) as conn:
+        before = "\n".join(conn.iterdump())
+    preview = resolve_trade_deal(option, repo=repo, state={}, apply_changes=False)
+    with closing(repo._connect()) as conn:
+        assert "\n".join(conn.iterdump()) == before
+    expected = action if stock_account == "REAL_1" else "lifecycle"
+    assert preview.status == "dry_run"
+    assert preview.action == expected
+    assert preview.reason == (
+        f"preview_{action}" if expected != "lifecycle" else "waiting_settlement_evidence")
+    assert preview.diagnostics["lifecycle_case"]["futu_account_id"] == "REAL_1"
+    assert preview.diagnostics["broker_evidence_accepted"] is False
+
+    applied = resolve_trade_deal(option, repo=repo, state={}, apply_changes=True)
+    assert applied.action == expected
+    assert {row["case_id"] for row in repo.list_trade_lifecycle_cases()} == {
+        preview.diagnostics["lifecycle_case"]["case_id"]}
+
+
+def test_zero_price_preview_ignores_consumed_stock_for_next_partial_close(tmp_path) -> None:
+    from contextlib import closing
+    from src.application.trades.lifecycle import _evidence_from_deal
+
+    repo = _open_lot(tmp_path, symbol="AAPL", side="short", contracts=2,
+        strike=180.0, premium_per_share=1.5)
+    stock = _deal(deal_id="consumed-stock", symbol="AAPL", option_type=None,
+        side="buy", position_effect=None, contracts=100, price=180.0, strike=None,
+        multiplier=None, expiration_ymd=None, currency="USD", trade_time_ms=1779468400000)
+    repo.upsert_trade_lifecycle_evidence(_evidence_from_deal(
+        stock, evidence_type="stock_settlement_leg", case_id=None))
+    first = _deal(deal_id="first-partial", symbol="AAPL", contracts=1,
+        price=0.0, strike=180.0, expiration_ymd="2026-05-22", currency="USD",
+        trade_time_ms=1779468493916)
+    assigned = resolve_trade_deal(first, repo=repo, state={}, apply_changes=True)
+    assert assigned.action == "assignment"
+    assert assigned.reason == "assignment_partially_recorded"
+    second = replace(first, deal_id="second-partial", order_id="second-order")
+    with closing(repo._connect()) as conn:
+        before = "\n".join(conn.iterdump())
+    preview = resolve_trade_deal(second, repo=repo, state={}, apply_changes=False)
+    assert preview.action == "lifecycle"
+    assert preview.reason == "waiting_settlement_evidence"
+    assert preview.diagnostics["matching_stock_evidence_ids"] == []
+    with closing(repo._connect()) as conn:
+        assert "\n".join(conn.iterdump()) == before
+    applied = resolve_trade_deal(second, repo=repo, state={}, apply_changes=True)
+    assert applied.action == "lifecycle"
+    assert applied.reason == "close_reason_pending"
+
+
+def test_zero_price_preview_preserves_global_stock_ambiguity(tmp_path) -> None:
+    from contextlib import closing
+    from src.application.trades.lifecycle import _evidence_from_deal
+
+    repo = _open_lot(tmp_path, symbol="AAPL", side="short", contracts=1,
+        strike=180.0, premium_per_share=1.5)
+    _persist_lot(repo, symbol="AAPL", option_type="call", side="long", contracts=1,
+        strike=180.0, premium_per_share=1.5)
+    put = _deal(deal_id="ambiguous-put", symbol="AAPL", contracts=1,
+        price=0.0, strike=180.0, expiration_ymd="2026-05-22", currency="USD",
+        trade_time_ms=1779468493916)
+    call = replace(put, deal_id="ambiguous-call", option_type="call", side="sell")
+    pending = resolve_trade_deal(call, repo=repo, state={}, apply_changes=True)
+    assert pending.reason == "close_reason_pending"
+    stock = _deal(deal_id="ambiguous-stock", symbol="AAPL", option_type=None,
+        side="buy", position_effect=None, contracts=100, price=180.0, strike=None,
+        multiplier=None, expiration_ymd=None, currency="USD", trade_time_ms=1779468400000)
+    repo.upsert_trade_lifecycle_evidence(_evidence_from_deal(
+        stock, evidence_type="stock_settlement_leg", case_id=None))
+    with closing(repo._connect()) as conn:
+        before = "\n".join(conn.iterdump())
+    preview = resolve_trade_deal(put, repo=repo, state={}, apply_changes=False)
+    assert preview.reason == "waiting_settlement_evidence"
+    assert preview.diagnostics["matching_stock_evidence_ids"] == []
+    with closing(repo._connect()) as conn:
+        assert "\n".join(conn.iterdump()) == before
+
+
 def test_resolve_trade_lifecycle_stock_first_then_option_leg_records_assignment(tmp_path) -> None:
     repo = _open_lot(tmp_path)
 
