@@ -310,9 +310,11 @@ def test_d1_a14_cash_candidate_and_brief_dependency_evidence(tmp_path, monkeypat
     else:
         assert allocation["allocation_reason"] == "cash_capacity_fact_unavailable"
     if arm == "known_currency_gap":
-        from src.infrastructure.exchange_rates import project_exchange_rate_snapshot
-        quoted = datetime.now(timezone.utc)
-        fx = project_exchange_rate_snapshot({"schema_version": 2, "pairs": {
+        from src.infrastructure import exchange_rates
+        # Quote creation and use-time eligibility share the fixed trading session.
+        monkeypatch.setattr(exchange_rates, "_utc_now", lambda: now)
+        quoted = now
+        fx = exchange_rates.project_exchange_rate_snapshot({"schema_version": 2, "pairs": {
             name: {"rate": rate, "source": "tencent_quote", "quote_at_utc": quoted.isoformat(),
                    "observed_at_utc": quoted.isoformat()}
             for name, rate in (("USDCNY", 7.2), ("HKDCNY", 0.92))
