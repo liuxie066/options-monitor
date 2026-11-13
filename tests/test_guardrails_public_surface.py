@@ -124,6 +124,28 @@ def test_all_resolves_sorted_and_concatenated_sequences() -> None:
     assert guardrails_check.declared_public_names(source) == frozenset({"a", "b", "c"})
 
 
+@pytest.mark.parametrize("source", [
+    "_EXPORTS = ['kept']\n__all__ = _EXPORTS\n_EXPORTS = ['gone']\n",
+    "_EXPORTS = ['gone']\n_EXPORTS = ['kept']\n__all__ = _EXPORTS\n",
+    "_ORIGINAL = ['kept']\n_EXPORTS = _ORIGINAL\n_ORIGINAL = ['gone']\n__all__ = _EXPORTS\n",
+    "_EXPORTS: list[str] = ['kept']\n__all__ = _EXPORTS\n_EXPORTS: list[str] = ['gone']\n",
+    "_EXPORTS = ['kept']\n_EXPORTS = _EXPORTS + ['other']\n__all__ = _EXPORTS\n",
+    "_EXPORTS = ['kept']\n_EXPORTS: list[str]\n__all__ = _EXPORTS\n",
+    "_EXPORTS = ['kept']\n__all__ = _ALIAS = _EXPORTS\n_EXPORTS = ['gone']\n",
+    "_KEYS = {'kept': 1}\n_EXPORTS = list(_KEYS)\n_KEYS = {'gone': 2}\n__all__ = _EXPORTS\n",
+])
+def test_all_auxiliary_bindings_follow_assignment_order(source: str) -> None:
+    namespace = {}
+    exec(source, namespace)
+    assert guardrails_check.declared_public_names(source) == frozenset(namespace["__all__"])
+
+
+def test_all_rejects_forward_auxiliary_reference() -> None:
+    source = "_EXPORTS = _LATER\n_LATER = ['gone']\n__all__ = _EXPORTS\n"
+    with pytest.raises(guardrails_check.PublicSurfaceUnavailable):
+        guardrails_check.declared_public_names(source)
+
+
 def test_unresolvable_all_is_reported_instead_of_guessed() -> None:
     source = "__all__ = compute_exports()\n"
 
@@ -266,6 +288,31 @@ def test_missing_base_revision_is_refused_loudly(monkeypatch, tmp_path: Path) ->
 
     with pytest.raises(SystemExit, match="not available locally"):
         guardrails_check.check_public_surface("does-not-exist")
+
+
+@pytest.mark.parametrize("staged", [False, True])
+def test_auxiliary_rebinding_cannot_hide_export_retirement(monkeypatch, tmp_path, staged) -> None:
+    repo = _bare_repo(tmp_path)
+    relative = "src/pkg/mod.py"
+    _write(repo, relative,
+        "def gone():\n    pass\n_EXPORTS = ['gone']\n__all__ = _EXPORTS\n")
+    base = _commit(repo, "base")
+    _write(repo, relative,
+        "def kept():\n    pass\n_EXPORTS = ['kept']\n__all__ = _EXPORTS\n_EXPORTS = ['gone']\n")
+    if staged:
+        _run(repo, "add", relative)
+    monkeypatch.setattr(guardrails_check, "ROOT", repo)
+
+    issues = guardrails_check.check_public_surface(base, staged=staged)
+    assert len(issues) == 1
+    assert relative in issues[0].render()
+    assert "gone" in issues[0].render()
+    assert "kept" not in issues[0].render()
+
+    _write_ledger(repo, [{"module": relative, "name": "gone", "reason": _reason()}])
+    if staged:
+        _run(repo, "add", guardrails_check.PUBLIC_SURFACE_LEDGER.as_posix())
+    assert guardrails_check.check_public_surface(base, staged=staged) == []
 
 
 def test_declared_name_removal_requires_a_retirement_record(monkeypatch, tmp_path: Path) -> None:
