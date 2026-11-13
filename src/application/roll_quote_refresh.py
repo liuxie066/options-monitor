@@ -126,6 +126,7 @@ def refresh_roll_quote_evidence(
     evaluation's ``state_time >= snapshot`` coherence rule still holds.
     """
     provider = resolve_market_data_provider(dict(config))
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
     rows_by_symbol: dict[str, list[dict[str, Any]]] = {}
     market_state: dict[str, dict[str, Any]] = {}
     quote_rights: dict[str, dict[str, Any]] = {}
@@ -186,6 +187,7 @@ def refresh_roll_quote_evidence(
             gateway = provider.open_quote_gateway(
                 host=str(target.get("host") or "127.0.0.1"),
                 port=int(target.get("port") or 11111),
+                **controls,
             )
         except Exception:
             check_fetch_control(deadline, cancelled)

@@ -1262,7 +1262,9 @@ def _fetch_one_inprocess(
             raise RuntimeError(
                 "scheduled fetch plan is not executable"
             )
-        gateway = provider_by_name(market_data_provider).get_pooled_quote_gateway(_gateway_pool, host=host, port=port, chain_cache=True)
+        gateway = provider_by_name(market_data_provider).get_pooled_quote_gateway(
+            _gateway_pool, host=host, port=port, chain_cache=True, **controls,
+        )
         if fetch_plan is None:
             rv_fetch_kwargs = (
                 {
@@ -1792,6 +1794,8 @@ def _warm_required_data_chain_cache_inprocess(
                     host=request.host,
                     port=request.port,
                     chain_cache=True,
+                    deadline=stop_monotonic,
+                    cancelled=cancelled,
                 )
                 result = fetch_option_chains(
                     market_data_provider=market_data_provider,

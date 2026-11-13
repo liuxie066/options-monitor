@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.performance.cash_conversion import RunFXError, decode_run_fx_snapshot as _decode
@@ -14,6 +14,7 @@ from src.application.tick_run_workspace import (
     write_run_state_bytes_once_safely,
 )
 from src.infrastructure.exchange_rates import current_exchange_rate_snapshot
+from src.infrastructure.fetch_control import check_fetch_control
 
 
 RUN_FX_NAME = "current_exchange_rates.v1.json"
@@ -34,23 +35,35 @@ def load_run_fx_snapshot(*, base: Path, run_id: str) -> tuple[dict[str, Any], st
     return _decode(raw, run_id=run_id)
 
 
-def seal_run_fx_snapshot(*, base: Path, run_id: str) -> tuple[dict[str, Any], str]:
+def seal_run_fx_snapshot(
+    *, base: Path, run_id: str, deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> tuple[dict[str, Any], str]:
+    check_fetch_control(deadline, cancelled)
     path = Path(base).resolve() / "output_runs" / run_id / "state" / RUN_FX_NAME
     try:
-        return load_run_fx_snapshot(base=base, run_id=run_id)
+        existing = load_run_fx_snapshot(base=base, run_id=run_id)
     except RunFXError as exc:
         if path.exists() or path.is_symlink() or str(exc) != "sealed FX artifact unavailable":
             raise
+    else:
+        check_fetch_control(deadline, cancelled)
+        return existing
     snapshot = current_exchange_rate_snapshot(
         cache_path=Path(base).resolve() / "output_shared" / "state" / "rate_cache.json",
+        **({"deadline": deadline, "cancelled": cancelled}
+           if deadline is not None or cancelled is not None else {}),
     )
+    check_fetch_control(deadline, cancelled)
+    payload = encode_run_fx_snapshot(snapshot, run_id=run_id)
+    check_fetch_control(deadline, cancelled)
     try:
         write_run_state_bytes_once_safely(
-            base=base,
-            run_id=run_id,
-            name=RUN_FX_NAME,
-            payload=encode_run_fx_snapshot(snapshot, run_id=run_id),
+            base=base, run_id=run_id, name=RUN_FX_NAME, payload=payload,
         )
     except AccountRunConfigError as exc:
         raise RunFXError("sealed FX artifact conflicts with this run") from exc
-    return load_run_fx_snapshot(base=base, run_id=run_id)
+    check_fetch_control(deadline, cancelled)
+    sealed = load_run_fx_snapshot(base=base, run_id=run_id)
+    check_fetch_control(deadline, cancelled)
+    return sealed

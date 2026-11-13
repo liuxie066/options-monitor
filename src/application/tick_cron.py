@@ -588,6 +588,13 @@ def _run_tick_process_group(
                 phases["cleanup_seconds"] = time.monotonic() - cleanup_started
         raise
     phases.update(business_wait_seconds=time.monotonic() - started, diagnostic_seconds=0.0, cleanup_seconds=0.0)
+    if returncode:
+        cleanup_started = time.monotonic()
+        try:
+            # A failed child can still have SDK descendants in our original group.
+            _stop_tick_process_group(proc, terminate_grace_seconds)
+        finally:
+            phases["cleanup_seconds"] = time.monotonic() - cleanup_started
     return subprocess.CompletedProcess(command, int(returncode))
 
 

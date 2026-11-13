@@ -401,6 +401,7 @@ def _retire_required_data_shadows_after_manifest(
 
 
 def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAccountExecutionOutcome:
+    check_fetch_control(request.deadline, request.cancelled)
     pre_account_execution_started = monotonic()
     try:
         account_ids = [normalize_account_label(item) for item in request.account_ids]
@@ -544,7 +545,11 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
         run_started_at_utc = datetime.now(timezone.utc)
         run_state_dir = run_repo.ensure_run_state_dir(request.base, request.run_id)
         fx_snapshot_sha256 = (
-            seal_run_fx_snapshot(base=request.base, run_id=request.run_id)[1]
+            seal_run_fx_snapshot(
+                base=request.base, run_id=request.run_id,
+                **({"deadline": request.deadline, "cancelled": request.cancelled}
+                   if request.deadline is not None or request.cancelled is not None else {}),
+            )[1]
             if not request.experience else None
         )
         scanning_configs = {

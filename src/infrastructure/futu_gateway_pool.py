@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import threading
-from typing import Any
+from typing import Any, Callable
 
+from src.infrastructure.fetch_control import check_fetch_control
 from src.infrastructure.opend_retcodes import OpenDRetCode, classify_opend_error
 
 
@@ -111,29 +112,42 @@ class ThreadLocalFutuGatewayPool:
             self._local.gateways = gateways
         return gateways
 
-    def get_gateway(self, *, host: str, port: int, chain_cache: bool) -> Any:
+    def get_gateway(
+        self, *, host: str, port: int, chain_cache: bool,
+        deadline: float | None = None, cancelled: Callable[[], bool] | None = None,
+    ) -> Any:
+        from src.infrastructure import futu_gateway
+
+        check_fetch_control(deadline, cancelled)
+        controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
         key = self._key(host, port, chain_cache)
         gateways = self._gateways()
         gateway = gateways.get(key)
         if gateway is not None:
+            # Probe a cached proxy under this request, rather than its initialization controls.
+            token = futu_gateway._FETCH_CONTROL.set((deadline, cancelled)) if controls else None
             try:
                 checker = getattr(gateway, "is_connected", None)
-                if checker is None or checker():
-                    return gateway
+                connected = checker is None or checker()
             except Exception:
-                pass
+                connected = False
+            finally:
+                if token is not None:
+                    futu_gateway._FETCH_CONTROL.reset(token)
+            check_fetch_control(deadline, cancelled)
+            if connected:
+                return gateway
             try:
                 gateway.close()
             except Exception:
                 pass
             gateways.pop(key, None)
 
-        from src.infrastructure import futu_gateway
-
         gateway = futu_gateway.build_ready_futu_quote_gateway(
             host=str(host),
             port=int(port),
             is_option_chain_cache_enabled=bool(chain_cache),
+            **controls,
         )
         gateways[key] = gateway
         with self._registry_lock:

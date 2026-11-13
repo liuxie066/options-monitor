@@ -6,9 +6,11 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
+from threading import Event
 import time
 from typing import Any, Callable, Mapping
 from uuid import uuid4
@@ -45,7 +47,7 @@ from src.application.payload_helpers import required_text
 from functools import partial
 from src.application.payload_helpers import readable_json_bytes as _json_file_bytes
 from src.application.current_fx_run import load_run_fx_snapshot
-from src.application.runtime_trigger_context import tick_subprocess_env
+from src.application.runtime_trigger_context import resolve_tick_deadline, tick_subprocess_env
 from src.infrastructure.futu_gateway import check_fetch_control
 from src.infrastructure.exchange_rates import (
     project_exchange_rate_snapshot,
@@ -57,7 +59,8 @@ _required_text = partial(required_text, error=lambda m: PreparedPortfolioContext
 
 PREPARED_PORTFOLIO_CONTEXT_SCHEMA = "prepared_portfolio_context.v1"
 _RESULT_SCHEMA = "prepared_portfolio_context_worker_result.v1"
-DEFAULT_KILL_GRACE_SEC = 0.25
+# The existing SDK abort reaper escalates from TERM to KILL after one second.
+DEFAULT_KILL_GRACE_SEC = 2.5
 
 
 class PreparedPortfolioContextError(RuntimeError):
@@ -710,7 +713,11 @@ def run_worker(request_path: Path) -> int:
     ).resolve()
     logs: list[str] = []
     context: dict[str, Any] | None = None
+    deadline = resolve_tick_deadline()
+    stop = Event()
+    previous_sigterm = signal.signal(signal.SIGTERM, lambda *_args: stop.set())
     try:
+        check_fetch_control(deadline, stop.is_set)
         account_config_sha256 = _required_text(
             request.get("account_config_sha256"),
             "account_config_sha256",
@@ -772,7 +779,10 @@ def run_worker(request_path: Path) -> int:
             **({"exchange_rate_observation": fx_observation} if fx_hash is not None else {}),
             load_json_fn=load_cached_json,
             write_cache=False,
+            deadline=deadline,
+            cancelled=stop.is_set,
         )
+        check_fetch_control(deadline, stop.is_set)
         try:
             context = prepare_position_sizing_evidence(
                 context=context, runtime_config=cfg, account=account,
@@ -830,6 +840,8 @@ def run_worker(request_path: Path) -> int:
             "error_type": type(exc).__name__,
             "logs": logs[-20:],
         }
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
     if result["status"] == "unavailable" and isinstance(context, dict):
         snapshot = context.get("cash_snapshot")
         if isinstance(snapshot, dict) and snapshot.get("status") in {"unknown", "stale"}:
