@@ -718,17 +718,29 @@ def _module_all_unreadable_reason(tree: ast.Module) -> str | None:
 
 
 def _module_literal_bindings(tree: ast.Module) -> dict[str, ast.expr]:
-    """Module-level single-name bindings, the only ones ``__all__`` may refer to."""
+    """Freeze proven single-name values in assignment order, before ``__all__``."""
     bindings: dict[str, ast.expr] = {}
     for node in tree.body:
+        if any(
+            isinstance(target, ast.Name) and target.id == "__all__"
+            for target in _assignment_targets(node)
+        ):
+            break
         if isinstance(node, ast.Assign) and len(node.targets) == 1:
             target = node.targets[0]
         elif isinstance(node, ast.AnnAssign):
             target = node.target
         else:
             continue
-        if isinstance(target, ast.Name) and target.id != "__all__":
-            bindings[target.id] = node.value
+        if isinstance(target, ast.Name) and node.value is not None:
+            resolved = _resolve_declared_sequence(node.value, bindings, frozenset())
+            if resolved is None:
+                bindings.pop(target.id, None)
+            else:
+                # Later rebinding must not change the value captured by an alias.
+                bindings[target.id] = ast.Set(
+                    elts=[ast.Constant(value=name) for name in sorted(resolved)],
+                )
     return bindings
 
 
