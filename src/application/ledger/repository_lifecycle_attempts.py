@@ -77,6 +77,11 @@ class LifecycleAttemptRepositoryMixin:
         invocation_id: str | bytes,
         conn: sqlite3.Connection | None = None,
     ) -> dict[str, Any] | None:
+        """Read an attributable attempt; None does not prove physical absence.
+
+        A missing head can hide orphan audit rows. Without an attributable
+        attempt, a possibly completed provider call remains ambiguous.
+        """
         case_value = str(case_id or "").strip()
         if not case_value:
             raise ValueError("lifecycle attempt audit case_id is required")
@@ -660,6 +665,12 @@ class LifecycleAttemptRepositoryMixin:
         case_id: str,
         conn: sqlite3.Connection | None = None,
     ) -> dict[str, Any]:
+        """Verify a case locally; absent requires database-wide FK integrity.
+
+        Orphan audit rows have no case_id, so a missing head cannot establish
+        absence without this precondition. Existing heads retain case-scoped
+        checks and remain isolated from unrelated cases' corrupt sidecars.
+        """
         case_value = str(case_id or "").strip()
         if not case_value:
             raise ValueError("lifecycle attempt audit case_id is required")
@@ -668,6 +679,8 @@ class LifecycleAttemptRepositoryMixin:
                 case_id=case_value,
                 conn=active_conn,
             )
+            if head is None:
+                self.assert_foreign_keys_clean(conn=active_conn)
             audits = self.list_trade_lifecycle_attempt_audits(
                 case_id=case_value,
                 conn=active_conn,
