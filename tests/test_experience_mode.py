@@ -96,6 +96,8 @@ def _status_index(
     owner: str = "opening",
     mode: str = "put",
     candidate_count: int = 1,
+    sibling_status: str | None = None,
+    sibling_reason: str | None = None,
 ) -> tuple[Path, dict]:
     report_dir = base / "output_runs" / RUN_ID / "accounts" / ACCOUNT
     publish_strategy_scan_status(
@@ -109,21 +111,35 @@ def _status_index(
         candidate_count=candidate_count,
         reason="no_candidate" if candidate_count == 0 else None,
     )
+    expected = [
+        {
+            "market": "US",
+            "symbol": "DEMO",
+            "strategy_family": family,
+            "strategy_mode": mode,
+            "candidate_owner": owner,
+            "account_config_sha256": CONFIG_HASH,
+        }
+    ]
+    if sibling_status is not None:
+        publish_strategy_scan_status(
+            report_dir=report_dir,
+            run_id=RUN_ID,
+            account=ACCOUNT,
+            market="US",
+            symbol="DEMO",
+            strategy_family="covered_call",
+            status=sibling_status,
+            candidate_count=0,
+            reason=sibling_reason,
+        )
+        expected.append({**expected[0], "strategy_family": "covered_call", "strategy_mode": "call"})
     index = publish_strategy_scan_status_index(
         report_dir=report_dir,
         run_id=RUN_ID,
         account=ACCOUNT,
         account_config_sha256=CONFIG_HASH,
-        expected=[
-            {
-                "market": "US",
-                "symbol": "DEMO",
-                "strategy_family": family,
-                "strategy_mode": mode,
-                "candidate_owner": owner,
-                "account_config_sha256": CONFIG_HASH,
-            }
-        ],
+        expected=expected,
         run_mode=experience_fields(DISPLAY_NAME),
     )
     return report_dir, index
@@ -215,15 +231,34 @@ def _seal_bundle(base: Path, index: dict, *, market: str = "US", statuses_by_own
     )
 
 
-def _seal_opening_bundle(base: Path) -> None:
-    _report_dir, index = _status_index(base)
+def _seal_opening_bundle(
+    base: Path,
+    *,
+    candidate_count: int = 1,
+    sibling_status: str | None = None,
+    sibling_reason: str | None = None,
+) -> None:
+    _report_dir, index = _status_index(
+        base,
+        candidate_count=candidate_count,
+        sibling_status=sibling_status,
+        sibling_reason=sibling_reason,
+    )
+    statuses = [{
+        "symbol": "DEMO", "strategy_mode": "put", "status": "completed",
+        "candidate_count": candidate_count,
+        "reason": "no_candidate" if candidate_count == 0 else None,
+    }]
+    if sibling_status is not None:
+        statuses.append({
+            "symbol": "DEMO", "strategy_mode": "call", "status": sibling_status,
+            "candidate_count": 0, "reason": sibling_reason,
+        })
     _seal_bundle(
         base,
         index,
-        statuses_by_owner={
-            "opening": [{"symbol": "DEMO", "strategy_mode": "put", "status": "completed", "candidate_count": 1}]
-        },
-        opening_candidates={"put": [{"symbol": "DEMO", "strike": 10.0}]},
+        statuses_by_owner={"opening": statuses},
+        opening_candidates={"put": [{"symbol": "DEMO", "strike": 10.0}] if candidate_count else []},
         opening_decisions={"put": []},
         combo_evidence_by_owner={},
         sealed_at="2026-08-27T00:00:00+00:00",
@@ -381,13 +416,40 @@ def test_experience_report_marks_non_executable_and_redacts_internal_label() -> 
     assert "routed by <account>" in report
 
 
+@pytest.mark.parametrize(
+    ("candidate_count", "sibling_status", "sibling_reason", "expected_status"),
+    [
+        (1, None, None, "candidates_found"),
+        (0, "not_applicable", "covered_call_underlying_not_held", "no_candidate"),
+        (1, "not_applicable", "covered_call_underlying_not_held", "candidates_found"),
+        (0, "not_applicable", "covered_call_portfolio_unavailable", "partial_data"),
+        (0, "not_applicable", "unknown_reason", "partial_data"),
+        (0, "failed", "scan_failed", "partial_data"),
+        (0, "unavailable", "required_data_unavailable", "partial_data"),
+        (0, "completed", "partial_data", "partial_data"),
+        (0, "completed", "no_candidate", "no_candidate"),
+    ],
+)
 def test_experience_child_facade_renders_status_from_sealed_bundle(
     monkeypatch,
     tmp_path: Path,
+    candidate_count: int,
+    sibling_status: str | None,
+    sibling_reason: str | None,
+    expected_status: str,
 ) -> None:
     from src.application import pipeline_runtime, pipeline_watchlist
 
-    _seal_opening_bundle(tmp_path)
+    _seal_opening_bundle(
+        tmp_path,
+        candidate_count=candidate_count,
+        sibling_status=sibling_status,
+        sibling_reason=sibling_reason,
+    )
+    bundle = load_candidate_snapshot_bundle_for_inspection(
+        base=tmp_path, run_id=RUN_ID, account=ACCOUNT,
+    )
+    assert bundle["owners"]["opening"]["opening_status"] == expected_status
     config_path = tmp_path / "account.json"
     config_path.write_text("{}\n", encoding="utf-8")
     report_dir = tmp_path / "output_runs" / RUN_ID / "accounts" / ACCOUNT
@@ -407,7 +469,7 @@ def test_experience_child_facade_renders_status_from_sealed_bundle(
             {
                 "symbol": "DEMO",
                 "strategy": "sell_put",
-                "candidate_count": 1,
+                "candidate_count": candidate_count,
                 "note": "candidate",
             }
         ],
@@ -430,8 +492,8 @@ def test_experience_child_facade_renders_status_from_sealed_bundle(
     ) == 0
 
     report = (report_dir / "experience_report.md").read_text(encoding="utf-8")
-    assert "正式状态（CSP / CC）：candidates_found" in report
-    assert "| DEMO | sell_put | 1 | candidate |" in report
+    assert f"正式状态（CSP / CC）：{expected_status}" in report
+    assert f"| DEMO | sell_put | {candidate_count} | candidate |" in report
 
 
 def test_sell_put_demo_capacity_uses_contract_multiplier_and_native_currency() -> None:
