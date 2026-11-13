@@ -642,6 +642,7 @@ def execute_per_account_delivery(
     sleep_fn: Callable[[float], Any] = sleep,
     idempotency_keys_by_account: dict[str, str] | None = None,
     transport_envelopes_by_account: dict[str, dict[str, Any]] | None = None,
+    on_account_result: Callable[[dict[str, object]], Any] | None = None,
 ) -> PerAccountSendExecution:
     sent_accounts: list[str] = []
     notify_failures: list[dict[str, object]] = []
@@ -689,6 +690,8 @@ def execute_per_account_delivery(
             )
 
         send_result = _send_account()
+        if on_account_result is not None:
+            on_account_result(dict(send_result))
         if not bool(send_result.get("ok")):
             send_results.append(dict(send_result))
             error_code = str(send_result.get("error_code") or "SEND_FAILED")

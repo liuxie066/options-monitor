@@ -10,7 +10,7 @@ from domain.domain.tool_boundary import normalize_subprocess_adapter_payload
 from src.application.channels.feishu_notification_renderer import normalize_feishu_notification_envelope
 from src.application.secret_resolver import resolve_feishu_bot_config
 from src.infrastructure.feishu_bitable import FeishuError, FeishuPermanentError
-from src.infrastructure.fetch_control import check_fetch_control
+from src.infrastructure.fetch_control import _FetchControlTimeout, check_fetch_control
 from src.infrastructure.feishu_bot import (
     FEISHU_SEND_TOO_LARGE,
     permanent_failure_allows_fallback,
@@ -138,7 +138,6 @@ def send_feishu_app_message(
                     log_fn=http_attempts.append,
                     **controls,
                 )
-        check_fetch_control(deadline, cancelled)
         return {
             "ok": True,
             "http_status": 200,
@@ -152,8 +151,12 @@ def send_feishu_app_message(
             "fallback_used": fallback_used,
             "attribution_route_key": attribution_route_key,
         }
-    except FeishuError as exc:
-        check_fetch_control(deadline, cancelled)
+    except (FeishuError, _FetchControlTimeout) as exc:
+        if isinstance(exc, _FetchControlTimeout):
+            # An uncertain send must reach durable delivery even when retries stop.
+            if not isinstance(exc.__cause__, FeishuError) or not _http_attempts_have_ambiguous_send(http_attempts):
+                raise
+            exc = exc.__cause__
         response = exc.response if isinstance(exc.response, dict) else {}
         body_text = str(response.get("body") or "")
         response_json = response if isinstance(response.get("code"), int) else None

@@ -128,8 +128,8 @@ def send_wechat_clawbot_message(
     )
     initial_response_json = response_json
     fallback_response_json: dict[str, Any] | None = None
-    check_fetch_control(deadline, cancelled)
     if binding.context_token and _context_token_rejected(response_json):
+        check_fetch_control(deadline, cancelled)
         fallback_response_json = client.send_text_message(
             to_user_id=binding.to_user_id,
             group_id=binding.group_id,
@@ -138,7 +138,6 @@ def send_wechat_clawbot_message(
             client_id=client_id,
         )
         response_json = fallback_response_json
-    check_fetch_control(deadline, cancelled)
     ok = response_success(response_json)
     message_id = response_message_id(response_json)
     local_receipt_id = _local_receipt_id(idempotency_key=idempotency_key, target=binding.target, message=text)

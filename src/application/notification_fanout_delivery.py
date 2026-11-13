@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError
+from src.infrastructure.fetch_control import check_fetch_control
 from src.application.notification_delivery_adapter import (
     normalize_notification_delivery_result, select_notification_delivery_adapter,
 )
@@ -24,6 +25,7 @@ def send_notification_fanout(
     adapter_selector: Callable[[Any], Any] = select_notification_delivery_adapter,
     routes: list[dict[str, Any]] | None = None, now_ms: int | None = None,
     max_attempts: int = 20, retry_delays_ms: tuple[int, ...] = (60_000,),
+    deadline: float | None = None, cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Adapt a producer's frozen message to the shared durable delivery owner."""
     from src.application.notification_delivery_route import notification_delivery_route_is_current
@@ -50,17 +52,21 @@ def send_notification_fanout(
             now_ms=now_ms)
 
     def can_send(spec: dict[str, Any]) -> bool:
+        check_fetch_control(deadline, cancelled)
         return notification_delivery_route_is_current(config=config, account=spec["metadata"].get("account", account),
             recipient=spec["recipient"], base=base)
 
     def send(*, spec: dict[str, Any], idempotency_key: str) -> dict[str, Any]:
+        check_fetch_control(deadline, cancelled)
         recipient = spec["recipient"]
         try:
             adapter = adapter_selector(recipient["provider"]) if send_fn is None or normalize_fn is None else None
             selected_send = send_fn or adapter.send_fn
             selected_normalize = normalize_fn or adapter.normalize_fn
+            controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
             raw = selected_send(base=base, channel=recipient["channel"], target=recipient["target"],
-                message=spec["message"], notifications=recipient["transport_options"], idempotency_key=idempotency_key)
+                message=spec["message"], notifications=recipient["transport_options"], idempotency_key=idempotency_key,
+                **controls)
             return normalize_notification_delivery_result(raw, normalize_fn=selected_normalize)
         except AgentToolError as exc:
             if exc.code == "CHANNEL_PLUGIN_NOT_INSTALLED":

@@ -5,7 +5,7 @@ from time import monotonic
 from typing import Any, Callable
 
 from src.application.channels.plugins import load_channel_plugin
-from src.infrastructure.fetch_control import check_fetch_control
+from src.infrastructure.fetch_control import _FetchControlTimeout, check_fetch_control
 
 
 DEFAULT_ILINK_BASE_URL = "https://ilinkai.weixin.qq.com"
@@ -30,14 +30,15 @@ def http_json(
     check_fetch_control(deadline, cancelled)
     request_timeout = timeout if deadline is None else min(timeout, max(0.0, deadline - monotonic()))
     try:
-        result = load_channel_plugin("wechat_clawbot", module="ilink_client").http_json(
+        return load_channel_plugin("wechat_clawbot", module="ilink_client").http_json(
             method, url, payload, headers=headers, timeout=request_timeout,
         )
-    except Exception:
-        check_fetch_control(deadline, cancelled)
+    except WechatClawbotError as exc:
+        try:
+            check_fetch_control(deadline, cancelled)
+        except _FetchControlTimeout as stopped:
+            raise stopped from exc
         raise
-    check_fetch_control(deadline, cancelled)
-    return result
 
 
 class WechatClawbotClient:

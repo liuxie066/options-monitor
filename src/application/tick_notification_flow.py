@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from time import monotonic
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 from zoneinfo import ZoneInfo
 
 from domain.domain.daily_decision_brief import (
@@ -595,7 +595,9 @@ def _continue_legacy_daily_brief_deliveries(request, deliveries):
             prepared_messages=PreparedPerAccountMessages({account: envelope["rendered_message"]}, True, False),
             lifecycles_by_account={account: lifecycle}, delivery_keys_by_account={account: envelope["delivery_key"]},
             markets=(lifecycle["market"],))
-        confirmed, failures = _confirm_daily_brief_execution(request=request, preparation=preparation, execution=execution)
+        confirmed, failures = _confirm_daily_brief_execution(
+            request=request, preparation=preparation, send_results=execution.send_results,
+        )
         result["sent_accounts"].extend(confirmed)
         result["confirmed_count"] += len(confirmed)
         result["failures"].extend(execution.notify_failures)
@@ -1019,6 +1021,15 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> TickNotifica
                     )
                 raise
 
+        confirmation_failures: list[dict[str, object]] = []
+
+        def _persist_account_result(send_result: dict[str, object]) -> None:
+            confirmed, failures = _confirm_daily_brief_execution(
+                request=request, preparation=daily_brief_prep, send_results=(send_result,),
+            )
+            sent_accounts.extend(confirmed)
+            confirmation_failures.extend(failures)
+
         execution = execute_per_account_delivery(
             delivery_batch=delivery_batch,
             run_id=request.run_id,
@@ -1033,18 +1044,13 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> TickNotifica
             failure_stage=delivery_adapter.failure_stage,
             idempotency_keys_by_account=daily_brief_prep.delivery_keys_by_account,
             transport_envelopes_by_account=daily_brief_prep.transport_envelopes_by_account,
+            on_account_result=_persist_account_result,
             **({"sleep_fn": lambda seconds: _wait_daily_brief_delivery(request, seconds, deadline=delivery_deadline)}
                if request.deadline is not None or request.cancelled is not None
                or any((item.get("envelope") or {}).get("delivery_kind") == "fixed_recovery_report"
                       for item in daily_brief_prep.lifecycles_by_account.values()) else {}),
         )
-        sent_accounts = list(execution.sent_accounts)
         notify_failures.extend(execution.notify_failures)
-        sent_accounts, confirmation_failures = _confirm_daily_brief_execution(
-            request=request,
-            preparation=daily_brief_prep,
-            execution=execution,
-        )
         notify_failures.extend(confirmation_failures)
         send_attempted_count = execution.send_attempted_count
         send_confirmed_count = len(sent_accounts)
@@ -1194,6 +1200,8 @@ def _record_notification_meta(
                 market=market, account=account, failure_code=code, stage="delivery",
                 run_id=request.run_id, degraded=degraded, reason=detail,
                 config=request.base_cfg, external=True,
+                **({"deadline": request.deadline, "cancelled": request.cancelled}
+                   if request.deadline is not None or request.cancelled is not None else {}),
             )
         except Exception:
             outcome = "infra_failed"
@@ -2275,11 +2283,11 @@ def _confirm_daily_brief_execution(
     *,
     request: TickNotificationRequest,
     preparation: DailyBriefNotificationPreparation,
-    execution: Any,
+    send_results: Iterable[dict[str, object]],
 ) -> tuple[list[str], list[dict[str, object]]]:
     confirmed_accounts: list[str] = []
     failures: list[dict[str, object]] = []
-    for send_result in execution.send_results:
+    for send_result in send_results:
         if not isinstance(send_result, dict):
             continue
         account = str(send_result.get("account") or "").strip().lower()

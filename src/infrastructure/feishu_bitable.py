@@ -25,7 +25,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
-from src.infrastructure.fetch_control import check_fetch_control, wait_fetch_control
+from src.infrastructure.fetch_control import _FetchControlTimeout, check_fetch_control, wait_fetch_control
 
 
 # -----------------
@@ -248,14 +248,16 @@ def http_json(
     url_path = _log_path(url)
 
     for attempt in range(1, retry_max_attempts + 1):
-        check_fetch_control(deadline, cancelled)
+        try:
+            check_fetch_control(deadline, cancelled)
+        except _FetchControlTimeout as exc:
+            raise exc from last_err
         request_timeout = timeout if deadline is None else min(timeout, max(0.0, deadline - time.monotonic()))
         req = urllib.request.Request(url, data=data, method=method, headers=req_headers)
         try:
             with urllib.request.urlopen(req, timeout=request_timeout) as resp:
-                check_fetch_control(deadline, cancelled)
+                # Preserve this request's result before honoring control for new I/O.
                 body_text = _decode_body(resp.read())
-                check_fetch_control(deadline, cancelled)
                 parsed = _try_parse_json(body_text)
                 if not isinstance(parsed, dict):
                     raise FeishuPermanentError(
@@ -284,7 +286,6 @@ def http_json(
                             message_id=(str(message_id) if message_id else None),
                         )
                     )
-                check_fetch_control(deadline, cancelled)
                 return parsed
 
         except urllib.error.HTTPError as e:
@@ -308,7 +309,7 @@ def http_json(
         except FeishuError as e:
             last_err = e
 
-        check_fetch_control(deadline, cancelled)
+        # Classify and retain the completed attempt before stopping future retries.
         # retry gate
         should_retry = isinstance(last_err, (FeishuTransientError, FeishuRateLimitError))
         if not should_retry or attempt >= retry_max_attempts:
@@ -323,6 +324,10 @@ def http_json(
                     url_path=url_path,
                 )
                 _emit_log(log_fn, record, default_label="ERROR")
+            try:
+                check_fetch_control(deadline, cancelled)
+            except _FetchControlTimeout as exc:
+                raise exc from last_err
             raise last_err
 
         sleep_s = 2 ** (attempt - 1)
@@ -340,7 +345,10 @@ def http_json(
         if deadline is None and cancelled is None:
             time.sleep(sleep_s)
         else:
-            wait_fetch_control(sleep_s, deadline=deadline, cancelled=cancelled)
+            try:
+                wait_fetch_control(sleep_s, deadline=deadline, cancelled=cancelled)
+            except _FetchControlTimeout as exc:
+                raise exc from last_err
 
     raise last_err or FeishuPermanentError("unknown error")
 
@@ -477,7 +485,6 @@ def with_tenant_token_retry(
         )
         check_fetch_control(deadline, cancelled)
         result = fn(refreshed)
-    check_fetch_control(deadline, cancelled)
     return result
 
 
