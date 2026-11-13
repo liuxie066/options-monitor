@@ -6,7 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from scripts.benchmark_ledger_interventions import (
+from tests.ledger_intervention_benchmark import (
     NOW_MS, TARGET_ID, invoke, prepare_template,
 )
 from src.application.ledger import event_codec, interventions
@@ -64,7 +64,7 @@ def test_void_lookup_still_decodes_and_rejects_invalid_void(monkeypatch):
 @pytest.mark.parametrize("event_type", ["void", " VOID ", "VoId"])
 def test_void_lookup_retains_normalization_and_typed_event_support(event_type: str):
     from dataclasses import replace
-    from scripts.benchmark_ledger_interventions import synthetic_events
+    from tests.ledger_intervention_benchmark import synthetic_events
 
     opening = synthetic_events(1, 1)[0]
     void = replace(opening, event_type="void", target_event_id=TARGET_ID)
@@ -88,7 +88,7 @@ def test_allocation_resolves_each_events_strategy_metadata_once(monkeypatch, clo
     from decimal import Decimal
     from domain.domain.ledger import economics
     from domain.domain.ledger.lots import PositionLot
-    from scripts.benchmark_ledger_interventions import synthetic_events
+    from tests.ledger_intervention_benchmark import synthetic_events
 
     _, opening, closing = synthetic_events(3, 1)
     opening = replace(opening, raw_payload={**opening.raw_payload,
@@ -108,7 +108,7 @@ def test_allocation_resolves_each_events_strategy_metadata_once(monkeypatch, clo
 def test_unchanged_realized_pnl_does_not_rebuild_transition_snapshots(monkeypatch):
     from decimal import Decimal
     from domain.domain.ledger import projection
-    from scripts.benchmark_ledger_interventions import synthetic_events
+    from tests.ledger_intervention_benchmark import synthetic_events
 
     rebuild = Mock(wraps=projection.replace)
     monkeypatch.setattr(projection, "replace", rebuild)
@@ -122,7 +122,7 @@ def test_unchanged_realized_pnl_does_not_rebuild_transition_snapshots(monkeypatc
 
 def test_identical_scalar_contract_keys_share_normalization(monkeypatch):
     from domain.domain.ledger import ContractKey
-    from scripts.benchmark_ledger_interventions import synthetic_events
+    from tests.ledger_intervention_benchmark import synthetic_events
 
     payloads = [event.to_dict() for event in synthetic_events(21, 1)]
     for payload in payloads:
@@ -177,7 +177,7 @@ def test_allocation_with_no_strategy_fields_needs_no_metadata_resolution(monkeyp
     from decimal import Decimal
     from domain.domain.ledger import economics
     from domain.domain.ledger.lots import PositionLot
-    from scripts.benchmark_ledger_interventions import synthetic_events
+    from tests.ledger_intervention_benchmark import synthetic_events
 
     _, opening, closing = synthetic_events(3, 1)
     resolve = Mock(wraps=economics.resolve_strategy_metadata)

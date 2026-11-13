@@ -42,7 +42,8 @@ python scripts/benchmark_ledger_interventions.py --mode profile \
 ```
 
 For a new host, first capture a local baseline with `--baseline` omitted. To
-repeat the pre-fix measurement, copy the same runner into `scripts/` of an
+repeat the pre-fix measurement, copy the CLI script and
+`tests/ledger_intervention_benchmark.py` into the matching directories of an
 isolated checkout at `5fdb5890d` and use the same interpreter and arguments.
 Do not use the committed baseline as the comparator on a different host.
 

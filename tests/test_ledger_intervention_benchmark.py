@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts import benchmark_ledger_interventions as benchmark
+from tests import ledger_intervention_benchmark as benchmark
 
 FIXTURES = Path(__file__).parent / "fixtures" / "ledger_intervention_benchmark"
 
