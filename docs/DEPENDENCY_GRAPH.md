@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1551 (`src`: 625, `domain`: 99, `scripts`: 33, `tests`: 790)
-- Internal import edges: 14025 total, 4684 production/script edges excluding tests
+- Python files scanned: 1556 (`src`: 625, `domain`: 99, `scripts`: 33, `tests`: 795)
+- Internal import edges: 14070 total, 4688 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -33,7 +33,7 @@ flowchart LR
   storage["domain.storage"]
   application -->|746| domain
   application -->|4| domain_services
-  application -->|231| infrastructure
+  application -->|234| infrastructure
   application -->|2| om_strategy_core
   application -->|64| storage
   domain_services -->|6| domain
@@ -51,13 +51,13 @@ flowchart LR
   scripts -->|2| tests
   src -->|1| application
   storage -->|1| domain
-  tests -->|7043| application
+  tests -->|7069| application
   tests -->|772| domain
   tests -->|2| domain_services
-  tests -->|495| infrastructure
+  tests -->|505| infrastructure
   tests -->|527| interfaces
   tests -->|14| om_strategy_core
-  tests -->|91| scripts
+  tests -->|93| scripts
   tests -->|79| storage
 ```
 
@@ -67,7 +67,7 @@ flowchart LR
 |---|---|---|
 | application | domain | 746 |
 | interfaces | application | 249 |
-| application | infrastructure | 231 |
+| application | infrastructure | 234 |
 | scripts | application | 103 |
 | application | storage | 64 |
 | infrastructure | application | 47 |
@@ -90,11 +90,11 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 7043 |
+| tests | application | 7069 |
 | tests | domain | 772 |
 | tests | interfaces | 527 |
-| tests | infrastructure | 495 |
-| tests | scripts | 91 |
+| tests | infrastructure | 505 |
+| tests | scripts | 93 |
 | tests | storage | 79 |
 | tests | om_strategy_core | 14 |
 | tests | domain_services | 2 |
@@ -108,7 +108,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application | domain.domain | 323 |
 | src.interfaces | src.application | 198 |
 | src.application.ledger | domain.domain | 184 |
-| src.application | src.infrastructure | 163 |
+| src.application | src.infrastructure | 166 |
 | scripts | src.application | 83 |
 | src.application.ledger | domain.domain.ledger | 78 |
 | src.application.trades | domain.domain | 68 |

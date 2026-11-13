@@ -376,15 +376,25 @@ def main():
                               "valid_expected_outcomes": sum(s.get("valid_expected_outcome", False) for s in samples),
                               "worker_timeouts": sum(o["timed_out"] for o in outcomes)},
                "workers": outcomes, "samples": samples, "statistics": {}}
+    summary["acceptance_valid"] = (
+        len(samples) == summary["denominator"]["planned"] > 0
+        and all(s["status"] == "completed" and s.get("valid_expected_outcome", False) for s in samples)
+        and all(o["returncode"] == 0 and not o["timed_out"] for o in outcomes)
+    )
     for scenario in ([args.scenario] if args.scenario else SCENARIOS):
         rows = [s for s in samples if s["scenario"] == scenario]
-        warm = [s["wall_seconds"] for s in rows if s["status"] == "completed" and s["condition"] == "process_warm"]
-        summary["statistics"][scenario] = {"warm_count": len(warm), "warm_p50_seconds": statistics.median(warm) if warm else None,
+        warm_rows = [s for s in rows if s["status"] == "completed" and s["condition"] == "process_warm"]
+        warm = [s["wall_seconds"] for s in warm_rows]
+        summary["statistics"][scenario] = {"warm_count": len(warm),
+            "valid_warm_count": sum(s.get("valid_expected_outcome", False) for s in warm_rows),
+            "warm_p50_seconds": statistics.median(warm) if summary["acceptance_valid"] and warm else None,
             "cold_seconds": [s.get("wall_seconds") for s in rows if s["condition"] == "process_cold"],
             "p95": None, "p95_reason": "cold1/warm3 is insufficient for tail quantiles"}
     write_json(args.output_dir / "results.json", summary)
-    print(json.dumps({"denominator": summary["denominator"], "statistics": summary["statistics"]}, indent=2))
+    print(json.dumps({"acceptance_valid": summary["acceptance_valid"],
+        "denominator": summary["denominator"], "statistics": summary["statistics"]}, indent=2))
+    return 0 if summary["acceptance_valid"] else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
