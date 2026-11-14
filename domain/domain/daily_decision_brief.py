@@ -879,15 +879,12 @@ def _normalize_candidate_index(
             account=account,
             market=market,
         )
-        if not persisted:
-            for item in derived:
-                if item["strategy_family"] != "combo_yield":
-                    continue
-                _validate_candidate_representative(
-                    item["representative"],
-                    family=str(item["strategy_family"]),
-                    persisted=False,
-                )
+        for item in derived:
+            _validate_candidate_representative(
+                item["representative"],
+                family=str(item["strategy_family"]),
+                persisted=persisted,
+            )
         return derived
     items = _mapping_list(value, field="candidate_index")
     out: list[dict[str, Any]] = []
