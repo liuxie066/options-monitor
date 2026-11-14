@@ -1,0 +1,42 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.37",
+  "base": {
+    "tag": "v4.6.36",
+    "commit": "8d906225ad61dcf0fead400fb1f50f4ac91474d2"
+  },
+  "reviewed_head": "04d28355e4d607a81aa542ef32a156bd359d1871",
+  "commits": [
+    {
+      "sha": "f80cee5b7e025fefc1d16610146c047b428956d0",
+      "subject": "perf(brief): reuse revision normalization and digest results (#1185)"
+    },
+    {
+      "sha": "04d28355e4d607a81aa542ef32a156bd359d1871",
+      "subject": "fix(brief): validate derived candidate representatives (#1186)"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "历史归因读取复用同一简报 revision 的规范化与摘要结果，减少每日简报准备的重复计算，并保留旧版摘要兼容。（#1185）",
+      "commits": ["f80cee5b7e025fefc1d16610146c047b428956d0"]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "历史简报缺失候选索引时，推导候选执行完整的代表合约校验，避免不完整合约被误报为可用。（#1186）",
+      "commits": ["04d28355e4d607a81aa542ef32a156bd359d1871"]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "f80cee5b7e025fefc1d16610146c047b428956d0",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1185"]
+    },
+    {
+      "commit": "04d28355e4d607a81aa542ef32a156bd359d1871",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1186"]
+    }
+  ]
+}
