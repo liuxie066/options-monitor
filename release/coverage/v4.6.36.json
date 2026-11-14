@@ -1,0 +1,184 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.36",
+  "base": {
+    "tag": "v4.6.35",
+    "commit": "a740446c85b5f696dedbc5948d318a2f1fe924a1"
+  },
+  "reviewed_head": "8caaa4c2707271a1a0a54f1fb5b86f6bcb14337a",
+  "commits": [
+    {
+      "sha": "6b4ea6fc3e60ef3e8f101f11d93810daa98deffe",
+      "subject": "fix(candidates): raise CSP and CC default delta caps to 0.35 (#1181)"
+    },
+    {
+      "sha": "511d713150f3a55525e65b8cc4245f964b874f63",
+      "subject": "perf(ledger): reuse historical attribution snapshots by fill time"
+    },
+    {
+      "sha": "d5b477e2a0a1f1188750438b9a1aac7376d6294c",
+      "subject": "refactor(tick): propagate fetch budgets through provider execution"
+    },
+    {
+      "sha": "ce292d71905401f5ff62b4d1ff83aec8652c7a26",
+      "subject": "refactor(tick): freeze brief preparation and recover durable delivery"
+    },
+    {
+      "sha": "26905fc2725a43bc2e0456d191f1f3e2f6a72e56",
+      "subject": "test(tick): freeze FX eligibility clock in dependency coverage"
+    },
+    {
+      "sha": "adbe1d9fb3025b33021518d56057fe7de06b7956",
+      "subject": "docs(architecture): refresh graph after FX fixture clock fix"
+    },
+    {
+      "sha": "86ec896ba2744f4d96efcebbc455df84bbf3afaf",
+      "subject": "fix(tick): propagate controls through readiness FX and worker cleanup"
+    },
+    {
+      "sha": "aa12234d48d4c4137dc3d56f391e46a65cb522ef",
+      "subject": "fix(notify): persist delivery outcomes before honoring cancellation"
+    },
+    {
+      "sha": "ba4970281940baabafff6289d939715b321a415e",
+      "subject": "fix(wechat): retain unknown outcomes from attempted HTTP requests"
+    },
+    {
+      "sha": "710f7c15dfe83fe2a75f02d72c99397a1367689f",
+      "subject": "test(tick): reject unqualified benchmark samples and refresh dependency graph"
+    },
+    {
+      "sha": "471ca56a41080b8d958bfd4ff449d15856b4c102",
+      "subject": "refactor(tick): extract control flow to restore complexity baseline"
+    },
+    {
+      "sha": "d432be329648561749cb414da8a455dbe7adf405",
+      "subject": "test(tick): allow cold startup before blocked control assertions"
+    },
+    {
+      "sha": "8caaa4c2707271a1a0a54f1fb5b86f6bcb14337a",
+      "subject": "Merge pull request #1183 from liuxie066/refactor/tick-execution-20261113"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "复用按成交时点构建的历史归因快照，减少每日简报准备中的重复读取与计算，缩短整轮执行等待。（#1183）",
+      "commits": [
+        "511d713150f3a55525e65b8cc4245f964b874f63",
+        "ce292d71905401f5ff62b4d1ff83aec8652c7a26",
+        "8caaa4c2707271a1a0a54f1fb5b86f6bcb14337a"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "CSP 和 Covered Call 的默认最大绝对 delta 统一为 0.35。（#1181）",
+      "commits": [
+        "6b4ea6fc3e60ef3e8f101f11d93810daa98deffe"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "部分标的到期日发现失败时，只阻断依赖该结果的规划范围，保留健康范围的扫描与简报结果。（#1183）",
+      "commits": [
+        "d5b477e2a0a1f1188750438b9a1aac7376d6294c",
+        "8caaa4c2707271a1a0a54f1fb5b86f6bcb14337a"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Tick 的超时和取消控制覆盖行情、网关就绪检查、汇率读取及工作进程清理，避免子步骤超出整轮预算。（#1183）",
+      "commits": [
+        "d5b477e2a0a1f1188750438b9a1aac7376d6294c",
+        "86ec896ba2744f4d96efcebbc455df84bbf3afaf",
+        "8caaa4c2707271a1a0a54f1fb5b86f6bcb14337a"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "通知投递结果先持久化再响应取消，已尝试的微信 HTTP 请求保留未知结果，支持中断后的准确恢复。（#1183）",
+      "commits": [
+        "ce292d71905401f5ff62b4d1ff83aec8652c7a26",
+        "aa12234d48d4c4137dc3d56f391e46a65cb522ef",
+        "ba4970281940baabafff6289d939715b321a415e",
+        "8caaa4c2707271a1a0a54f1fb5b86f6bcb14337a"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "26905fc2725a43bc2e0456d191f1f3e2f6a72e56",
+      "reason": "仅冻结依赖覆盖测试的汇率资格时钟，保持产品运行行为。"
+    },
+    {
+      "commit": "adbe1d9fb3025b33021518d56057fe7de06b7956",
+      "reason": "仅刷新生成的架构依赖图，不改变产品能力。"
+    },
+    {
+      "commit": "710f7c15dfe83fe2a75f02d72c99397a1367689f",
+      "reason": "仅加强离线基准样本资格校验并刷新依赖图，不改变生产执行。"
+    },
+    {
+      "commit": "471ca56a41080b8d958bfd4ff449d15856b4c102",
+      "reason": "仅提取私有控制流辅助函数以恢复复杂度基线，业务条件、异常边界与持久化顺序保持一致。"
+    },
+    {
+      "commit": "d432be329648561749cb414da8a455dbe7adf405",
+      "reason": "仅调整新回归测试的冷启动时间分配，保留原有断言及缺失控制的负对照检出能力。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "6b4ea6fc3e60ef3e8f101f11d93810daa98deffe",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1181"]
+    },
+    {
+      "commit": "511d713150f3a55525e65b8cc4245f964b874f63",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1183"]
+    },
+    {
+      "commit": "d5b477e2a0a1f1188750438b9a1aac7376d6294c",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1183", "docs/REQUIRED_DATA_STORAGE_DESIGN.md"]
+    },
+    {
+      "commit": "ce292d71905401f5ff62b4d1ff83aec8652c7a26",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1183", "docs/OPTION_NOTIFICATION_EXPERIENCE_PRD.md"]
+    },
+    {
+      "commit": "26905fc2725a43bc2e0456d191f1f3e2f6a72e56",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1183"]
+    },
+    {
+      "commit": "adbe1d9fb3025b33021518d56057fe7de06b7956",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1183"]
+    },
+    {
+      "commit": "86ec896ba2744f4d96efcebbc455df84bbf3afaf",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1183", "docs/RUNTIME_FAILURE_EVIDENCE_DESIGN.md"]
+    },
+    {
+      "commit": "aa12234d48d4c4137dc3d56f391e46a65cb522ef",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1183"]
+    },
+    {
+      "commit": "ba4970281940baabafff6289d939715b321a415e",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1183"]
+    },
+    {
+      "commit": "710f7c15dfe83fe2a75f02d72c99397a1367689f",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1183"]
+    },
+    {
+      "commit": "471ca56a41080b8d958bfd4ff449d15856b4c102",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1183"]
+    },
+    {
+      "commit": "d432be329648561749cb414da8a455dbe7adf405",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1183"]
+    },
+    {
+      "commit": "8caaa4c2707271a1a0a54f1fb5b86f6bcb14337a",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1183"]
+    }
+  ]
+}
