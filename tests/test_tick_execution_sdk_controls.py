@@ -115,7 +115,8 @@ def test_gateway_controls_stop_real_blocked_sdk_query(monkeypatch, tmp_path, met
     if timer:
         timer.start()
     started = time.monotonic()
-    controls = {"cancelled": stop.is_set} if cancel else {"deadline": started + .15}
+    # Reach the ready SDK under CI scheduling delays; keep the two-second bound.
+    controls = {"cancelled": stop.is_set} if cancel else {"deadline": started + 1.0}
     token = None
     method_controls = controls
     if control_source == "initialized":

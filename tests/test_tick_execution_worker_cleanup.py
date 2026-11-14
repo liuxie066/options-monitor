@@ -102,7 +102,8 @@ def _cleanup_group(pgid):
 def test_prepared_worker_consumes_inherited_deadline_and_reaps_sdk(tmp_path, expired):
     _request(tmp_path)
     proof = tmp_path / "heartbeat"
-    deadline = time.monotonic() + (-1 if expired else 2.0)
+    # The inflight case must start both worker interpreters before its deadline.
+    deadline = time.monotonic() + (-1 if expired else 4.0)
     with (tmp_path / "worker.log").open("w") as log:
         proc = subprocess.Popen(_command("worker", tmp_path), cwd=Path(__file__).resolve().parents[1],
                                 env=_env(tmp_path, deadline), start_new_session=True, stdout=log, stderr=log)

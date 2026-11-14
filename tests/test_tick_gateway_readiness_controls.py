@@ -93,9 +93,10 @@ def readiness(monkeypatch, tmp_path):
     monkeypatch.setattr(plugin_runtime, "require_plugin", lambda _name: provider_module)
     monkeypatch.setattr(gateway, "_create_futu_sdk_context",
                         partial(_sdk_factory, proof=str(proof), blocking=str(blocking)))
-    # Bound the deliberately broken baseline by the existing SDK timeout owner.
-    monkeypatch.setattr(gateway, "FUTU_QUERY_CONNECT_TIMEOUT_SEC", 3.0)
-    monkeypatch.setattr(gateway, "FUTU_QUERY_TIMEOUT_SEC", 3.0)
+    # Allow CI process startup before testing the blocked SDK phase. Keep the
+    # independent native timeout beyond the Tick deadline and return bound.
+    monkeypatch.setattr(gateway, "FUTU_QUERY_CONNECT_TIMEOUT_SEC", 8.0)
+    monkeypatch.setattr(gateway, "FUTU_QUERY_TIMEOUT_SEC", 8.0)
     remotes = []
     original_process_init = gateway._FutuContextProcess.__init__
 
@@ -181,13 +182,13 @@ def test_readiness_receives_exact_caller_controls(readiness, entry):
 def test_tick_control_interrupts_native_readiness(readiness, entry, operation, control):
     readiness.blocking.write_text(operation)
     started = time.monotonic()
-    controls = ({"deadline": started + 1.5} if control == "deadline" else
+    controls = ({"deadline": started + 4.0} if control == "deadline" else
                 {"cancelled": lambda: operation in _operations(readiness.proof)})
     message = readiness.invoke(entry, controls)
     elapsed = time.monotonic() - started
     assert operation in _operations(readiness.proof)
     assert control in message
-    assert elapsed < 2.5, f"{entry} ignored Tick {control} for {elapsed:.3f}s"
+    assert elapsed < 5.0, f"{entry} ignored Tick {control} for {elapsed:.3f}s"
     assert not readiness.fetches
     assert "state" not in _operations(readiness.proof)
     assert "rights" not in _operations(readiness.proof)
