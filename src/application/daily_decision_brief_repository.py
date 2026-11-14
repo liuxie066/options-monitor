@@ -1819,21 +1819,19 @@ def read_combo_candidate_exposures(
     out_by_id: dict[str, dict[str, Any]] = {}
     invalid_revisions: list[int] = []
     for revision in listed["revisions"]:
-        source_raw: list[Mapping[str, Any]] = []
+        compatible_digests: list[str] = []
         result = _read_brief_result(
             base=base_path, path=_revision_path(base_path, account_norm, market_norm, date_norm, int(revision)),
             account=account_norm,
             market=market_norm,
             market_trading_date=date_norm,
             revision=int(revision),
-            source_raw=source_raw,
+            source_digests=compatible_digests,
         )
         if not result.get("available"):
             invalid_revisions.append(int(revision))
             continue
         brief = result["brief"]
-        raw_brief = source_raw[0]
-        compatible_digests = set(daily_brief_compatible_digests(raw_brief))
         exposures = derive_combo_candidate_exposures(brief)
         for exposure in exposures:
             item = dict(exposure)
@@ -1881,27 +1879,30 @@ def _read_brief_result(
     market: str,
     market_trading_date: str | None = None,
     revision: int | None = None,
-    source_raw: list[Mapping[str, Any]] | None = None,
+    source_digests: list[str] | None = None,
 ) -> dict[str, Any]:
+    digests: list[str] = []
     try:
         raw = _history_raw(base=base, account=account, market=market, market_date=market_trading_date,
                            revision=revision, successful=market_trading_date is None)
         if raw is _MISSING:
             return {"available": False, "reason": "not_found", "brief": None, "path": path}
-        brief = _normalize_persisted_brief(raw, path=path, account=account, market=market)
+        brief = _normalize_persisted_brief(
+            raw, path=path, account=account, market=market, source_digests=digests,
+        )
         if market_trading_date is not None and brief["market_trading_date"] != market_trading_date:
             raise DailyDecisionBriefStateError(f"daily brief date mismatch: {path}")
         if revision is not None and int(brief["revision"]) != revision:
             raise DailyDecisionBriefStateError(f"daily brief revision mismatch: {path}")
     except DailyDecisionBriefStateError as exc:
         return {"available": False, "reason": "state_invalid", "error": str(exc), "brief": None, "path": path}
-    if source_raw is not None:
-        source_raw.append(raw)
+    if source_digests is not None:
+        source_digests.extend(digests)
     return {
         "available": True,
         "reason": "ok",
         "brief": brief,
-        "brief_digest": daily_brief_digest(brief),
+        "brief_digest": digests[0],
         "candidate_identities": sorted(_candidate_identity_set(brief)),
         "path": path,
     }
@@ -1941,15 +1942,24 @@ def _list_revision_numbers(
         raise DailyDecisionBriefStateError(str(exc)) from exc
 
 
-def _normalize_persisted_brief(raw: Any, *, path: Path, account: str, market: str) -> dict[str, Any]:
+def _normalize_persisted_brief(
+    raw: Any, *, path: Path, account: str, market: str,
+    source_digests: list[str] | None = None,
+) -> dict[str, Any]:
     if not isinstance(raw, Mapping):
         raise DailyDecisionBriefStateError(f"daily brief state is not an object: {path}")
     try:
-        brief = normalize_persisted_daily_decision_brief(raw)
+        if source_digests is None:
+            brief = normalize_persisted_daily_decision_brief(raw)
+        else:
+            # Keep legacy digests tied to this raw observation, before stripping.
+            brief, digests = normalize_persisted_daily_decision_brief_with_digests(raw)
     except (TypeError, ValueError) as exc:
         raise DailyDecisionBriefStateError(f"daily brief state is incompatible: {path}: {exc}") from exc
     if brief["account"] != account or brief["market"] != market:
         raise DailyDecisionBriefStateError(f"daily brief state identity mismatch: {path}")
+    if source_digests is not None:
+        source_digests.extend(digests)
     return brief
 
 

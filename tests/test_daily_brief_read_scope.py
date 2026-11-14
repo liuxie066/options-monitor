@@ -119,16 +119,18 @@ def test_exposure_reobserves_source_without_repeating_delivery_normalization(tmp
 
 def test_modern_digest_skips_identical_legacy_hash_but_keeps_legacy_fields(monkeypatch):
     import domain.domain.daily_decision_brief as domain
-    original = domain._digest
+    original = domain.json.dumps
     calls = []
-    def counted(value):
+    def counted(value, **kwargs):
         calls.append(value)
-        return original(value)
-    monkeypatch.setattr(domain, '_digest', counted)
+        return original(value, **kwargs)
+    monkeypatch.setattr(domain.json, 'dumps', counted)
     current = domain.daily_brief_compatible_digests(_brief(run_id='modern'))
-    # Ignore normalization's action IDs; the payload digests have market_trading_date.
+    # Count actual payload encodings, including the normalized current fast path.
     assert len([v for v in calls if isinstance(v, dict) and 'candidate_index' in v]) == 1
+    calls.clear()
     legacy = _brief(run_id='legacy')
     legacy[next(iter(domain.RETIRED_DAILY_BRIEF_FIELDS))] = {'original': 'value'}
     both = domain.daily_brief_compatible_digests(legacy)
+    assert len([v for v in calls if isinstance(v, dict) and 'candidate_index' in v]) == 2
     assert len(both) == 2 and both[0] == current[0]
