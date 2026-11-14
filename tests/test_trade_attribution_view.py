@@ -786,8 +786,9 @@ def test_unavailable_historical_brief_does_not_poison_current_fill(tmp_path, mon
         effective_now_ms=BASE_TIME_MS + 3000, include_claimed=True)["lot_facts"]
     dates = {lot["market_date"] for lot in lots}
     assert len(dates) == 2
-    monkeypatch.setattr("src.application.trades.attribution.read_combo_candidate_exposures", lambda **kw: {
-        "available": kw["market_trading_date"] == max(dates), "complete": True, "delivery_available": True, "exposures": []})
+    monkeypatch.setattr("src.application.trades.attribution.read_combo_candidate_exposures_batch", lambda **kw: {
+        day: {"available": day == max(dates), "complete": True, "delivery_available": True, "exposures": []}
+        for day in kw["market_trading_dates"]})
     evidence = read_attribution_combo_evidence(rows, account="lx", runtime_root=tmp_path, now_ms=BASE_TIME_MS + 3000)
     assert not evidence["complete"]
     config = {"market": "us", "account_settings": {"lx": {"futu": {"account_id": "1001", "trd_env": "REAL"}}}}

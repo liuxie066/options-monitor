@@ -131,6 +131,7 @@ def preparation_clock(monkeypatch):
 
     clock = _PreparationClock()
     monkeypatch.setattr(mod, "time", clock)
+    monkeypatch.setattr("src.infrastructure.fetch_control.time", clock)
     monkeypatch.setattr(
         mod.state_repo, "append_source_snapshot_event",
         lambda _base, snapshot: clock.source_events.append(snapshot),
@@ -440,8 +441,10 @@ def test_worker_observation_after_startup_uses_shared_deadline(
             command, clock=preparation_clock, finished_at=worker_finished_at, **kwargs,
         )
         workers[worker.request["account"]] = worker
-        # Parent setup delays observation of workers finishing during startup.
-        preparation_clock.now = startup_time
+        # Delay observation after startup; both workers must start before the
+        # shared deadline so this case isolates late observation of their exits.
+        if len(workers) == len(authorities):
+            preparation_clock.now = startup_time
         return worker
 
     def _read(**kwargs):
@@ -759,6 +762,7 @@ def test_worker_finishing_after_deadline_check_is_not_promoted(
     from src.application import prepared_portfolio_context as mod
 
     shared, states = _state_dirs(tmp_path, "run-deadline-race")
+    preparation_clock = _PreparationClock()
 
     class _FinishesBetweenDeadlineAndCleanup(_CompletedWorker):
         def __init__(self, command, **kwargs) -> None:
@@ -768,6 +772,9 @@ def test_worker_finishing_after_deadline_check_is_not_promoted(
 
         def poll(self):
             self.poll_calls += 1
+            # Cross the deadline during observation, independent of how many
+            # cooperative control checks occur while starting the workers.
+            preparation_clock.now = 1.0
             if self.poll_calls >= 3:
                 self.returncode = 0
             return self.returncode
@@ -782,13 +789,8 @@ def test_worker_finishing_after_deadline_check_is_not_promoted(
         def kill(self):
             self.returncode = -9
 
-    monotonic_values = iter((0.0, 0.0, 1.0, 1.0, 1.0))
-    monkeypatch.setattr(
-        mod.time,
-        "monotonic",
-        lambda: next(monotonic_values, 1.0),
-    )
-    monkeypatch.setattr(mod.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(mod, "time", preparation_clock)
+    monkeypatch.setattr("src.infrastructure.fetch_control.time", preparation_clock)
 
     manifests = _prepare(
         tmp_path,
@@ -1393,7 +1395,9 @@ def _prepare_cached_holdings_receipts(tmp_path, monkeypatch, *, run_id, ages):
 
     monkeypatch.setattr(prepared, "datetime", FrozenClock)
     monkeypatch.setattr(service, "datetime", FrozenClock)
-    monkeypatch.setattr(prepared, "time", _PreparationClock())
+    preparation_clock = _PreparationClock()
+    monkeypatch.setattr(prepared, "time", preparation_clock)
+    monkeypatch.setattr("src.infrastructure.fetch_control.time", preparation_clock)
     monkeypatch.setattr(prepared, "tempfile", SimpleNamespace(TemporaryDirectory=RetainedWorkerDirectory))
     monkeypatch.setattr(prepared, "load_run_fx_snapshot", forbidden)
     monkeypatch.setattr(exchange_rates, "current_exchange_rate_snapshot", forbidden)

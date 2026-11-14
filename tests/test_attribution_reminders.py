@@ -9,6 +9,7 @@ from src.application.daily_decision_brief_renderer import (
 )
 from src.application.daily_decision_brief_repository import read_confirmed_attribution_render_context
 from test_daily_decision_brief_repository_v2 import _brief
+from test_daily_decision_brief_notification_flow import _prepare_flow, _run_flow
 
 
 @pytest.fixture(autouse=True)
@@ -115,7 +116,7 @@ def test_real_tick_only_confirmed_advances_reminder_baseline(tmp_path, monkeypat
         return {market: {**fixture._brief(base=base, run_id=run_id, account=account,
                                        market=market, candidate=False),
                          "attribution_pending": [_pending()]} for market in markets_to_run}
-    monkeypatch.setattr(flow, "assemble_daily_decision_briefs", assemble)
+    monkeypatch.setattr("src.application.tick_brief_preparation.assemble_daily_decision_briefs", assemble)
     original_confirm = flow.confirm_daily_decision_brief_delivery_v2
     if outcome == "confirm_failure":
         def fail_confirm(**kwargs):
@@ -128,7 +129,7 @@ def test_real_tick_only_confirmed_advances_reminder_baseline(tmp_path, monkeypat
     }
     fixture._patch_sender(monkeypatch, result=result)
     first = fixture._request(tmp_path, run_id="first", no_send=outcome == "no_send")
-    assert flow.run_tick_notification_flow(first.request) == (1 if outcome in {"failed", "ambiguous", "confirm_failure"} else 0)
+    assert _run_flow(first.request) == (1 if outcome in {"failed", "ambiguous", "confirm_failure"} else 0)
     baseline = read_confirmed_attribution_render_context(base=tmp_path, account="lx", market="US")
     assert bool(baseline) == (outcome == "confirmed")
     assert read_confirmed_attribution_render_context(base=tmp_path, account="sy", market="US") == {}
@@ -139,7 +140,7 @@ def test_real_tick_only_confirmed_advances_reminder_baseline(tmp_path, monkeypat
         scheduler["lx"]["scheduled_target_market"] = "2026-07-21T11:00:00-04:00"
         scheduler["lx"]["scheduled_scan_target_market"] = "2026-07-21T11:00:00-04:00"
         next_request = replace(next_request, scheduler_decisions_by_account=scheduler)
-        prepared = flow._prepare_daily_brief_notification(next_request)
+        prepared = _prepare_flow(next_request)
         envelope = prepared.lifecycles_by_account["lx"]["envelope"]
         assert "1 笔未变化" in envelope["rendered_message"]
         assert "TCOM0 2026" not in envelope["rendered_message"]
@@ -158,7 +159,7 @@ def test_real_tick_only_confirmed_advances_reminder_baseline(tmp_path, monkeypat
         monkeypatch.setattr(flow, "confirm_daily_decision_brief_delivery_v2", original_confirm)
         fixture._patch_sender(monkeypatch)
         retry = fixture._request(tmp_path, run_id="retry", delivery_only=True)
-        assert flow.run_tick_notification_flow(retry.request) == 0
+        assert _run_flow(retry.request) == 0
         assert read_confirmed_attribution_render_context(
             base=tmp_path, account="lx", market="US") == pending["render_context"]
 
@@ -242,9 +243,9 @@ def test_candidate_alert_uses_same_attribution_summary(tmp_path, monkeypatch):
     def assemble(*, base, run_id, account, markets_to_run, **kwargs):
         return {market: {**fixture._brief(base=base, run_id=run_id, account=account, market=market),
                          "attribution_pending": [_pending()]} for market in markets_to_run}
-    monkeypatch.setattr(flow, "assemble_daily_decision_briefs", assemble)
+    monkeypatch.setattr("src.application.tick_brief_preparation.assemble_daily_decision_briefs", assemble)
     request = fixture._request(tmp_path, run_id="candidate", fixed=False).request
-    prepared = flow._prepare_daily_brief_notification(request)
+    prepared = _prepare_flow(request)
     envelope = prepared.lifecycles_by_account["lx"]["envelope"]
     assert envelope["delivery_kind"] == "candidate_alert"
     assert "TCOM0 2026" in envelope["rendered_message"]
@@ -266,8 +267,8 @@ def test_normal_prepare_reads_late_confirmation_fresh_after_scan_writes(tmp_path
                                        market=market, candidate=False),
                          "attribution_pending": [_pending()]} for market in markets_to_run}
 
-    monkeypatch.setattr(flow, "assemble_daily_decision_briefs", assemble)
-    seed = flow._prepare_daily_brief_notification(
+    monkeypatch.setattr("src.application.tick_brief_preparation.assemble_daily_decision_briefs", assemble)
+    seed = _prepare_flow(
         fixture._request(tmp_path, run_id="seed").request).lifecycles_by_account["lx"]["envelope"]
     assert seed["status"] == "pending"
     assert read_confirmed_attribution_render_context(base=tmp_path, account="lx", market="US") == {}
@@ -282,13 +283,13 @@ def test_normal_prepare_reads_late_confirmation_fresh_after_scan_writes(tmp_path
             attribution_route_key=seed["render_context"]["attribution_route_key"])
         return assemble(**kwargs)
 
-    monkeypatch.setattr(flow, "assemble_daily_decision_briefs", assemble_with_late_receipt)
+    monkeypatch.setattr("src.application.tick_brief_preparation.assemble_daily_decision_briefs", assemble_with_late_receipt)
     request = fixture._request(tmp_path, run_id="next").request
     scheduler = deepcopy(request.scheduler_decisions_by_account)
     scheduler["lx"]["scheduled_target_market"] = "2026-07-21T11:00:00-04:00"
     scheduler["lx"]["scheduled_scan_target_market"] = "2026-07-21T11:00:00-04:00"
     request = replace(request, scheduler_decisions_by_account=scheduler)
-    envelope = flow._prepare_daily_brief_notification(request).lifecycles_by_account["lx"]["envelope"]
+    envelope = _prepare_flow(request).lifecycles_by_account["lx"]["envelope"]
     assert envelope["render_context"]["attribution_reminders"]["detail_rows"] == []
     assert "1 笔未变化" in envelope["rendered_message"]
     assert "TCOM0 2026" not in envelope["rendered_message"]
@@ -303,7 +304,7 @@ def _patch_pending_tick(monkeypatch):
                                        market=market, candidate=False),
                          "attribution_pending": [_pending()]} for market in markets_to_run}
 
-    monkeypatch.setattr(flow, "assemble_daily_decision_briefs", assemble)
+    monkeypatch.setattr("src.application.tick_brief_preparation.assemble_daily_decision_briefs", assemble)
     return flow, fixture
 
 
@@ -331,7 +332,7 @@ def test_effective_route_change_reexpands_confirmed_pending_details(tmp_path, mo
     config = fixture._feishu_config() if change.startswith("feishu_") else fixture._config()
     calls = []
     fixture._patch_sender(monkeypatch, calls=calls)
-    assert flow.run_tick_notification_flow(fixture._request(tmp_path, run_id="route-a", config=config).request) == 0
+    assert _run_flow(fixture._request(tmp_path, run_id="route-a", config=config).request) == 0
     assert "TCOM0 2026" in calls[0]["message"]
     assert read_confirmed_attribution_render_context(base=tmp_path, account="lx", market="US")
     changed = deepcopy(config)
@@ -345,13 +346,13 @@ def test_effective_route_change_reexpands_confirmed_pending_details(tmp_path, mo
         _synthetic_feishu_identity(monkeypatch, sender="fixture-app-b")
     else:
         _synthetic_feishu_identity(monkeypatch, recipient="fixture-user-b")
-    assert flow.run_tick_notification_flow(_next_fixed_request(
+    assert _run_flow(_next_fixed_request(
         fixture, tmp_path, run_id="route-b", config=changed)) == 0
     assert len(calls) == 2
     assert "TCOM0 2026" in calls[1]["message"]
     assert "1 笔未变化" not in calls[1]["message"]
     # Only a confirmed delivery at B may suppress its next original scheduled detail.
-    prepared = flow._prepare_daily_brief_notification(_next_fixed_request(
+    prepared = _prepare_flow(_next_fixed_request(
         fixture, tmp_path, run_id="route-b-next", config=changed, hour=12))
     assert "1 笔未变化" in prepared.lifecycles_by_account["lx"]["envelope"]["rendered_message"]
     # Use the latest confirmed owner; returning to A conservatively expands instead
@@ -371,7 +372,7 @@ def test_same_effective_route_config_change_keeps_confirmed_baseline(tmp_path, m
     _synthetic_feishu_identity(monkeypatch)
     config = fixture._feishu_config()
     fixture._patch_sender(monkeypatch)
-    assert flow.run_tick_notification_flow(fixture._request(tmp_path, run_id="same-route", config=config).request) == 0
+    assert _run_flow(fixture._request(tmp_path, run_id="same-route", config=config).request) == 0
     changed = deepcopy(config)
     if change == "unrelated_config":
         changed["scan"] = {"fixture_setting": "changed"}
@@ -381,7 +382,7 @@ def test_same_effective_route_config_change_keeps_confirmed_baseline(tmp_path, m
         changed["notifications"]["target"] = "feishu:unused-hint-b"
     else:
         monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "fixture-rotated-secret")
-    envelope = flow._prepare_daily_brief_notification(_next_fixed_request(
+    envelope = _prepare_flow(_next_fixed_request(
         fixture, tmp_path, run_id="same-route-next", config=changed)).lifecycles_by_account["lx"]["envelope"]
     assert "1 笔未变化" in envelope["rendered_message"]
     assert "TCOM0 2026" not in envelope["rendered_message"]
@@ -392,7 +393,7 @@ def test_new_route_unconfirmed_delivery_does_not_advance_seen_baseline(tmp_path,
     flow, fixture = _patch_pending_tick(monkeypatch)
     config = fixture._config()
     fixture._patch_sender(monkeypatch)
-    assert flow.run_tick_notification_flow(fixture._request(tmp_path, run_id="confirmed-a", config=config).request) == 0
+    assert _run_flow(fixture._request(tmp_path, run_id="confirmed-a", config=config).request) == 0
     baseline = read_confirmed_attribution_render_context(base=tmp_path, account="lx", market="US")
     changed = deepcopy(config)
     changed["notifications"]["target"] = "wechat:other-recipient"
@@ -402,7 +403,7 @@ def test_new_route_unconfirmed_delivery_does_not_advance_seen_baseline(tmp_path,
         "error_code": "SEND_UNCONFIRMED" if outcome == "ambiguous" else "SEND_FAILED",
         "ambiguous_send": outcome == "ambiguous",
     })
-    assert flow.run_tick_notification_flow(_next_fixed_request(
+    assert _run_flow(_next_fixed_request(
         fixture, tmp_path, run_id="unconfirmed-b", config=changed)) == 1
     assert "TCOM0 2026" in calls[0]["message"]
     assert read_confirmed_attribution_render_context(base=tmp_path, account="lx", market="US") == baseline
@@ -428,36 +429,47 @@ def test_route_change_exact_retry_keeps_frozen_payload_and_current_sender_contra
         "error_code": "SEND_UNCONFIRMED" if outcome == "ambiguous" else "SEND_FAILED",
         "ambiguous_send": outcome == "ambiguous",
     })
-    assert flow.run_tick_notification_flow(fixture._request(tmp_path, run_id="pending-a", config=config).request) == 1
+    assert _run_flow(fixture._request(tmp_path, run_id="pending-a", config=config).request) == 1
     pending = read_retryable_daily_decision_brief_delivery(
         base=tmp_path, account="lx", market="US", market_trading_date=fixture.MARKET_DATE)["envelope"]
     changed = deepcopy(config)
     changed["notifications"]["target"] = "wechat:retry-recipient"
     calls = []
     fixture._patch_sender(monkeypatch, calls=calls)
-    assert flow.run_tick_notification_flow(fixture._request(
+    assert _run_flow(fixture._request(
         tmp_path, run_id="retry-b", delivery_only=True, config=changed).request) == 0
+    assert calls == []
+    assert read_confirmed_attribution_render_context(base=tmp_path, account="lx", market="US") == {}
+    paused = flow.read_daily_decision_brief_delivery_state(
+        base=tmp_path, account="lx", market="US")["state"]["days"][fixture.MARKET_DATE]["fixed_reports"][fixture.FIXED_TARGET]
+    assert paused["status"] == pending["status"]
+    for field in ("delivery_key", "source_digest", "message_sha256", "rendered_message", "render_context"):
+        assert paused[field] == pending[field]
+
+    # A9 permits the frozen task to continue once its original route is restored.
+    assert _run_flow(fixture._request(
+        tmp_path, run_id="retry-a", delivery_only=True, config=config).request) == 0
     assert len(calls) == 1
-    assert calls[0]["target"] == changed["notifications"]["target"]
-    assert calls[0]["notifications"] == changed["notifications"]
+    assert calls[0]["target"] == config["notifications"]["target"]
+    assert calls[0]["notifications"] == config["notifications"]
     assert calls[0]["message"] == pending["rendered_message"]
     assert calls[0]["idempotency_key"] == build_notification_transport_key(pending["delivery_key"])
-    # The exact envelope is not silently re-rendered against the new config.
     confirmed = flow.read_daily_decision_brief_delivery_state(
         base=tmp_path, account="lx", market="US")["state"]["days"][fixture.MARKET_DATE]["fixed_reports"][fixture.FIXED_TARGET]
+    assert confirmed["status"] == "confirmed"
     for field in ("delivery_key", "source_digest", "message_sha256", "rendered_message", "render_context"):
         assert confirmed[field] == pending[field]
-    assert read_confirmed_attribution_render_context(base=tmp_path, account="lx", market="US") == {}
-    # A never received the pending attempt; B received an A-frozen context. Neither
-    # route can use this receipt to suppress the next newly rendered detail.
-    for hour, next_config in enumerate((config, changed), start=11):
+    assert read_confirmed_attribution_render_context(
+        base=tmp_path, account="lx", market="US") == pending["render_context"]
+    # A received the exact frozen details; B cannot inherit A's confirmed seen state.
+    for hour, next_config, expanded in ((11, config, False), (12, changed, True)):
         rebuilt = flow._rebuild_daily_brief_delivery(
             request=_next_fixed_request(fixture, tmp_path, run_id="after-cross-route-retry", config=next_config, hour=hour),
             account="lx", market="US", market_date=fixture.MARKET_DATE,
             scheduler={"scheduled_target_market": f"2026-07-21T{hour}:00:00-04:00"}, daily_limits={},
         )["envelope"]
-        assert "TCOM0 2026" in rebuilt["rendered_message"]
-        assert "1 笔未变化" not in rebuilt["rendered_message"]
+        assert ("TCOM0 2026" in rebuilt["rendered_message"]) is expanded
+        assert ("1 笔未变化" in rebuilt["rendered_message"]) is not expanded
 
 
 @pytest.mark.parametrize("change", ["binding_recipient", "state_directory"])
@@ -473,7 +485,7 @@ def test_wechat_resolved_binding_change_reexpands_details(tmp_path, monkeypatch,
     binding = {"bindings": {"ops": {"to_user_id": "fixture-recipient-a", "context_token": "fixture-context-a"}}}
     (state_dir / "bindings.json").write_text(json.dumps(binding), encoding="utf-8")
     fixture._patch_sender(monkeypatch)
-    assert flow.run_tick_notification_flow(fixture._request(tmp_path, run_id="binding-a", config=config).request) == 0
+    assert _run_flow(fixture._request(tmp_path, run_id="binding-a", config=config).request) == 0
     changed = deepcopy(config)
     if change == "binding_recipient":
         binding["bindings"]["ops"]["to_user_id"] = "fixture-recipient-b"
@@ -483,7 +495,7 @@ def test_wechat_resolved_binding_change_reexpands_details(tmp_path, monkeypatch,
         changed_dir.mkdir()
         (changed_dir / "bindings.json").write_text(json.dumps(binding), encoding="utf-8")
         changed["notifications"]["wechat_clawbot_state_dir"] = str(changed_dir)
-    prepared = flow._prepare_daily_brief_notification(_next_fixed_request(
+    prepared = _prepare_flow(_next_fixed_request(
         fixture, tmp_path, run_id="binding-b", config=changed))
     message = prepared.lifecycles_by_account["lx"]["envelope"]["rendered_message"]
     assert "TCOM0 2026" in message
@@ -496,13 +508,13 @@ def test_unavailable_effective_route_never_suppresses_pending_detail(tmp_path, m
     _synthetic_feishu_identity(monkeypatch)
     config = fixture._config() if unknown == "missing_wechat_binding" else fixture._feishu_config()
     fixture._patch_sender(monkeypatch)
-    assert flow.run_tick_notification_flow(fixture._request(tmp_path, run_id="known", config=config).request) == 0
+    assert _run_flow(fixture._request(tmp_path, run_id="known", config=config).request) == 0
     changed = deepcopy(config)
     if unknown == "missing_wechat_binding":
         changed["notifications"]["target"] = "wechat:binding-does-not-exist"
     else:
         monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "")
-    envelope = flow._prepare_daily_brief_notification(_next_fixed_request(
+    envelope = _prepare_flow(_next_fixed_request(
         fixture, tmp_path, run_id="unknown-route", config=changed)).lifecycles_by_account["lx"]["envelope"]
     assert "TCOM0 2026" in envelope["rendered_message"]
     assert "1 笔未变化" not in envelope["rendered_message"]
@@ -515,13 +527,13 @@ def test_reminder_route_identity_does_not_resolve_sender_secret_during_prepare(t
     _synthetic_feishu_identity(monkeypatch)
     config = fixture._feishu_config()
     fixture._patch_sender(monkeypatch)
-    assert flow.run_tick_notification_flow(fixture._request(tmp_path, run_id="secret-seed", config=config).request) == 0
+    assert _run_flow(fixture._request(tmp_path, run_id="secret-seed", config=config).request) == 0
 
     def forbidden_secret_resolution(*args, **kwargs):
         raise AssertionError("reminder identity must only read non-secret sender metadata")
 
     monkeypatch.setattr(secrets, "_secret", forbidden_secret_resolution)
-    envelope = flow._prepare_daily_brief_notification(_next_fixed_request(
+    envelope = _prepare_flow(_next_fixed_request(
         fixture, tmp_path, run_id="metadata-only", config=config)).lifecycles_by_account["lx"]["envelope"]
     assert "1 笔未变化" in envelope["rendered_message"]
 
@@ -532,7 +544,7 @@ def test_repeat_confirmation_cannot_replace_actual_reminder_route(tmp_path, monk
 
     flow, fixture = _patch_pending_tick(monkeypatch)
     fixture._patch_sender(monkeypatch)
-    assert flow.run_tick_notification_flow(fixture._request(tmp_path, run_id="confirmed-route").request) == 0
+    assert _run_flow(fixture._request(tmp_path, run_id="confirmed-route").request) == 0
     envelope = flow.read_daily_decision_brief_delivery_state(
         base=tmp_path, account="lx", market="US")["state"]["days"][fixture.MARKET_DATE]["fixed_reports"][fixture.FIXED_TARGET]
     original_route = envelope["confirmed_attribution_route_key"]
@@ -556,7 +568,7 @@ def test_unknown_or_different_actual_route_receipt_never_becomes_seen_baseline(t
     from src.application.notification_delivery_adapter import build_notification_transport_key
 
     flow, fixture = _patch_pending_tick(monkeypatch)
-    envelope = flow._prepare_daily_brief_notification(
+    envelope = _prepare_flow(
         fixture._request(tmp_path, run_id="unproven-route").request).lifecycles_by_account["lx"]["envelope"]
     assert envelope["render_context"]["attribution_route_key"]
     confirm_daily_decision_brief_delivery_v2(
@@ -567,7 +579,7 @@ def test_unknown_or_different_actual_route_receipt_never_becomes_seen_baseline(t
         attribution_route_key=actual_route, confirmed_at_utc="2026-07-21T14:01:00Z",
     )
     assert read_confirmed_attribution_render_context(base=tmp_path, account="lx", market="US") == {}
-    next_envelope = flow._prepare_daily_brief_notification(_next_fixed_request(
+    next_envelope = _prepare_flow(_next_fixed_request(
         fixture, tmp_path, run_id="no-route-proof", config=fixture._config())).lifecycles_by_account["lx"]["envelope"]
     assert "TCOM0 2026" in next_envelope["rendered_message"]
     assert "1 笔未变化" not in next_envelope["rendered_message"]
@@ -579,7 +591,7 @@ def test_malformed_actual_route_receipt_is_rejected_without_rewriting_state(tmp_
 
     flow, fixture = _patch_pending_tick(monkeypatch)
     fixture._patch_sender(monkeypatch)
-    assert flow.run_tick_notification_flow(fixture._request(tmp_path, run_id="valid-receipt").request) == 0
+    assert _run_flow(fixture._request(tmp_path, run_id="valid-receipt").request) == 0
     result = flow.read_daily_decision_brief_delivery_state(base=tmp_path, account="lx", market="US")
     path = result["path"]
     raw = json.loads(path.read_text(encoding="utf-8"))
@@ -631,7 +643,7 @@ def test_dual_root_reminders_bind_actual_sender_root_and_keep_receipts_in_runtim
     fixture._patch_sender(monkeypatch, calls=calls)
     first = replace(fixture._request(runtime_base, run_id="dual-root-a", config=config).request,
                     repo_root=repo_root)
-    assert flow.run_tick_notification_flow(first) == 0
+    assert _run_flow(first) == 0
     assert calls[0]["base"] == repo_root.resolve()
     baseline = read_confirmed_attribution_render_context(base=runtime_base, account="lx", market="US")
     assert baseline["attribution_route_key"] == sender_key
@@ -640,7 +652,7 @@ def test_dual_root_reminders_bind_actual_sender_root_and_keep_receipts_in_runtim
 
     unchanged = replace(_next_fixed_request(
         fixture, runtime_base, run_id="dual-root-unchanged", config=config), repo_root=repo_root)
-    assert flow.run_tick_notification_flow(unchanged) == 0
+    assert _run_flow(unchanged) == 0
     assert "1 笔未变化" in calls[1]["message"]
     assert "TCOM0 2026" not in calls[1]["message"]
     assert calls[1]["base"] == repo_root.resolve()
@@ -648,7 +660,7 @@ def test_dual_root_reminders_bind_actual_sender_root_and_keep_receipts_in_runtim
     write_binding(repo_root, "fixture-actual-recipient-b")
     rebound = replace(_next_fixed_request(
         fixture, runtime_base, run_id="dual-root-rebound", config=config, hour=12), repo_root=repo_root)
-    assert flow.run_tick_notification_flow(rebound) == 0
+    assert _run_flow(rebound) == 0
     assert "TCOM0 2026" in calls[2]["message"]
     assert "1 笔未变化" not in calls[2]["message"]
     rebound_baseline = read_confirmed_attribution_render_context(base=runtime_base, account="lx", market="US")
@@ -659,6 +671,6 @@ def test_dual_root_reminders_bind_actual_sender_root_and_keep_receipts_in_runtim
     sender_binding_path.write_text(json.dumps({"bindings": {}}), encoding="utf-8")
     missing = replace(_next_fixed_request(
         fixture, runtime_base, run_id="dual-root-missing", config=config, hour=13), repo_root=repo_root)
-    envelope = flow._prepare_daily_brief_notification(missing).lifecycles_by_account["lx"]["envelope"]
+    envelope = _prepare_flow(missing).lifecycles_by_account["lx"]["envelope"]
     assert envelope["render_context"]["attribution_route_key"] is None
     assert "TCOM0 2026" in envelope["rendered_message"]

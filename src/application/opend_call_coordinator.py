@@ -38,16 +38,15 @@ def rate_limited_opend_call(
         diagnostics["rate_gate_wait_sec"] = diagnostics.get("rate_gate_wait_sec", 0.0) + waited
     check_fetch_control(deadline, cancelled)
     try:
-        try:
-            result = call()
-        finally:
-            check_fetch_control(deadline, cancelled)
-        return result
+        result = call()
     except Exception as exc:
         check_fetch_control(deadline, cancelled)
         if classify_opend_error(exc).is_rate_limit:
             limiter.record_rate_limit(**({"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}))
         raise
+    # Preserve an in-flight BaseException; normal returns still check the budget.
+    check_fetch_control(deadline, cancelled)
+    return result
 
 
 __all__ = [

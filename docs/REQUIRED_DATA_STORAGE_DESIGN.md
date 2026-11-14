@@ -17,8 +17,24 @@ those files after canonical publication.
   `cached_unique_symbols=0`; no top-level `cached` field is introduced.
 - Four source-snapshot append sites preserve the fetch payload on append failure
   and log `source_snapshot_event_append_failed` with symbol and exception type.
-  A failing logging handler also preserves the payload. Planning and provider
-  failures keep their existing fail-closed behavior.
+  A failing logging handler also preserves the payload. Failed data remains
+  unavailable within its verified dependency scope; it is never a successful
+  empty result.
+- Formal planning retains the complete account/symbol denominator and hashes.
+  A symbol's failed expiration discovery is sealed in `failed_planning_scopes`
+  with its provider/parse error; healthy symbols continue. Independently specified
+  held contracts may still be fetched as exact Close Advice requirements. Those
+  exact rows do not prove discovery coverage and cannot authorize opening or roll
+  searches. Common plan/manifest identity or integrity failures still block every
+  dependent scope. Shared collateral, active-intent reservations and stock locks
+  remain reserved when a symbol is unscanned; unknown financial impact widens the
+  failure boundary.
+- Fallback recovery preserves every attempt in `attempt_errors` and batch
+  receipts. Business `errors` retain unresolved and structural failures; a fully
+  recovered provider attempt does not make valid final quotes unavailable.
+- Tick's earlier monotonic deadline and cancellation follow planning, limiter,
+  retry, waves, actual gateway calls and the existing SDK process proxy. Runtime
+  controls are excluded from source identities and strategy content hashes.
 - `src/application/tick_account_execution.py` reads the newly sealed
   manifest's exact bytes for `snapshot_manifest_sha256` and shadow retirement.
   This read remains necessary: serializing the returned dictionary does not prove
@@ -517,8 +533,8 @@ For a failed symbol:
   while the planning deadline has not been reached;
 - do not manufacture expirations, reuse another symbol's plan, or convert a
   provider/planning failure into `success_empty`;
-- leave the later formal prefetch unchanged and fail closed there if required
-  data is still unavailable.
+- let formal prefetch apply the run-scoped contract above: unavailable discovery
+  remains explicit while independently verified healthy scopes continue.
 
 Check the existing worker deadline between symbol plans as well as between
 fetch shards. When planning reaches it, preserve the current

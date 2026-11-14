@@ -56,7 +56,9 @@ def test_multi_tick_scheduled_renderer_authority_is_daily_brief_only() -> None:
     base = Path(__file__).resolve().parents[1]
     notification_flow_src = (base / "src" / "application" / "tick_notification_flow.py").read_text(encoding="utf-8")
     helper_src = (base / "src" / "application" / "scheduled_notification.py").read_text(encoding="utf-8")
-    assert "_prepare_daily_brief_notification(request)" in notification_flow_src
+    tick_owner_src = (base / "src" / "application" / "multi_account_tick.py").read_text(encoding="utf-8")
+    assert "_prepare_daily_brief_notification(request, brief_preparation=briefs)" in tick_owner_src
+    assert "daily_brief_prep = request.preparation" in notification_flow_src
     assert "prepare_multi_account_notification(" not in notification_flow_src
     assert "prepare_per_account_messages(" not in helper_src
     assert "snapshot_account_messages(" not in helper_src

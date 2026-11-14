@@ -27,6 +27,7 @@ from domain.domain.engine.candidate_engine import (
 from domain.domain.fee_calc import calc_futu_option_fee
 from domain.domain.sell_call_config import resolve_effective_sell_call_min_strike
 from domain.domain.symbol_identity import symbol_market
+from src.application.candidate_scanning import evidence_summary_from_decisions
 from src.application.scan_sell_call import run_sell_call_scan
 from src.application.sell_call_steps import _optional_float
 from src.application.covered_call_strategy_risk import (
@@ -132,6 +133,28 @@ def run_cc_lp_scan(
             cost_multiplier=_optional_float(sell_call_cfg, "min_strike_cost_multiplier") or 1.02,
         )
     )
+    funding_call_decisions: list[dict[str, Any]] = []
+
+    def with_evidence(
+        result: pd.DataFrame, *, accepted_calls: int, put_count: int = 0, unresolved: int = 0,
+    ) -> pd.DataFrame:
+        evidence = evidence_summary_from_decisions(
+            decisions=funding_call_decisions, accepted_count=accepted_calls,
+        )
+        if accepted_calls:
+            # Accepted Calls advance to the Put/pair owner; they are not completed
+            # alternatives when the required Puts remain unresolved. Preserve the
+            # existing Put summary shape and count each terminal contract once.
+            evidence = {
+                "evaluated_contract_count": (
+                    evidence["evaluated_contract_count"] + put_count
+                    - (accepted_calls if put_count else 0)
+                ),
+                "eligibility_unresolved_count": evidence["eligibility_unresolved_count"] + unresolved,
+            }
+        result.attrs["_evidence_summary"] = evidence
+        return result
+
     df_calls = run_sell_call_scan_fn(
         symbols=[symbol],
         input_root=required_data_dir,
@@ -165,6 +188,7 @@ def run_cc_lp_scan(
         max_spread_ratio=liquidity.max_spread_ratio,
         strategy_family=SELL_CALL_FAMILY,
         strategy_profile="cc_lp_funding_call",
+        calculation_decision_sink_fn=funding_call_decisions.extend,
         required_data_frames=(
             {symbol: required_data_frame}
             if required_data_frame is not None
@@ -173,7 +197,7 @@ def run_cc_lp_scan(
         demo_capacity=demo_capacity,
     )
     if df_calls.empty:
-        return pd.DataFrame()
+        return with_evidence(pd.DataFrame(), accepted_calls=0)
     df_calls = enrich_and_filter_covered_call_underwriting(
         df_labeled=df_calls,
         symbol=symbol,
@@ -184,16 +208,17 @@ def run_cc_lp_scan(
         },
         portfolio_ctx=portfolio_ctx,
         exchange_rate_converter=exchange_rate_converter,
+        decision_sink_fn=funding_call_decisions.extend,
     )
     if df_calls.empty:
-        return pd.DataFrame()
+        return with_evidence(pd.DataFrame(), accepted_calls=0)
     df_puts = _load_required_data_puts(
         input_root=required_data_dir,
         symbol=symbol,
         required_data_frame=required_data_frame,
     )
     if df_puts.empty:
-        return pd.DataFrame()
+        return with_evidence(pd.DataFrame(), accepted_calls=len(df_calls))
 
     rows: list[dict[str, Any]] = []
     put_rows = df_puts.to_dict("records")
@@ -315,11 +340,9 @@ def run_cc_lp_scan(
             )
     ranked = rank_cc_lp_rows(rows)
     result = pd.DataFrame(ranked)
-    result.attrs["_evidence_summary"] = {
-        "evaluated_contract_count": len(put_rows),
-        "eligibility_unresolved_count": unresolved,
-    }
-    return result
+    return with_evidence(
+        result, accepted_calls=len(df_calls), put_count=len(put_rows), unresolved=unresolved,
+    )
 
 
 def summarize_cc_lp_result(

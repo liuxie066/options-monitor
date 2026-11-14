@@ -1736,7 +1736,9 @@ def test_real_preparation_deadline_excludes_accounts_from_tick(
         assert loaded["fx_snapshot_sha256"] == "f" * 64
         return _outcome(request.acct)
 
-    monkeypatch.setattr(prepared, "time", SimpleNamespace(monotonic=lambda: clock.now, sleep=_forbidden))
+    preparation_clock = SimpleNamespace(monotonic=lambda: clock.now, sleep=_forbidden)
+    monkeypatch.setattr(prepared, "time", preparation_clock)
+    monkeypatch.setattr("src.infrastructure.fetch_control.time", preparation_clock)
     monkeypatch.setattr(prepared, "_read_worker_result", _read_result)
     monkeypatch.setattr(prepared, "run_worker", _forbidden)
     monkeypatch.setattr(prepared, "fetch_futu_portfolio_context", _forbidden)

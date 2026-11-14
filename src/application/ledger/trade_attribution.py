@@ -697,6 +697,9 @@ def build_trade_attribution_view(
                 candidates[lot].append({"candidate_id": "combo:" + pair["strategy_group_id"], "strategy": "combo_yield",
                     "eligible": not reasons, "reason_codes": reasons[:], "member_lot_ids": members,
                     "strategy_group_id": pair["strategy_group_id"], "inference": pair})
+    # Rows/account/market are fixed for this invocation. Historical branches may
+    # be reused only at the identical fill instant, never across distinct times.
+    historical_branches_by_time: dict[int, dict[str, Any]] = {}
     for fact in facts:
         lot = fact["lot_id"]
         if effective_contracts_open(stored.get(lot) or {}) != fact["contracts_open"]:
@@ -716,14 +719,16 @@ def build_trade_attribution_view(
         if fact["position_side"] != "short" or fact["contracts_open"] <= 0:
             continue
         contract = fact["contract_key"]
-        # ponytail: reuse the historical projector per fill; cache by event time if account history becomes large.
         matching_branches = [branch for branch in branches
             if branch["symbol"] == contract["underlying_symbol"] and branch["direction"] == contract["option_type"]
             and branch["lifecycle_status"] == "active"]
         if not matching_branches:
             continue
-        historical = build_wheel_read_model_from_rows(rows, account=account, as_of_ms=fact["event_time_ms"], market=market)
-        history = {row["wheel_branch_id"]: row for row in historical["wheel_branches"]}
+        fill_time = fact["event_time_ms"]
+        if fill_time not in historical_branches_by_time:
+            historical = build_wheel_read_model_from_rows(rows, account=account, as_of_ms=fill_time, market=market)
+            historical_branches_by_time[fill_time] = {row["wheel_branch_id"]: row for row in historical["wheel_branches"]}
+        history = historical_branches_by_time[fill_time]
         for branch in matching_branches:
             branch_id = branch["wheel_branch_id"]
             reasons = []

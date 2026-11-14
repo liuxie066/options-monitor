@@ -98,6 +98,7 @@ class MarketSnapshotFetchResult:
     code_receipts: dict[str, tuple[str | None, str | None]] = field(default_factory=dict)
     batch_receipts: tuple[dict[str, Any], ...] = ()
     provider_responses: tuple[dict[str, Any], ...] = ()
+    attempt_errors: tuple[dict[str, Any], ...] = ()
 
     @property
     def requested_codes_count(self) -> int:
@@ -116,7 +117,21 @@ class MarketSnapshotFetchResult:
         return len(self.unexpected_codes)
 
 
-def _record_snapshot_call(gateway, codes, receipts, *, stage, batch_start, provider_responses):
+def _capture_snapshot_provider_response(result, receipts, provider_responses):
+    response = {"batch_receipt_index": len(receipts) - 1, "rows": None, "capture_error": None}
+    provider_responses.append(response)
+    try:
+        response["rows"] = [] if result is None else futu_dataframe_records(result)
+    except Exception as exc:
+        # Capturing extra provider fields must not change the quote owner's result.
+        response["capture_error"] = type(exc).__name__
+
+
+def _record_snapshot_call(
+    gateway, codes, receipts, *, stage, batch_start, provider_responses,
+    deadline=None, cancelled=None,
+):
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
     receipt = {
         "stage": stage,
         "batch_start": batch_start,
@@ -136,22 +151,17 @@ def _record_snapshot_call(gateway, codes, receipts, *, stage, batch_start, provi
     try:
         guarded_request = getattr(gateway, "get_snapshot_with_request_hook", None)
         if callable(guarded_request):
-            result = guarded_request(codes, before_request=before_request)
+            result = guarded_request(codes, before_request=before_request, **controls)
         else:
             before_request()
-            result = gateway.get_snapshot(codes)
+            result = gateway.get_snapshot(codes, **controls)
         receipt["received_at_utc"] = datetime.now(timezone.utc).isoformat()
         receipt["status"] = "empty" if result is None or result.empty else "received"
-        response = {"batch_receipt_index": len(receipts) - 1, "rows": None, "capture_error": None}
-        provider_responses.append(response)
-        try:
-            response["rows"] = [] if result is None else futu_dataframe_records(result)
-        except Exception as exc:
-            # Capturing extra provider fields must not change the quote owner's result.
-            response["capture_error"] = type(exc).__name__
+        _capture_snapshot_provider_response(result, receipts, provider_responses)
         return result
     except BaseException as exc:
         receipt["error_code"] = type(exc).__name__
+        receipt["message"] = str(exc)
         raise
     finally:
         if receipt["provider_call_started"] and receipt["received_at_utc"] is None:
@@ -198,7 +208,7 @@ def get_spot_opend_quote(
             check_fetch_control(deadline, cancelled)
             requested_at = datetime.now(timezone.utc).isoformat()
             try:
-                result = gateway.get_snapshot([underlier_code])
+                result = gateway.get_snapshot([underlier_code], **controls)
             finally:
                 received_at = datetime.now(timezone.utc).isoformat()
                 check_fetch_control(deadline, cancelled)
@@ -333,7 +343,7 @@ def get_underlier_observation_opend(
             _increment_metric(metrics, "spot_snapshot_requested_codes")
             check_fetch_control(deadline, cancelled)
             try:
-                result = gateway.get_snapshot([underlier_code])
+                result = gateway.get_snapshot([underlier_code], **controls)
             finally:
                 check_fetch_control(deadline, cancelled)
             return result
@@ -365,7 +375,7 @@ def get_underlier_observation_opend(
             _increment_metric(metrics, "spot_market_state_requested_codes")
             check_fetch_control(deadline, cancelled)
             try:
-                result = gateway.get_market_state([underlier_code])
+                result = gateway.get_market_state([underlier_code], **controls)
             finally:
                 check_fetch_control(deadline, cancelled)
             return result
@@ -466,7 +476,8 @@ def get_underlier_observations_opend(
             def _provider_call() -> Any:
                 evidence["attempts"] += 1
                 try:
-                    return getattr(gateway, endpoint)(batch)
+                    controls = {"deadline": endpoint_stop, "cancelled": cancelled} if deadline is not None or cancelled is not None or stop_monotonic is not None else {}
+                    return getattr(gateway, endpoint)(batch, **controls)
                 except Exception as exc:
                     evidence["errors"].append(
                         {
@@ -733,6 +744,7 @@ def fetch_option_snapshots(
     controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
     snap_map: dict[str, dict[str, Any]] = {}
     snapshot_errors: list[dict[str, Any]] = []
+    failed_requests: list[tuple[list[str], dict[str, Any]]] = []
     batch_requested_at: list[datetime] = []
     batch_received_at: list[datetime] = []
     requested_code_order = tuple(
@@ -804,7 +816,10 @@ def fetch_option_snapshots(
 
         return MarketSnapshotFetchResult(
             snap_map=snap_map,
-            errors=snapshot_errors,
+            errors=[
+                *(error for batch, error in failed_requests if missing_codes.intersection(batch)),
+                *snapshot_errors,
+            ],
             requested_codes=requested_codes,
             returned_codes=returned_code_set,
             missing_codes=missing_codes,
@@ -818,6 +833,10 @@ def fetch_option_snapshots(
             code_receipts=code_receipts,
             batch_receipts=tuple(batch_receipts),
             provider_responses=tuple(provider_responses),
+            attempt_errors=tuple(
+                [error for _batch, error in failed_requests]
+                + [error for error in snapshot_errors if error.get("stage") == "market_snapshot_fallback"]
+            ),
         )
 
     try:
@@ -842,6 +861,7 @@ def fetch_option_snapshots(
                             stage="market_snapshot",
                             batch_start=start,
                             provider_responses=provider_responses,
+                            **controls,
                         )
                         check_fetch_control(deadline, cancelled)
                         return result
@@ -871,14 +891,17 @@ def fetch_option_snapshots(
                 raise
             except Exception as exc:
                 check_fetch_control(deadline, cancelled)
-                snapshot_errors.append(
-                    {
-                        "stage": "market_snapshot",
-                        "batch_start": start,
-                        "batch_size": len(batch),
-                        "error_code": classify_error(exc),
-                        "message": str(exc),
-                    }
+                failed_requests.append(
+                    (
+                        batch,
+                        {
+                            "stage": "market_snapshot",
+                            "batch_start": start,
+                            "batch_size": len(batch),
+                            "error_code": classify_error(exc),
+                            "message": str(exc),
+                        },
+                    )
                 )
                 snap = None
             if len(batch_receipts) == receipt_start:
@@ -1088,6 +1111,7 @@ def _fallback_fetch_missing_snapshots(
                         stage="market_snapshot_fallback",
                         batch_start=start,
                         provider_responses=provider_responses,
+                        **controls,
                     )
                     check_fetch_control(deadline, cancelled)
                     return result

@@ -5,12 +5,13 @@ from __future__ import annotations
 import base64
 import os
 import subprocess
+import time
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from src.infrastructure.futu_gateway import build_futu_gateway
+from src.infrastructure.futu_gateway import build_futu_gateway, check_fetch_control
 from src.infrastructure.opend_watchdog import classify_watchdog_result, port_open
 
 
@@ -20,17 +21,46 @@ def run_command(
     cwd: Path,
     capture_output: bool = False,
     text: bool = False,
-    timeout_sec: int | None = None,
+    timeout_sec: float | None = None,
     env: dict[str, str] | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> subprocess.CompletedProcess[Any]:
-    return subprocess.run(
-        cmd,
-        cwd=str(cwd),
-        capture_output=capture_output,
-        text=text,
-        timeout=timeout_sec,
-        env=env,
-    )
+    check_fetch_control(deadline, cancelled)
+    if deadline is not None:
+        remaining = max(0.0, deadline - time.monotonic())
+        timeout_sec = remaining if timeout_sec is None else min(timeout_sec, remaining)
+    if cancelled is None:
+        result = subprocess.run(
+            cmd, cwd=str(cwd), capture_output=capture_output, text=text,
+            timeout=timeout_sec, env=env,
+        )
+        check_fetch_control(deadline, cancelled)
+        return result
+
+    # communicate() remains interruptible when the caller supplies cancellation.
+    stop = None if timeout_sec is None else time.monotonic() + timeout_sec
+    with subprocess.Popen(
+        cmd, cwd=str(cwd), text=text, env=env,
+        stdout=subprocess.PIPE if capture_output else None,
+        stderr=subprocess.PIPE if capture_output else None,
+    ) as process:
+        try:
+            while True:
+                check_fetch_control(deadline, cancelled)
+                remaining = .05 if stop is None else stop - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(cmd, timeout_sec)
+                try:
+                    stdout, stderr = process.communicate(timeout=min(.05, remaining))
+                except subprocess.TimeoutExpired:
+                    continue
+                check_fetch_control(deadline, cancelled)
+                return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
+        except BaseException:
+            process.kill()
+            process.communicate()
+            raise
 
 
 def run_scan_scheduler_cli(
@@ -47,6 +77,8 @@ def run_scan_scheduler_cli(
     mark_notified: bool = False,
     force: bool = False,
     capture_output: bool = True,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> subprocess.CompletedProcess[Any]:
     cmd = [
         str(vpy),
@@ -72,7 +104,8 @@ def run_scan_scheduler_cli(
         cmd.append('--mark-notified')
     if force:
         cmd.append('--force')
-    return run_command(cmd, cwd=base, capture_output=capture_output, text=True)
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
+    return run_command(cmd, cwd=base, capture_output=capture_output, text=True, **controls)
 
 
 def run_pipeline_script(
@@ -102,6 +135,8 @@ def run_pipeline_script(
     env: dict[str, str] | None = None,
     experience: bool = False,
     account_display_name: str | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> subprocess.CompletedProcess[Any]:
     cmd = [
         str(vpy),
@@ -233,12 +268,14 @@ def run_pipeline_script(
         ).decode("ascii")
     else:
         child_env = env
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
     return run_command(
         cmd,
         cwd=base,
         capture_output=capture_output,
         text=text,
         env=child_env,
+        **controls,
     )
 
 
@@ -257,6 +294,8 @@ def run_opend_watchdog(
     required_capability: str = "both",
     expected_account_ids: list[str] | None = None,
     trd_env: str = "REAL",
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> subprocess.CompletedProcess[Any] | dict[str, Any]:
     command = [
         str(vpy), "-m", "src.infrastructure.opend_watchdog", "--json",
@@ -275,7 +314,8 @@ def run_opend_watchdog(
         for account_id in expected_account_ids or []:
             command.extend(["--expected-account-id", str(account_id)])
     try:
-        return run_command(command, cwd=base, capture_output=True, text=True, timeout_sec=timeout_sec)
+        controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
+        return run_command(command, cwd=base, capture_output=True, text=True, timeout_sec=timeout_sec, **controls)
     except subprocess.TimeoutExpired as exc:
         output = "\n".join(
             part.decode("utf-8", errors="replace") if isinstance(part, bytes) else str(part)
@@ -292,6 +332,8 @@ def trading_day_via_futu(
     host: str,
     port: int,
     market: str,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> tuple[bool | None, str]:
     """读取交易日状态。
 
@@ -301,7 +343,11 @@ def trading_day_via_futu(
     """
     market_used = str(market or '').upper().strip() or 'US'
 
-    if not port_open(str(host), int(port)):
+    check_fetch_control(deadline, cancelled)
+    probe = {} if deadline is None else {"timeout": min(.8, max(0.0, deadline - time.monotonic()))}
+    reachable = port_open(str(host), int(port), **probe)
+    check_fetch_control(deadline, cancelled)
+    if not reachable:
         return (None, market_used)
 
     gateway = None
@@ -316,13 +362,16 @@ def trading_day_via_futu(
             market=market_used,
             start=trading_date_text,
             end=trading_date_text,
+            **({"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}),
         )
+        check_fetch_control(deadline, cancelled)
         return _is_trading_day_rows(
             rows,
             market=market_used,
             trading_date_text=trading_date_text,
         )
     except Exception:
+        check_fetch_control(deadline, cancelled)
         return (None, market_used)
     finally:
         if gateway is not None:

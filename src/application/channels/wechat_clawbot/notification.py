@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
 
 from domain.domain.tool_boundary import normalize_subprocess_adapter_payload
 from domain.domain.multi_tick import WECHAT_CLAWBOT_NOTIFICATION_PROVIDER, notification_route_identity_hash
-from src.application.channels.wechat_clawbot.ilink_client import WechatClawbotClient
+from src.application.channels.wechat_clawbot.ilink_client import WechatClawbotClient, WechatClawbotError, http_json
+from src.infrastructure.fetch_control import _FetchControlTimeout, check_fetch_control
 from src.application.channels.wechat_clawbot.message import response_code, response_message_id, response_success
 from src.application.channels.wechat_clawbot.state import (
     load_wechat_clawbot_binding,
@@ -92,7 +94,10 @@ def send_wechat_clawbot_message(
     notifications: dict[str, Any] | None = None,
     idempotency_key: str | None = None,
     client_factory: ClientFactory = WechatClawbotClient,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
+    check_fetch_control(deadline, cancelled)
     if str(channel or "").strip().lower() != "wechat_clawbot":
         raise ValueError(f"unsupported notification provider for WeChat ClawBot sender: {channel}")
     text = str(message or "")
@@ -109,7 +114,10 @@ def send_wechat_clawbot_message(
         sender=[state.label, *sender_scope],
         recipient=[binding.to_user_id, binding.group_id, binding.chat_key]) if sender_scope else None)
     timeout_sec = int((notifications or {}).get("send_timeout_sec") or 60)
-    client = client_factory(bot_token=state.bot_token, base_url=state.base_url, timeout=timeout_sec)
+    client_kwargs: dict[str, Any] = {}
+    if deadline is not None or cancelled is not None:
+        client_kwargs["http_json_fn"] = partial(http_json, deadline=deadline, cancelled=cancelled)
+    client = client_factory(bot_token=state.bot_token, base_url=state.base_url, timeout=timeout_sec, **client_kwargs)
     client_id = _client_id_from_idempotency_key(idempotency_key)
     response_json = client.send_text_message(
         to_user_id=binding.to_user_id,
@@ -121,6 +129,7 @@ def send_wechat_clawbot_message(
     initial_response_json = response_json
     fallback_response_json: dict[str, Any] | None = None
     if binding.context_token and _context_token_rejected(response_json):
+        check_fetch_control(deadline, cancelled)
         fallback_response_json = client.send_text_message(
             to_user_id=binding.to_user_id,
             group_id=binding.group_id,
@@ -190,6 +199,7 @@ def normalize_wechat_clawbot_send_output(*, send_result: dict[str, Any]) -> dict
         extra={
             "command_ok": command_ok,
             "delivery_confirmed": delivery_confirmed,
+            "ambiguous_send": bool(result.get("ambiguous_send")),
             "message_id": (None if message_id is None else str(message_id)),
             "upstream_message_id": (None if upstream_message_id is None else str(upstream_message_id)),
             "http_status": result.get("http_status"),
@@ -213,15 +223,26 @@ def send_wechat_clawbot_message_process(
     message: str,
     notifications: dict[str, Any] | None = None,
     idempotency_key: str | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> Any:
-    send_result = send_wechat_clawbot_message(
-        base=base,
-        channel=channel,
-        target=target,
-        message=message,
-        notifications=notifications,
-        idempotency_key=idempotency_key,
-    )
+    try:
+        send_result = send_wechat_clawbot_message(
+            base=base,
+            channel=channel,
+            target=target,
+            message=message,
+            notifications=notifications,
+            idempotency_key=idempotency_key,
+            **({"deadline": deadline, "cancelled": cancelled}
+               if deadline is not None or cancelled is not None else {}),
+        )
+    except (WechatClawbotError, _FetchControlTimeout) as exc:
+        transport_error = exc.__cause__ if isinstance(exc, _FetchControlTimeout) else exc
+        if not isinstance(transport_error, WechatClawbotError) or not transport_error.request_attempted:
+            raise
+        send_result = {"ok": False, "http_status": None, "ambiguous_send": True,
+                       "idempotency_key": idempotency_key}
     normalized = normalize_wechat_clawbot_send_output(send_result=send_result)
     stdout = json.dumps(
         {

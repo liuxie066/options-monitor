@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import hashlib
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from time import monotonic
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 from zoneinfo import ZoneInfo
 
 from domain.domain.daily_decision_brief import (
@@ -49,13 +49,11 @@ from src.application.daily_decision_brief_renderer import (
 )
 from src.application.daily_decision_brief_repository import (
     DailyBriefReadScope,
-    daily_brief_delivery_validation_scope,
+    DailyDecisionBriefStateError,
     begin_daily_decision_brief_recovery_attempt,
     bind_daily_decision_brief_recovery_report,
     classify_retryable_daily_decision_brief_payload,
     confirm_daily_decision_brief_delivery_v2,
-    persist_daily_decision_brief_success,
-    persist_daily_decision_brief_failure,
     prepare_daily_decision_brief_delivery,
     list_daily_decision_brief_revisions,
     read_daily_decision_brief,
@@ -76,16 +74,12 @@ from src.application.daily_decision_brief_repository import (
     record_daily_brief_fanout_plan,
     list_pending_legacy_daily_brief_deliveries,
 )
-from src.application.daily_decision_brief_service import assemble_daily_decision_briefs
+from src.application.tick_brief_preparation import TickBriefPreparation
+from src.infrastructure.futu_gateway import check_fetch_control, wait_fetch_control
 from src.application.multi_tick.misc import _safe_runlog_data, parse_hhmm
 from src.application.multi_tick.bot_perception_event import build_notification_perception_event
 from src.application.multi_tick_audit import daily_brief_timing_scope, record_tick_latency
-from src.application.multi_tick_finalization import (
-    _record_finalize_degraded,
-    finalize_multi_tick_run,
-    finalize_no_account_notification,
-    failed_scan_accounts,
-)
+from src.application.multi_tick_finalization import _record_finalize_degraded
 from src.application.notification_delivery_route import notifications_enabled, resolve_notification_delivery_route, notification_reminder_route_key, resolve_notification_delivery_routes
 from src.application.notification_fanout import (
     FanoutRetryPolicy, prepare_notification_fanout, read_notification_fanout,
@@ -106,7 +100,7 @@ from src.application.scheduled_notification import (
     dispatch_scheduled_notification_fanout,
 )
 from src.application.system_alerts import report_system_meta_signal
-from src.infrastructure.io_utils import read_json, utc_now
+from src.infrastructure.io_utils import utc_now
 from src.application.scan_scheduler import daily_brief_recovery_cutoff
 
 
@@ -125,7 +119,6 @@ class TickNotificationRequest:
     bj_tz: ZoneInfo
     audit_helper: Any
     vpy: Path
-    complete_tick_idempotency_fn: Callable[..., None]
     repo_root: Path | None = None
     markets_to_run: tuple[str, ...] | list[str] = ()
     scheduler_markets: tuple[str, ...] | list[str] = ()
@@ -134,10 +127,11 @@ class TickNotificationRequest:
     account_ids: tuple[str, ...] | list[str] = ()
     scheduler_decisions_by_account: dict[str, dict[str, Any]] | None = None
     scheduled_scan_targets_by_account: dict[str, str | None] | None = None
-    commit_scan_targets_fn: Callable[[dict[str, str | None]], None] | None = None
-    post_delivery_sidecars_fn: Callable[[], None] | None = None
     delivery_only: bool = False
     trigger_kind: str = "manual"
+    preparation: DailyBriefNotificationPreparation | None = None
+    deadline: float | None = None
+    cancelled: Callable[[], bool] | None = None
 
 
 @dataclass(frozen=True)
@@ -149,9 +143,21 @@ class DailyBriefNotificationPreparation:
     transport_envelopes_by_account: dict[str, dict[str, Any]] = field(default_factory=dict)
     multi_market_delivery_unsupported: bool = False
     blocked_error_code: str | None = None
-    scan_outcomes_by_account: dict[str, bool] = field(default_factory=dict)
     fanout_ids: tuple[str, ...] = ()
     legacy_deliveries: tuple[dict[str, Any], ...] = ()
+
+
+@dataclass(frozen=True)
+class TickNotificationOutcome:
+    sent_accounts: tuple[str, ...] = ()
+    would_send_accounts: tuple[str, ...] = ()
+    notify_failures: tuple[dict[str, Any], ...] = ()
+    notify_summary: dict[str, Any] = field(default_factory=dict)
+    channel: str | None = None
+    target: str | None = None
+    skip_reason: str | None = None
+    error_code: str | None = None
+    failure_source_confirmed_accounts: tuple[str, ...] = ()
 
 
 def _fanout_now_ms() -> int:
@@ -163,6 +169,73 @@ def _fanout_now_ms() -> int:
 def _daily_brief_day_fanouts(request, account, market, market_date):
     return list_notification_fanouts(base=request.base, account=account,
         logical_key_prefix=f"daily-brief:{market}:{market_date}:")
+
+
+def _daily_brief_recovery_send_deadline(request, envelope):
+    deadline = request.deadline
+    if envelope.get("delivery_kind") != "fixed_recovery_report" or envelope.get("status") == "ambiguous":
+        return deadline
+    now = datetime.fromisoformat(str(utc_now()).replace("Z", "+00:00"))
+    remaining = (datetime.fromisoformat(envelope["cutoff_utc"]) - now).total_seconds()
+    cutoff_deadline = monotonic() + max(0.0, remaining)
+    return cutoff_deadline if deadline is None else min(deadline, cutoff_deadline)
+
+
+def _wait_daily_brief_delivery(request, seconds, *, deadline):
+    # A local expiry ends this account's next attempt, not the remaining batch.
+    if deadline is not None:
+        seconds = min(seconds, max(0.0, deadline - monotonic()))
+    wait_fetch_control(seconds, deadline=request.deadline, cancelled=request.cancelled)
+
+
+def _eligible_daily_brief_recovery(day, now):
+    recoveries = day.get("recovery_reports", {}).values()
+    for status in ("ambiguous", "pending"):
+        for envelope in recoveries:
+            if envelope.get("status") == status and (
+                status == "ambiguous" or now < datetime.fromisoformat(envelope["cutoff_utc"])
+            ):
+                return envelope
+    return None
+
+
+def has_daily_brief_recovery_to_resume(*, base, config, account, market, scheduler):
+    """Read existing frozen obligations without binding or admitting new work."""
+    if not notifications_enabled(config):
+        return False
+    market_date = _daily_brief_market_date(scheduler)
+    if not market_date:
+        return False
+    now = datetime.fromisoformat(str(utc_now()).replace("Z", "+00:00"))
+    state = read_daily_decision_brief_delivery_state(base=base, account=account, market=market)
+    if state.get("reason") == "state_invalid":
+        raise DailyDecisionBriefStateError("legacy daily brief delivery state invalid")
+    day = (state.get("state") or {}).get("days", {}).get(market_date, {})
+    if _eligible_daily_brief_recovery(day, now) is not None:
+        return True
+    for target, failure in day.get("fixed_reports", {}).items():
+        if (failure.get("delivery_kind") != "fixed_failure" or failure.get("status") != "confirmed"
+                or target in day.get("recovery_reports", {})):
+            continue
+        source = read_daily_decision_brief_recovery_source(
+            base=base, account=account, market=market, market_trading_date=market_date,
+            scheduled_target_market=target, original_failure_key=failure["delivery_key"],
+            original_failure_digest=failure["source_digest"],
+        )
+        if source.get("available") and now < datetime.fromisoformat(source["recovery_intent"]["cutoff_utc"]):
+            return True
+    if uses_proactive_fanout(config):
+        children = read_daily_brief_fanout_children(
+            base=base, account=account, market=market, market_trading_date=market_date,
+        )
+        if any(child["spec"]["metadata"].get("delivery_kind") == "fixed_recovery_report"
+               and child["status"] in {"pending", "explicit_failed", "send_started"}
+               and now < datetime.fromisoformat(child["spec"]["metadata"]["cutoff_utc"])
+               for child in children):
+            return True
+        return next(_daily_brief_fanout_recovery_sources(
+            base, account, market, market_date, int(now.timestamp() * 1000)), None) is not None
+    return False
 
 
 def _daily_brief_represented_identities(metadata: Mapping[str, Any]) -> set[str]:
@@ -398,37 +471,41 @@ def _daily_brief_fanout_recovery_intent(request, account, market, scheduler, bri
     return {"fanout_recoveries": recoveries} if recoveries else None
 
 
-def _prepare_daily_brief_fanout_recoveries(request, account, market, market_date, scheduler, limits):
+def _daily_brief_fanout_recovery_sources(base, account, market, market_date, now_ms):
     from src.application.receipt_query import receipt_digest
 
-    if request.no_send or not notifications_enabled(request.base_cfg):
-        return
-    now_ms = _fanout_now_ms()
-    for child in read_daily_brief_fanout_children(base=request.base, account=account, market=market,
+    for child in read_daily_brief_fanout_children(base=base, account=account, market=market,
             market_trading_date=market_date):
         meta = child["spec"]["metadata"]
         if meta["delivery_kind"] != "fixed_failure" or not child["delivery_confirmed"]:
             continue
         target = meta["scheduled_target_market"]
-        cutoff = daily_brief_recovery_cutoff(schedule_cfg=request.base_cfg.get(request.scheduler_schedule_key) or {},
-            scheduled_target_market=target)
-        if now_ms >= int(datetime.fromisoformat(cutoff).timestamp() * 1000):
-            continue
         key = f"daily-brief:{market}:{market_date}:recovery:{child['child_id']}"
-        if read_notification_fanout(base=request.base,
+        if read_notification_fanout(base=base,
                 fanout_id=notification_fanout_id(account=account, logical_key=key)):
             continue
         after = max(datetime.fromisoformat(target),
             datetime.fromtimestamp(child["created_at_ms"] / 1000, timezone.utc))
-        source = read_daily_brief_fanout_recovery_source(base=request.base, account=account, market=market,
-            market_trading_date=market_date, after_utc=after.isoformat(), before_utc=cutoff,
+        source = read_daily_brief_fanout_recovery_source(base=base, account=account, market=market,
+            market_trading_date=market_date, after_utc=after.isoformat(),
+            before_utc=datetime.fromtimestamp(now_ms / 1000, timezone.utc).isoformat(),
             original_failure_child_id=child["child_id"], original_failure_spec_digest=receipt_digest(child["spec"]))
         if source is None or datetime.fromisoformat(source["brief"]["generated_at_utc"]).timestamp() * 1000 > now_ms:
             continue
-        intent = source["recovery_intent"]
-        cutoff = min(datetime.fromisoformat(cutoff), datetime.fromisoformat(intent["cutoff_utc"])).isoformat()
-        if now_ms >= int(datetime.fromisoformat(cutoff).timestamp() * 1000):
+        if now_ms >= int(datetime.fromisoformat(source["recovery_intent"]["cutoff_utc"]).timestamp() * 1000):
             continue
+        yield child, source
+
+
+def _prepare_daily_brief_fanout_recoveries(request, account, market, market_date, scheduler, limits):
+    if request.no_send or not notifications_enabled(request.base_cfg):
+        return
+    now_ms = _fanout_now_ms()
+    for child, source in _daily_brief_fanout_recovery_sources(request.base, account, market, market_date, now_ms):
+        intent = source["recovery_intent"]
+        cutoff = intent["cutoff_utc"]
+        target = child["spec"]["metadata"]["scheduled_target_market"]
+        key = f"daily-brief:{market}:{market_date}:recovery:{child['child_id']}"
         recipient = child["spec"]["recipient"]
         route = {**recipient, "notifications": recipient["transport_options"]}
         spec = _daily_brief_fanout_spec(request, route, source["brief"], kind="fixed_recovery_report",
@@ -473,19 +550,25 @@ def _continue_legacy_daily_brief_deliveries(request, deliveries):
             result["failures"].append({"account": account, "error_code": "CHANNEL_PLUGIN_NOT_INSTALLED"})
             continue
         adapter = select_notification_delivery_adapter(route["provider"])
+        delivery_deadline = _daily_brief_recovery_send_deadline(request, envelope)
         common = {"base": request.base, "account": account, "market": lifecycle["market"],
             "market_trading_date": lifecycle["market_trading_date"], "delivery_key": envelope["delivery_key"],
             "source_digest": envelope["source_digest"], "message_sha256": envelope["message_sha256"],
             "transport_idempotency_key": build_notification_transport_key(envelope["delivery_key"])}
 
         def send(**kwargs):
+            check_fetch_control(request.deadline, request.cancelled)
             if envelope["delivery_kind"] == "fixed_recovery_report":
                 started = begin_daily_decision_brief_recovery_attempt(**common, attempted_at_utc=utc_now())
                 if not started.get("started"):
                     raise RuntimeError(f"recovery delivery blocked: {started.get('reason')}")
+            check_fetch_control(delivery_deadline, request.cancelled)
             try:
                 sent = normalize_notification_delivery_result(
-                    adapter.send_fn(**kwargs, notifications=route["notifications"]), normalize_fn=adapter.normalize_fn)
+                    adapter.send_fn(**kwargs, notifications=route["notifications"], **(
+                        {"deadline": delivery_deadline, "cancelled": request.cancelled}
+                        if delivery_deadline is not None or request.cancelled is not None else {}
+                    )), normalize_fn=adapter.normalize_fn)
             except Exception:
                 if envelope["delivery_kind"] == "fixed_recovery_report":
                     record_daily_decision_brief_delivery_attempt(**common, attempted_at_utc=utc_now(), ambiguous=True)
@@ -505,12 +588,16 @@ def _continue_legacy_daily_brief_deliveries(request, deliveries):
             send_fn=send, normalize_fn=adapter.normalize_fn, failure_stage=adapter.failure_stage,
             idempotency_keys_by_account={account: envelope["delivery_key"]},
             transport_envelopes_by_account={account: envelope["rendered_transport"]}
-                if envelope.get("rendered_transport") is not None else {})
+                if envelope.get("rendered_transport") is not None else {},
+            **({"sleep_fn": partial(_wait_daily_brief_delivery, request, deadline=delivery_deadline)}
+               if delivery_deadline is not None or request.cancelled is not None else {}))
         preparation = DailyBriefNotificationPreparation(
             prepared_messages=PreparedPerAccountMessages({account: envelope["rendered_message"]}, True, False),
             lifecycles_by_account={account: lifecycle}, delivery_keys_by_account={account: envelope["delivery_key"]},
             markets=(lifecycle["market"],))
-        confirmed, failures = _confirm_daily_brief_execution(request=request, preparation=preparation, execution=execution)
+        confirmed, failures = _confirm_daily_brief_execution(
+            request=request, preparation=preparation, send_results=execution.send_results,
+        )
         result["sent_accounts"].extend(confirmed)
         result["confirmed_count"] += len(confirmed)
         result["failures"].extend(execution.notify_failures)
@@ -519,20 +606,27 @@ def _continue_legacy_daily_brief_deliveries(request, deliveries):
     return result
 
 
-def _deliver_daily_brief_fanouts(request, preparation, complete_tick):
+def _daily_brief_fanout_outside_run_window(request, spec) -> bool:
+    return (request.delivery_only and spec["metadata"].get("delivery_kind") != "fixed_recovery_report"
+            and _daily_brief_scheduler_decision(request, spec["metadata"]["account"]).get("in_run_window") is not True)
+
+
+def _deliver_daily_brief_fanouts(request, preparation) -> TickNotificationOutcome:
     from src.application.channels.plugins import channel_plugin_installed
     from src.application.notification_delivery_route import notification_delivery_route_is_current
 
     if preparation.multi_market_delivery_unsupported:
         _record_daily_brief_multi_market_failure(request, preparation)
-        complete_tick(status="unsupported_failed", ok=False,
-            error_code="daily_brief_multi_market_delivery_unsupported")
-        return 2
+        code = "daily_brief_multi_market_delivery_unsupported"
+        return TickNotificationOutcome(skip_reason=code, error_code=code)
     blocked = []
     def allowed(spec):
+        check_fetch_control(request.deadline, request.cancelled)
         if request.no_send:
             return False
         recipient = spec["recipient"]
+        if _daily_brief_fanout_outside_run_window(request, spec):
+            return False
         if not channel_plugin_installed(recipient["provider"]):
             blocked.append({"account": spec["metadata"]["account"],
                 "route_id": recipient["route_id"], "error_code": "CHANNEL_PLUGIN_NOT_INSTALLED"})
@@ -543,11 +637,7 @@ def _deliver_daily_brief_fanouts(request, preparation, complete_tick):
             return False
         cutoff = spec["metadata"].get("cutoff_utc")
         if cutoff:
-            current_cutoff = daily_brief_recovery_cutoff(
-                schedule_cfg=request.base_cfg.get(request.scheduler_schedule_key) or {},
-                scheduled_target_market=spec["metadata"]["scheduled_target_market"])
-            deadline = min(datetime.fromisoformat(cutoff), datetime.fromisoformat(current_cutoff))
-            if _fanout_now_ms() >= int(deadline.timestamp() * 1000):
+            if _fanout_now_ms() >= int(datetime.fromisoformat(cutoff).timestamp() * 1000):
                 return False
         dnd = evaluate_dnd_quiet_hours(
             quiet_hours=(request.base_cfg.get("notifications") or {}).get("quiet_hours_beijing"),
@@ -556,6 +646,8 @@ def _deliver_daily_brief_fanouts(request, preparation, complete_tick):
         return not dnd.get("is_quiet")
 
     def send(*, spec, idempotency_key):
+        deadline = _daily_brief_recovery_send_deadline(request, spec["metadata"])
+        check_fetch_control(deadline, request.cancelled)
         recipient = spec["recipient"]
         adapter = select_notification_delivery_adapter(recipient["provider"])
         kwargs = dict(base=(request.repo_root or request.base).resolve(),
@@ -563,6 +655,8 @@ def _deliver_daily_brief_fanouts(request, preparation, complete_tick):
             notifications=recipient["transport_options"], idempotency_key=idempotency_key)
         if spec["transport_envelope"] is not None:
             kwargs["transport_envelope"] = spec["transport_envelope"]
+        if deadline is not None or request.cancelled is not None:
+            kwargs.update(deadline=deadline, cancelled=request.cancelled)
         return normalize_notification_delivery_result(adapter.send_fn(**kwargs), normalize_fn=adapter.normalize_fn)
 
     summaries = []
@@ -602,118 +696,39 @@ def _deliver_daily_brief_fanouts(request, preparation, complete_tick):
     request.runlog.safe_event("notify_fanout", "error" if failures else "ok", data={
         "statuses": [item["status"] for item in summaries],
         "has_retryable_children": any(item["has_retryable_children"] for item in summaries)})
-    _run_post_delivery_sidecars_best_effort(request)
-    if request.delivery_only:
-        complete_tick(status="failed" if failures else "completed", ok=not failures,
-            message="NOTIFY_FAILED" if failures else "delivery_only_fanout")
-        return 1 if failures else 0
     summary = build_notify_summary(sent_accounts=sent, notify_failures=failures,
         total_accounts=len({item["account"] for item in summaries}),
         send_attempted_count=attempted_count, send_confirmed_count=confirmed_count)
     apply_notify_results_to_tick_metrics(tick_metrics=request.tick_metrics, no_send=request.no_send,
         sent_accounts=sent, notify_failures=failures, notify_summary=summary)
     state_repo.write_tick_metrics(request.base, request.run_id, request.tick_metrics)
-    rc = finalize_multi_tick_run(base=request.base, run_id=request.run_id, runlog=request.runlog,
-        results=request.results, tick_metrics=request.tick_metrics, no_send=request.no_send,
-        sent_accounts=sent, notify_failures=failures, notify_summary=summary, channel=None, target=None,
-        state_repo=state_repo, read_json_fn=read_json, shared_state_dir_getter=state_repo.shared_state_dir,
-        utc_now_fn=utc_now, audit_fn=request.audit_helper.audit, safe_data_fn=_safe_runlog_data, on_success=lambda: None)
-    complete_tick(status="completed" if rc == 0 else "failed", ok=rc == 0,
-        message=None if rc == 0 else "NOTIFY_FAILED")
-    return int(rc)
+    failure_source_confirmed_accounts = tuple(sorted({
+        item["account"] for item in summaries
+        if not request.no_send and item["delivery_confirmed"] and all(
+            child["spec"]["metadata"]["delivery_kind"] == "fixed_failure"
+            and child["spec"]["metadata"]["source_reference"]
+                == f"output_runs/{request.run_id}/accounts/{item['account']}/state/daily_decision_brief_failure.{child['spec']['metadata']['market']}.json"
+            for child in item["children"]
+        )
+    }))
+    return TickNotificationOutcome(sent_accounts=tuple(sent), notify_failures=tuple(failures), notify_summary=summary,
+        failure_source_confirmed_accounts=failure_source_confirmed_accounts)
 
 
-@daily_brief_delivery_validation_scope()
-def run_tick_notification_flow(request: TickNotificationRequest) -> int:
+def run_tick_notification_flow(request: TickNotificationRequest) -> TickNotificationOutcome:
+    """Deliver prepared obligations and report delivery facts to the Tick owner."""
     process_root = (request.repo_root or request.base).resolve()
-    _validate_scheduled_scan_targets(request)
-
-    def complete_tick(**kwargs) -> None:
-        request.complete_tick_idempotency_fn(**kwargs)
-        if kwargs.get("ok", True):
-            request.audit_helper.guard_mark_success()
-
-    def finish_tick(
-        fn: Callable[[], int],
-        *,
-        status: str = "completed",
-        message: str | None = None,
-    ) -> int:
-        rc = int(fn())
-        if rc == 0:
-            complete_tick(status=status, message=message)
-        else:
-            code = "SCAN_FAILED" if failed_scan_accounts(request.tick_metrics) else "NOTIFY_FAILED"
-            complete_tick(status="failed", message=code, ok=False, error_code=code)
-        return rc
-
-    def finish_retry_blocker(error_code: str) -> int:
-        request.audit_helper.guard_mark_failure(
-            error_code,
-            "daily_brief_retry_guard",
-        )
-        rc = finalize_no_account_notification(
-            base=request.base,
-            run_id=request.run_id,
-            runlog=request.runlog,
-            results=request.results,
-            tick_metrics=request.tick_metrics,
-            no_send=request.no_send,
-            state_repo=state_repo,
-            utc_now_fn=utc_now,
-            audit_fn=request.audit_helper.audit,
-            safe_data_fn=_safe_runlog_data,
-            on_success=lambda: None,
-            reason=error_code,
-            run_end_outcome="error",
-            error_code=error_code,
-            return_code=2,
-        )
-        complete_tick(
-            status="unsupported_failed",
-            message=error_code,
-            ok=False,
-            error_code=error_code,
-        )
-        return rc
-
-    daily_brief_prepare_started = monotonic()
-    request.runlog.safe_event("daily_brief_prepare", "start")
-    prepare_outcome = "ok"
-    try:
-        daily_brief_prep = _prepare_daily_brief_notification(request)
-    except BaseException as exc:
-        prepare_outcome = "error"
-        request.runlog.safe_event("daily_brief_prepare", "error", data={"error_type": type(exc).__name__})
-        raise
-    else:
-        request.runlog.safe_event("daily_brief_prepare", "ok")
-    finally:
-        record_tick_latency(
-            runlog=request.runlog,
-            stage="daily_brief_prepare",
-            started=daily_brief_prepare_started,
-            data={"outcome": prepare_outcome},
-        )
-    request.tick_metrics["scan_outcomes"] = dict(daily_brief_prep.scan_outcomes_by_account)
-    if failed_scan_accounts(request.tick_metrics):
-        request.audit_helper.guard_mark_failure("SCAN_FAILED", "candidate_scan")
+    daily_brief_prep = request.preparation
+    if daily_brief_prep is None:
+        raise ValueError("notification delivery requires prepared Brief obligations")
+    check_fetch_control(request.deadline, request.cancelled)
     prepared_messages = daily_brief_prep.prepared_messages
     notify_candidates: list[Any] = []
     results_count = len(request.results)
 
     if not notifications_enabled(request.base_cfg):
         request.runlog.safe_event("notify", "skip", message="notifications_disabled")
-        _run_post_delivery_sidecars_best_effort(request)
-        return finish_tick(
-            lambda: finalize_no_account_notification(
-                base=request.base, run_id=request.run_id, runlog=request.runlog,
-                results=request.results, tick_metrics=request.tick_metrics,
-                no_send=True, state_repo=state_repo, utc_now_fn=utc_now,
-                audit_fn=request.audit_helper.audit, safe_data_fn=_safe_runlog_data,
-                on_success=lambda: None, reason="notifications_disabled",
-            ), status="completed", message="notifications_disabled",
-        )
+        return TickNotificationOutcome(skip_reason="notifications_disabled")
 
     if str(request.trigger_kind or "manual").strip().lower() != "scheduled":
         reason = "non_scheduled_ordinary_notification_disabled"
@@ -724,28 +739,10 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             status="skip",
             extra={"trigger_kind": request.trigger_kind, "provider_attempted": False},
         )
-        _run_post_delivery_sidecars_best_effort(request)
-        return finish_tick(
-            lambda: finalize_no_account_notification(
-                base=request.base,
-                run_id=request.run_id,
-                runlog=request.runlog,
-                results=request.results,
-                tick_metrics=request.tick_metrics,
-                no_send=request.no_send,
-                state_repo=state_repo,
-                utc_now_fn=utc_now,
-                audit_fn=request.audit_helper.audit,
-                safe_data_fn=_safe_runlog_data,
-                on_success=lambda: None,
-                reason=reason,
-            ),
-            status="completed",
-            message=reason,
-        )
+        return TickNotificationOutcome(skip_reason=reason)
 
     if uses_proactive_fanout(request.base_cfg):
-        return _deliver_daily_brief_fanouts(request, daily_brief_prep, complete_tick)
+        return _deliver_daily_brief_fanouts(request, daily_brief_prep)
 
     request.runlog.safe_event(
         "notify",
@@ -760,39 +757,29 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
     account_messages = prepared_messages.messages_by_account
 
     route_hint = _notification_perception_route_hint(request.base_cfg)
+    current_identity = notification_reminder_route_key(config=request.base_cfg, base=process_root) if account_messages else None
+    paused_accounts = []
+    for account in account_messages:
+        envelope = (daily_brief_prep.lifecycles_by_account.get(account) or {}).get("envelope") or {}
+        context = envelope.get("render_context") or {}
+        frozen_identity = context.get("attribution_route_key")
+        if frozen_identity is not None and frozen_identity != current_identity:
+            paused_accounts.append(account)
+    if paused_accounts:
+        account_messages = {account: message for account, message in account_messages.items() if account not in paused_accounts}
+        request.runlog.safe_event("notify", "skip", message="notification_route_changed",
+                                   data={"accounts": paused_accounts})
+        if not account_messages:
+            return TickNotificationOutcome(skip_reason="notification_route_changed")
 
     if daily_brief_prep.multi_market_delivery_unsupported:
         error_code = "daily_brief_multi_market_delivery_unsupported"
         _record_daily_brief_multi_market_failure(request, daily_brief_prep)
-        _run_post_delivery_sidecars_best_effort(request)
-        rc = finalize_no_account_notification(
-            base=request.base,
-            run_id=request.run_id,
-            runlog=request.runlog,
-            results=request.results,
-            tick_metrics=request.tick_metrics,
-            no_send=request.no_send,
-            state_repo=state_repo,
-            utc_now_fn=utc_now,
-            audit_fn=request.audit_helper.audit,
-            safe_data_fn=_safe_runlog_data,
-            on_success=lambda: None,
-            reason=error_code,
-            run_end_outcome="error",
-            error_code=error_code,
-            return_code=2,
-        )
-        complete_tick(
-            status="unsupported_failed",
-            message=error_code,
-            ok=False,
-            error_code=error_code,
-        )
-        return rc
+        return TickNotificationOutcome(skip_reason=error_code, error_code=error_code)
 
     if daily_brief_prep.blocked_error_code and not bool(prepared_messages.threshold_met):
-        _run_post_delivery_sidecars_best_effort(request)
-        return finish_retry_blocker(daily_brief_prep.blocked_error_code)
+        return TickNotificationOutcome(skip_reason=daily_brief_prep.blocked_error_code,
+                                       error_code=daily_brief_prep.blocked_error_code)
 
     if not bool(prepared_messages.threshold_met):
         _audit_notification_perception(
@@ -829,20 +816,9 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
                 no_send=request.no_send,
             ),
         )
-        _run_post_delivery_sidecars_best_effort(request)
-        if request.delivery_only:
-            request.runlog.safe_event("run_end", "skip", message="no_retryable_delivery")
-            complete_tick(status="skipped", message="no_retryable_delivery")
-            return 0
-        return finish_tick(
-            lambda: finalize_no_account_notification(
-                base=request.base, run_id=request.run_id, runlog=request.runlog,
-                results=request.results, tick_metrics=request.tick_metrics,
-                no_send=request.no_send, state_repo=state_repo, utc_now_fn=utc_now,
-                audit_fn=request.audit_helper.audit, safe_data_fn=_safe_runlog_data,
-                on_success=lambda: None, reason="no_daily_brief_delivery",
-            ), status="skipped", message="no_daily_brief_delivery",
-        )
+        return TickNotificationOutcome(skip_reason=(
+            "no_retryable_delivery" if request.delivery_only else "no_daily_brief_delivery"
+        ))
 
     notify_route = resolve_notification_delivery_route(config=request.base_cfg)
     notif_cfg = notify_route.get("notifications") or {}
@@ -899,7 +875,6 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         request.runlog.safe_event("notify", "error", error_code="CONFIG_ERROR", message=str(err))
         _record_notification_meta(request, account_messages=account_messages,
                                   markets=daily_brief_prep.markets, confirmed_accounts=(), reason="route_missing")
-        _run_post_delivery_sidecars_best_effort(request)
         raise SystemExit(f"[CONFIG_ERROR] {err}") from err
 
     request.audit_helper.audit(
@@ -942,8 +917,8 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
     )
     if str(notify_delivery.get("action") or "") == "skip_quiet_hours":
         if daily_brief_prep.blocked_error_code:
-            _run_post_delivery_sidecars_best_effort(request)
-            return finish_retry_blocker(daily_brief_prep.blocked_error_code)
+            return TickNotificationOutcome(skip_reason=daily_brief_prep.blocked_error_code,
+                                           error_code=daily_brief_prep.blocked_error_code)
         quiet_window = str(notify_delivery.get("quiet_window") or "")
         request.runlog.safe_event("notify", "skip", message=f"in quiet hours ({quiet_window})")
         print(f"[SKIP] Currently in quiet hours (DND). Target was: {notification_target_reference(target)}")
@@ -967,25 +942,12 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
                 conversation_scope=perception_scope,
             ),
         )
-        _run_post_delivery_sidecars_best_effort(request)
-        if failed_scan_accounts(request.tick_metrics):
-            return finish_tick(lambda: finalize_no_account_notification(
-                base=request.base, run_id=request.run_id, runlog=request.runlog,
-                results=request.results, tick_metrics=request.tick_metrics, no_send=request.no_send,
-                state_repo=state_repo, utc_now_fn=utc_now, audit_fn=request.audit_helper.audit,
-                safe_data_fn=_safe_runlog_data, on_success=lambda: None,
-                reason="quiet_hours"))
-        complete_tick(status="skipped", message="quiet_hours")
-        return 0
+        return TickNotificationOutcome(skip_reason="quiet_hours")
 
     sent_accounts: list[str] = []
     would_send_accounts: list[str] = []
     notify_failures: list[dict[str, object]] = []
     if daily_brief_prep.blocked_error_code:
-        request.audit_helper.guard_mark_failure(
-            daily_brief_prep.blocked_error_code,
-            "daily_brief_retry_guard",
-        )
         notify_failures.append(
             {
                 "account": None,
@@ -1012,15 +974,20 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             delivery_adapter = select_notification_delivery_adapter(provider)
         except ValueError as err:
             request.runlog.safe_event("notify", "error", error_code="CONFIG_ERROR", message=str(err))
-            _run_post_delivery_sidecars_best_effort(request)
             raise SystemExit(f"[CONFIG_ERROR] {err}") from err
 
+        delivery_deadline = request.deadline
+
         def _send_with_route_notifications(**kwargs: Any) -> Any:
+            nonlocal delivery_deadline
+            check_fetch_control(request.deadline, request.cancelled)
+            delivery_deadline = request.deadline
             recovery_identity = None
             for account, lifecycle in daily_brief_prep.lifecycles_by_account.items():
                 envelope = lifecycle.get("envelope") or {}
                 if (envelope.get("delivery_kind") == "fixed_recovery_report"
                         and build_notification_transport_key(str(envelope["delivery_key"])) == kwargs.get("idempotency_key")):
+                    delivery_deadline = _daily_brief_recovery_send_deadline(request, envelope)
                     recovery_identity = {
                         "base": request.base, "account": account, "market": lifecycle["market"],
                         "market_trading_date": lifecycle["market_trading_date"],
@@ -1033,11 +1000,14 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
                     )
                     if not started.get("started"):
                         raise RuntimeError(f"recovery delivery blocked: {started.get('reason')}")
+                    check_fetch_control(delivery_deadline, request.cancelled)
                     break
             try:
                 sent = delivery_adapter.send_fn(
                     **kwargs,
                     notifications=notify_route.get("notifications") or {},
+                    **({"deadline": delivery_deadline, "cancelled": request.cancelled}
+                       if delivery_deadline is not None or request.cancelled is not None else {}),
                 )
                 if recovery_identity is not None:
                     result = normalize_notification_delivery_result(sent, normalize_fn=delivery_adapter.normalize_fn)
@@ -1055,6 +1025,15 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
                     )
                 raise
 
+        confirmation_failures: list[dict[str, object]] = []
+
+        def _persist_account_result(send_result: dict[str, object]) -> None:
+            confirmed, failures = _confirm_daily_brief_execution(
+                request=request, preparation=daily_brief_prep, send_results=(send_result,),
+            )
+            sent_accounts.extend(confirmed)
+            confirmation_failures.extend(failures)
+
         execution = execute_per_account_delivery(
             delivery_batch=delivery_batch,
             run_id=request.run_id,
@@ -1064,22 +1043,18 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             send_fn=_send_with_route_notifications,
             normalize_fn=delivery_adapter.normalize_fn,
             failure_fields_builder=build_failure_audit_fields,
-            on_failure=lambda error_code: request.audit_helper.guard_mark_failure(
-                error_code,
-                delivery_adapter.failure_stage,
-            ),
+            on_failure=lambda _error_code: None,
             base=process_root,
             failure_stage=delivery_adapter.failure_stage,
             idempotency_keys_by_account=daily_brief_prep.delivery_keys_by_account,
             transport_envelopes_by_account=daily_brief_prep.transport_envelopes_by_account,
+            on_account_result=_persist_account_result,
+            **({"sleep_fn": lambda seconds: _wait_daily_brief_delivery(request, seconds, deadline=delivery_deadline)}
+               if request.deadline is not None or request.cancelled is not None
+               or any((item.get("envelope") or {}).get("delivery_kind") == "fixed_recovery_report"
+                      for item in daily_brief_prep.lifecycles_by_account.values()) else {}),
         )
-        sent_accounts = list(execution.sent_accounts)
         notify_failures.extend(execution.notify_failures)
-        sent_accounts, confirmation_failures = _confirm_daily_brief_execution(
-            request=request,
-            preparation=daily_brief_prep,
-            execution=execution,
-        )
         notify_failures.extend(confirmation_failures)
         send_attempted_count = execution.send_attempted_count
         send_confirmed_count = len(sent_accounts)
@@ -1095,18 +1070,17 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         )
     else:
         would_send_accounts = list(account_messages.keys())
-        sent_accounts = [] if request.delivery_only else list(would_send_accounts)
+        sent_accounts = []
         request.runlog.safe_event("notify", "skip", message="no_send mode")
 
-    request.tick_metrics["scan_failure_notified_accounts"] = [
+    failure_source_confirmed_accounts = tuple(
         account for account in sent_accounts
         if not request.no_send
-        and account in failed_scan_accounts(request.tick_metrics)
         and (daily_brief_prep.lifecycles_by_account.get(account, {}).get("envelope") or {}).get("delivery_kind") == "fixed_failure"
         and (daily_brief_prep.lifecycles_by_account[account]["envelope"]).get("source_reference")
             == f"output_runs/{request.run_id}/accounts/{account}/state/daily_decision_brief_failure.{daily_brief_prep.lifecycles_by_account[account]['market']}.json"
         and (daily_brief_prep.lifecycles_by_account[account]["envelope"]).get("source_kind") == "scan_failure"
-    ]
+    )
     if bool(notify_delivery.get("should_send")):
         reasons = {str(item.get("account") or ""): str(item.get("error_code") or "send_unconfirmed")
                    for item in notify_failures}
@@ -1120,8 +1094,6 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         stage="provider_delivery",
         started=provider_delivery_started,
     )
-    _run_post_delivery_sidecars_best_effort(request)
-
     report_refs = []
     if not request.no_send:
         for account in sent_accounts:
@@ -1161,41 +1133,6 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             send_confirmed_count=send_confirmed_count,
         ),
     )
-
-    if request.delivery_only:
-        if notify_failures:
-            request.runlog.safe_event("run_end", "error", error_code="NOTIFY_FAILED")
-            if daily_brief_prep.blocked_error_code:
-                complete_tick(
-                    status="unsupported_failed",
-                    message=daily_brief_prep.blocked_error_code,
-                    ok=False,
-                    error_code=daily_brief_prep.blocked_error_code,
-                )
-            else:
-                complete_tick(status="failed", message="NOTIFY_FAILED", ok=False, error_code="NOTIFY_FAILED")
-            return 1
-        if request.no_send:
-            request.runlog.safe_event(
-                "run_end",
-                "skip",
-                data=_safe_runlog_data({"would_send_accounts": would_send_accounts, "delivery_only": True}),
-            )
-            complete_tick(
-                status="skipped",
-                message="delivery_only_no_send",
-            )
-            return 0
-        request.runlog.safe_event(
-            "run_end",
-            "ok",
-            data=_safe_runlog_data({"sent_accounts": sent_accounts, "delivery_only": True}),
-        )
-        complete_tick(
-            status="completed" if sent_accounts else "skipped",
-            message="delivery_only_sent" if sent_accounts else "delivery_only_no_send",
-        )
-        return 0
 
     notify_summary = build_notify_summary(
         sent_accounts=sent_accounts,
@@ -1240,41 +1177,33 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             extra={"notification_delivery_confirmed": bool(sent_accounts)},
         )
 
-    rc = int(
-        finalize_multi_tick_run(
-            base=request.base,
-            run_id=request.run_id,
-            runlog=request.runlog,
-            results=request.results,
-            tick_metrics=request.tick_metrics,
-            no_send=request.no_send,
-            sent_accounts=sent_accounts,
-            notify_failures=notify_failures,
-            notify_summary=notify_summary,
-            channel=(str(channel) if channel else None),
-            target=(str(target) if target else None),
-            state_repo=state_repo,
-            read_json_fn=read_json,
-            shared_state_dir_getter=state_repo.shared_state_dir,
-            utc_now_fn=utc_now,
-            audit_fn=request.audit_helper.audit,
-            safe_data_fn=_safe_runlog_data,
-            on_success=lambda: None,
-        )
+    return TickNotificationOutcome(
+        sent_accounts=tuple(sent_accounts), would_send_accounts=tuple(would_send_accounts),
+        notify_failures=tuple(notify_failures),
+        notify_summary=notify_summary, channel=(str(channel) if channel else None),
+        target=(str(target) if target else None), error_code=daily_brief_prep.blocked_error_code,
+        failure_source_confirmed_accounts=failure_source_confirmed_accounts,
+        skip_reason="delivery_only_no_send" if request.delivery_only and request.no_send else None,
     )
-    if rc == 0:
-        complete_tick(status="completed", message=None)
-    elif daily_brief_prep.blocked_error_code:
-        complete_tick(
-            status="unsupported_failed",
-            message=daily_brief_prep.blocked_error_code,
-            ok=False,
-            error_code=daily_brief_prep.blocked_error_code,
+
+
+def _report_notification_delivery_meta(
+    request: TickNotificationRequest, *, market: str, account: str,
+    code: str, degraded: bool, detail: str,
+) -> str:
+    try:
+        outcome = report_system_meta_signal(
+            base=request.base, unit=f"options-monitor-tick-{market}.service",
+            market=market, account=account, failure_code=code, stage="delivery",
+            run_id=request.run_id, degraded=degraded, reason=detail,
+            config=request.base_cfg, external=True,
+            **({"deadline": request.deadline, "cancelled": request.cancelled}
+               if request.deadline is not None or request.cancelled is not None else {}),
         )
-    else:
-        code = "SCAN_FAILED" if failed_scan_accounts(request.tick_metrics) else "NOTIFY_FAILED"
-        complete_tick(status="failed", message=code, ok=False, error_code=code)
-    return rc
+    except Exception:
+        outcome = "infra_failed"
+        print("<3>NOTIFICATION_META_ALERT_INFRA_FAILED", file=sys.stderr)
+    return outcome
 
 
 def _record_notification_meta(
@@ -1288,16 +1217,9 @@ def _record_notification_meta(
         degraded = account not in confirmed
         code = "NOTIFICATION_DELIVERY_UNCONFIRMED"
         detail = (reason_by_account or {}).get(account, reason)
-        try:
-            outcome = report_system_meta_signal(
-                base=request.base, unit=f"options-monitor-tick-{market}.service",
-                market=market, account=account, failure_code=code, stage="delivery",
-                run_id=request.run_id, degraded=degraded, reason=detail,
-                config=request.base_cfg, external=True,
-            )
-        except Exception:
-            outcome = "infra_failed"
-            print("<3>NOTIFICATION_META_ALERT_INFRA_FAILED", file=sys.stderr)
+        outcome = _report_notification_delivery_meta(
+            request, market=market, account=account, code=code, degraded=degraded, detail=detail,
+        )
         if degraded or outcome in {"recovered", "infra_failed"}:
             request.runlog.safe_event("notify", "error" if degraded else "ok",
                                       error_code=code if degraded else None,
@@ -1309,100 +1231,6 @@ def _record_notification_meta(
             )
 
 
-def _validate_scheduled_scan_targets(request: TickNotificationRequest) -> None:
-    if request.delivery_only or str(request.trigger_kind or "scheduled").strip().lower() != "scheduled":
-        return
-    targets = {
-        str(account or "").strip().lower(): str(target or "").strip()
-        for account, target in (request.scheduled_scan_targets_by_account or {}).items()
-        if str(account or "").strip()
-    }
-    scanned_accounts = {
-        str(account or "").strip().lower() for account in request.ran_pipeline_accounts if str(account or "").strip()
-    }
-    missing = sorted(account for account in scanned_accounts if not targets.get(account))
-    if not missing:
-        return
-    request.audit_helper.guard_mark_failure("SCHEDULED_SCAN_TARGET_MISSING", "validate_scan_targets")
-    request.audit_helper.audit(
-        "scheduler",
-        "scheduled_scan_target_missing",
-        run_id=request.run_id,
-        status="error",
-        extra={"accounts": missing},
-    )
-    raise RuntimeError(f"scheduled scan target missing for accounts: {', '.join(missing)}")
-
-
-def _commit_scan_target_after_brief(
-    request: TickNotificationRequest,
-    *,
-    account: str,
-    target: str,
-    brief_digest: str,
-) -> None:
-    if request.delivery_only:
-        return
-    if str(request.trigger_kind or "scheduled").strip().lower() != "scheduled":
-        return
-    targets = {account: target}
-    if request.commit_scan_targets_fn is None:
-        raise RuntimeError("scheduled scan target commit callback is required")
-    try:
-        request.commit_scan_targets_fn(targets)
-    except Exception as exc:
-        request.audit_helper.guard_mark_failure("SCHEDULER_TARGET_COMMIT_FAILED", "commit_scan_targets")
-        request.audit_helper.audit(
-            "scheduler",
-            "scan_target_commit_failed",
-            run_id=request.run_id,
-            status="error",
-            message=str(exc),
-            extra={"targets": targets},
-        )
-        raise
-    request.audit_helper.audit(
-        "scheduler",
-        "scan_target_committed",
-        run_id=request.run_id,
-        account=account,
-        status="ok",
-        extra={"target": target, "brief_digest": brief_digest},
-    )
-
-
-
-
-def _run_post_delivery_sidecars_best_effort(
-    request: TickNotificationRequest,
-) -> None:
-    callback = request.post_delivery_sidecars_fn
-    if callback is None:
-        return
-    try:
-        callback()
-    except Exception as exc:
-        request.audit_helper.audit(
-            "observe",
-            "post_delivery_sidecars_failed",
-            run_id=request.run_id,
-            status="degraded",
-            message=str(exc),
-            extra={"exception_type": type(exc).__name__},
-        )
-        try:
-            request.runlog.safe_event(
-                "post_delivery_sidecars",
-                "degraded",
-                message=str(exc),
-                data={"exception_type": type(exc).__name__},
-            )
-        except Exception:
-            pass
-
-
-
-
 def _daily_brief_limits(config: dict[str, Any]) -> dict[str, Any]:
     notifications = config.get("notifications") if isinstance(config, dict) else {}
     notification_cfg = notifications if isinstance(notifications, dict) else {}
@@ -1410,9 +1238,38 @@ def _daily_brief_limits(config: dict[str, Any]) -> dict[str, Any]:
     return dict(daily_cfg) if isinstance(daily_cfg, dict) else {}
 
 
+def _daily_brief_recovery_intent_for_preparation(
+    request: TickNotificationRequest, account: str, market: str,
+    scheduler: dict[str, Any], brief: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Select a new recovery obligation; same-run absence is frozen by history."""
+    if (request.trigger_kind != "scheduled" or request.no_send
+            or not notifications_enabled(request.base_cfg)
+            or scheduler.get("in_run_window") is not True
+            or str(scheduler.get("scheduled_target_market") or "").strip()):
+        return None
+    limits = resolve_daily_brief_render_limits(_daily_brief_limits(request.base_cfg))
+    if uses_proactive_fanout(request.base_cfg):
+        return _daily_brief_fanout_recovery_intent(request, account, market, scheduler, brief, limits)
+    market_date = str(brief["market_trading_date"])
+    retry = read_retryable_daily_decision_brief_delivery(
+        base=request.base, account=account, market=market, market_trading_date=market_date, now_utc=utc_now(),
+    )
+    envelope = retry.get("envelope")
+    if isinstance(envelope, dict) and classify_retryable_daily_decision_brief_payload(
+        base=request.base, account=account, market=market, market_trading_date=market_date, envelope=envelope,
+    ) == "legacy_ai_payload_retired":
+        return None
+    return _daily_brief_recovery_intent(
+        request=request, account=account, market=market, scheduler=scheduler, brief=brief, daily_limits=limits,
+    )
+
+
 def _prepare_daily_brief_notification(
     request: TickNotificationRequest,
+    *, brief_preparation: TickBriefPreparation,
 ) -> DailyBriefNotificationPreparation:
+    check_fetch_control(request.deadline, request.cancelled)
     markets = tuple(
         dict.fromkeys(
             str(value or "").strip().upper()
@@ -1443,12 +1300,18 @@ def _prepare_daily_brief_notification(
             multi_market_delivery_unsupported=True,
         )
 
+    if markets != brief_preparation.markets:
+        raise ValueError("daily brief source preparation market scope changed")
+    if not notifications_enabled(request.base_cfg):
+        return DailyBriefNotificationPreparation(
+            prepared_messages=PreparedPerAccountMessages(messages_by_account={}, threshold_met=False, used_heartbeat=False),
+            lifecycles_by_account={}, delivery_keys_by_account={}, markets=markets,
+        )
     multi_market = len(markets) != 1
     lifecycles_by_account: dict[str, dict[str, Any]] = {}
     delivery_keys_by_account: dict[str, str] = {}
     transport_envelopes_by_account: dict[str, dict[str, Any]] = {}
     messages_by_account: dict[str, str] = {}
-    scan_outcomes_by_account: dict[str, bool] = {}
     lifecycle_audit: list[dict[str, Any]] = []
     blocked_error_code: str | None = None
     daily_limits = resolve_daily_brief_render_limits(_daily_brief_limits(request.base_cfg))
@@ -1459,7 +1322,10 @@ def _prepare_daily_brief_notification(
     if request.delivery_only and explicit_routes:
         for account in _daily_brief_request_accounts(request):
             scheduler = _daily_brief_scheduler_decision(request, account)
-            if scheduler.get("in_run_window") is not True:
+            in_run_window = scheduler.get("in_run_window") is True
+            if not in_run_window and not has_daily_brief_recovery_to_resume(
+                base=request.base, config=request.base_cfg, account=account, market=markets[0], scheduler=scheduler,
+            ):
                 continue
             market_date = _daily_brief_market_date(scheduler)
             if not market_date:
@@ -1468,7 +1334,8 @@ def _prepare_daily_brief_notification(
             fanout_ids.extend(item["fanout_id"] for item in _daily_brief_day_fanouts(request, account, markets[0], market_date))
             legacy_deliveries.extend({"account": account, "market": markets[0], "market_trading_date": market_date,
                 "envelope": envelope} for envelope in list_pending_legacy_daily_brief_deliveries(
-                    base=request.base, account=account, market=markets[0], market_trading_date=market_date, now_utc=utc_now()))
+                    base=request.base, account=account, market=markets[0], market_trading_date=market_date, now_utc=utc_now())
+                if in_run_window or envelope["delivery_kind"] == "fixed_recovery_report")
         return DailyBriefNotificationPreparation(
             prepared_messages=PreparedPerAccountMessages({}, False, False),
             lifecycles_by_account={}, delivery_keys_by_account={}, markets=markets,
@@ -1481,7 +1348,10 @@ def _prepare_daily_brief_notification(
             market = markets[0]
             for account in _daily_brief_request_accounts(request):
                 scheduler = _daily_brief_scheduler_decision(request, account)
-                if scheduler.get("in_run_window") is not True:
+                in_run_window = scheduler.get("in_run_window") is True
+                if not in_run_window and not has_daily_brief_recovery_to_resume(
+                    base=request.base, config=request.base_cfg, account=account, market=market, scheduler=scheduler,
+                ):
                     continue
                 market_date = _daily_brief_market_date(scheduler)
                 if not market_date:
@@ -1497,6 +1367,15 @@ def _prepare_daily_brief_notification(
                         now_utc=utc_now(),
                     )
                     envelope = retry.get("envelope")
+                    if not in_run_window:
+                        state = read_scope.delivery_state(base=request.base, account=account, market=market)
+                        day = (state.get("state") or {}).get("days", {}).get(market_date, {})
+                        envelope = _eligible_daily_brief_recovery(
+                            day, datetime.fromisoformat(str(utc_now()).replace("Z", "+00:00")),
+                        )
+                        if envelope and not envelope.get("rendered_message"):
+                            envelope = None
+                        retry = {**retry, "envelope": envelope, "reason": "frozen_recovery"}
                     if not isinstance(envelope, dict) or (
                         envelope.get("delivery_kind") == "candidate_alert"
                         and envelope.get("status") == "pending"
@@ -1505,6 +1384,8 @@ def _prepare_daily_brief_notification(
                             base=request.base, account=account, market=market,
                             market_trading_date=market_date, now_utc=utc_now(), read_scope=read_scope,
                         )
+                        if not in_run_window and not recovery_report.get("available"):
+                            continue
                         rebuilt = _rebuild_daily_brief_delivery(
                             request=request,
                             account=account,
@@ -1518,14 +1399,18 @@ def _prepare_daily_brief_notification(
                         rebuilt_envelope = rebuilt.get("envelope")
                         if isinstance(rebuilt_envelope, dict):
                             read_scope = DailyBriefReadScope(base=request.base, account=account, market=market)
-                            retry = read_retryable_daily_decision_brief_delivery(
-                                base=request.base,
-                                account=account,
-                                market=market,
-                                market_trading_date=market_date,
-                                read_scope=read_scope,
-                                now_utc=utc_now(),
-                            )
+                            if not in_run_window:
+                                # Outside-window admission authorizes only this original recovery.
+                                retry = {"envelope": rebuilt_envelope, "reason": "frozen_recovery"}
+                            else:
+                                retry = read_retryable_daily_decision_brief_delivery(
+                                    base=request.base,
+                                    account=account,
+                                    market=market,
+                                    market_trading_date=market_date,
+                                    read_scope=read_scope,
+                                    now_utc=utc_now(),
+                                )
                             envelope = retry.get("envelope")
                     if not isinstance(envelope, dict):
                         continue
@@ -1649,53 +1534,22 @@ def _prepare_daily_brief_notification(
                             blocked_error_code = "legacy_ai_payload_retired"
                             blocked_retry = retry_before_writes
                             blocked_retry_envelope = envelope_before_writes
-                briefs = assemble_daily_decision_briefs(
-                    base=request.base,
-                    run_id=request.run_id,
-                    account=account,
-                    markets_to_run=list(markets),
-                    scheduler_decision=scheduler,
-                    account_result=result,
-                    pipeline_succeeded=account in ran_pipeline_accounts,
-                    config=request.base_cfg,
-                )
                 for market in markets:
-                    brief = briefs.get(market)
-                    if brief is None:
-                        raise ValueError(f"daily brief assembler did not return market {market} for {account}")
+                    source = brief_preparation.sources[(account, market)]
+                    brief = source["brief"]
                     fixed_target = (
                         str(scheduler.get("scheduled_target_market") or "").strip()
                         if request.trigger_kind == "scheduled"
                         else ""
                     )
-                    pipeline_reliable = bool(
-                        account in ran_pipeline_accounts
-                        and brief.get("status") in {"ready", "degraded"}
-                        and brief.get("actionability") != "blocked"
-                    )
-                    scan_outcomes_by_account[account] = scan_outcomes_by_account.get(account, True) and pipeline_reliable
+                    pipeline_reliable = source["pipeline_reliable"]
                     pending: list[str] = []
                     candidate_record_reason: str | None = None
-                    persisted: dict[str, Any] | None = None
+                    persisted = source["persisted"]
                     diff: dict[str, Any] = {}
-                    failure_source: tuple[str, str] | None = None
+                    failure_source = source["failure_source"]
                     recovery_due = False
                     if pipeline_reliable:
-                        def recovery_intent():
-                            if (scheduled_trigger and explicit_routes and not fixed_target and not request.no_send
-                                    and notifications_enabled(request.base_cfg) and scheduler.get("in_run_window") is True):
-                                return _daily_brief_fanout_recovery_intent(
-                                    request, account, market, scheduler, brief, daily_limits)
-                            if (scheduled_trigger and not explicit_routes and not fixed_target and not request.no_send
-                                    and blocked_retry_envelope is None and scheduler.get("in_run_window") is True):
-                                return _daily_brief_recovery_intent(
-                                    request=request, account=account, market=market, scheduler=scheduler,
-                                    brief=brief, daily_limits=daily_limits,
-                                )
-                            return None
-                        persisted = persist_daily_decision_brief_success(
-                            base=request.base, brief=brief, recovery_intent_factory=recovery_intent,
-                        )
                         previous = persisted.get("previous_successful_brief")
                         if (
                             isinstance(previous, dict)
@@ -1736,30 +1590,6 @@ def _prepare_daily_brief_notification(
                                 request=request, account=account, market=market,
                                 market_date=str(persisted["brief"]["market_trading_date"]),
                             )
-                        if scheduled_trigger and not explicit_routes:
-                            commit_started = monotonic()
-                            try:
-                                _commit_scan_target_after_brief(
-                                    request,
-                                    account=account,
-                                    target=scan_targets[account],
-                                    brief_digest=str(persisted["current_brief_digest"]),
-                                )
-                            finally:
-                                record_tick_latency(
-                                    runlog=request.runlog,
-                                    stage="scheduler_target_commit",
-                                    started=commit_started,
-                                )
-                    else:
-                        brief = persist_daily_decision_brief_failure(base=request.base, brief=brief)
-                        failure_source = _write_daily_brief_failure_artifact(
-                            request=request,
-                            account=account,
-                            market=market,
-                            brief=brief,
-                            result=result,
-                        )
 
                     if explicit_routes:
                         if scheduled_trigger and not request.no_send:
@@ -1774,9 +1604,6 @@ def _prepare_daily_brief_notification(
                                 "market_trading_date": str(brief["market_trading_date"]), "envelope": envelope}
                                 for envelope in list_pending_legacy_daily_brief_deliveries(base=request.base,
                                     account=account, market=market, market_trading_date=str(brief["market_trading_date"]), now_utc=utc_now()))
-                        if scheduled_trigger and pipeline_reliable:
-                            _commit_scan_target_after_brief(request, account=account, target=scan_targets[account],
-                                brief_digest=str(persisted["current_brief_digest"]))
                         lifecycle_audit.append({"account": account, "market": market,
                             "market_trading_date": str(brief["market_trading_date"]),
                             "pipeline_reliable": pipeline_reliable, "fanout": True})
@@ -1997,7 +1824,6 @@ def _prepare_daily_brief_notification(
         markets=markets,
         multi_market_delivery_unsupported=multi_market,
         blocked_error_code=blocked_error_code,
-        scan_outcomes_by_account=scan_outcomes_by_account,
         fanout_ids=tuple(dict.fromkeys(fanout_ids)),
         legacy_deliveries=tuple(legacy_deliveries),
     )
@@ -2367,28 +2193,6 @@ def _daily_brief_market_date(scheduler: dict[str, Any]) -> str | None:
         return None
 
 
-def _write_daily_brief_failure_artifact(
-    *, request: TickNotificationRequest, account: str, market: str, brief: dict[str, Any], result: Any
-) -> tuple[str, str]:
-    payload = {
-        "schema_version": "daily_decision_brief_scan_failure.v1",
-        "run_id": request.run_id,
-        "account": account,
-        "market": market,
-        "market_trading_date": brief.get("market_trading_date"),
-        "recorded_at_utc": utc_now(),
-        "decision_reason": _daily_brief_result_value(result, "decision_reason"),
-        "status": brief.get("status"),
-        "actionability": brief.get("actionability"),
-        "data_gaps": brief.get("data_gaps") or [],
-    }
-    path = state_repo.write_account_run_state(
-        request.base, request.run_id, account, f"daily_decision_brief_failure.{market}.json", payload
-    )
-    relative = path.resolve().relative_to(request.base.resolve()).as_posix()
-    return relative, hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 def _daily_brief_envelope_audit(account: str, market: str, envelope: dict[str, Any], *, retry: bool) -> dict[str, Any]:
     return {
         "account": account,
@@ -2493,11 +2297,11 @@ def _confirm_daily_brief_execution(
     *,
     request: TickNotificationRequest,
     preparation: DailyBriefNotificationPreparation,
-    execution: Any,
+    send_results: Iterable[dict[str, object]],
 ) -> tuple[list[str], list[dict[str, object]]]:
     confirmed_accounts: list[str] = []
     failures: list[dict[str, object]] = []
-    for send_result in execution.send_results:
+    for send_result in send_results:
         if not isinstance(send_result, dict):
             continue
         account = str(send_result.get("account") or "").strip().lower()
@@ -2560,10 +2364,6 @@ def _confirm_daily_brief_execution(
                     )
                 except Exception:
                     pass
-            request.audit_helper.guard_mark_failure(
-                "DAILY_BRIEF_CONFIRM_FAILED",
-                "confirm_daily_decision_brief_delivery_v2",
-            )
             failures.append(
                 {
                     "account": account,

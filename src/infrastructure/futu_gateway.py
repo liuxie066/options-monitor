@@ -32,6 +32,11 @@ import time
 from typing import Any, Callable, Iterable, Mapping
 
 from domain.domain.symbol_identity import OPTION_CODE_RE
+from src.infrastructure.fetch_control import (
+    _FetchControlTimeout,
+    check_fetch_control,
+    wait_fetch_control,
+)
 from src.infrastructure.opend_retcodes import OpenDRetCode, classify_opend_error
 from src.infrastructure.net_port import port_open
 from src.infrastructure.futu_dataframe import futu_dataframe_records
@@ -294,6 +299,8 @@ _FETCH_CONTROL: ContextVar[tuple[Any, Any] | None] = ContextVar("futu_fetch_cont
 def _with_fetch_control(fn: Callable[..., Any]) -> Callable[..., Any]:
     @wraps(fn)
     def call(*args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("deadline") is None and kwargs.get("cancelled") is None:
+            return fn(*args, **kwargs)
         token = _FETCH_CONTROL.set((kwargs.get("deadline"), kwargs.get("cancelled")))
         try:
             return fn(*args, **kwargs)
@@ -572,7 +579,8 @@ def build_futu_quote_context(
     check_fetch_control(deadline, cancelled)
     if before_request is not None:
         before_request()
-    reachable = port_open(host, port)
+    probe = {} if deadline is None else {"timeout": min(.8, max(0.0, deadline - time.monotonic()))}
+    reachable = port_open(host, port, **probe)
     check_fetch_control(deadline, cancelled)
     if not reachable:
         raise FutuGatewayUnreachableError(f"OpenD unreachable: {host}:{port}")
@@ -586,12 +594,18 @@ def build_futu_quote_context(
 def build_futu_trade_context(
     *, host: str, port: int, is_encrypt: bool | None = None,
     on_init_connect_error: Callable[[str], None] | None = None,
+    deadline: float | None = None, cancelled: Callable[[], bool] | None = None,
 ) -> Any:
+    check_fetch_control(deadline, cancelled)
     from src.application.plugin_runtime import require_plugin
 
     require_plugin("broker-futu")
     _ensure_futu_api_importable()
-    if not port_open(host, port):
+    check_fetch_control(deadline, cancelled)
+    probe = {} if deadline is None else {"timeout": min(.8, max(0.0, deadline - time.monotonic()))}
+    reachable = port_open(host, port, **probe)
+    check_fetch_control(deadline, cancelled)
+    if not reachable:
         raise FutuGatewayUnreachableError(f"OpenD unreachable: {host}:{port}")
     if on_init_connect_error is not None:
         # The separate trade-push service owns in-process event callbacks.
@@ -602,7 +616,10 @@ def build_futu_trade_context(
             ),
             deadline=None, cancelled=None,
         )
-    return _start_futu_query_context("trade", {"host": host, "port": port, "is_encrypt": is_encrypt})
+    return _start_futu_query_context(
+        "trade", {"host": host, "port": port, "is_encrypt": is_encrypt},
+        deadline=deadline, cancelled=cancelled,
+    )
 
 
 def _create_futu_sdk_context(kind: str, kwargs: dict[str, Any]) -> Any:
@@ -684,12 +701,16 @@ class _FutuAPIBackend:
             )
         return self._quote_client
 
-    def _ensure_trade_client(self) -> Any:
+    def _ensure_trade_client(
+        self, *, deadline: float | None = None, cancelled: Callable[[], bool] | None = None,
+    ) -> Any:
+        check_fetch_control(deadline, cancelled)
         from src.application.plugin_runtime import require_plugin
 
         require_plugin("broker-futu")
         if self._trade_client is None:
-            self._trade_client = build_futu_trade_context(host=self.host, port=self.port)
+            controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
+            self._trade_client = build_futu_trade_context(host=self.host, port=self.port, **controls)
             LOG.info(
                 "futu_sdk_client_created event=client_created capability=broker host=%s port=%s",
                 self.host,
@@ -715,7 +736,13 @@ class _FutuAPIClient:
         require_plugin("market-opend")
         ensure = getattr(self.backend, "_ensure_quote_client", None)
         if callable(ensure):
-            return ensure()
+            control = _FETCH_CONTROL.get()
+            kwargs = {}
+            if control is not None and isinstance(self.backend, _FutuAPIBackend):
+                deadline, cancelled = control
+                if deadline is not None or cancelled is not None:
+                    kwargs = {"deadline": deadline, "cancelled": cancelled}
+            return ensure(**kwargs)
         quote, _trade = self.backend._ensure_clients()
         return quote
 
@@ -725,7 +752,13 @@ class _FutuAPIClient:
         require_plugin("broker-futu")
         ensure = getattr(self.backend, "_ensure_trade_client", None)
         if callable(ensure):
-            return ensure()
+            control = _FETCH_CONTROL.get()
+            kwargs = {}
+            if control is not None and isinstance(self.backend, _FutuAPIBackend):
+                deadline, cancelled = control
+                if deadline is not None or cancelled is not None:
+                    kwargs = {"deadline": deadline, "cancelled": cancelled}
+            return ensure(**kwargs)
         _quote, trade = self.backend._ensure_clients()
         return trade
 
@@ -1082,7 +1115,7 @@ class FutuGateway:
     def _raise_mapped(self, exc: Exception, *, action: str, redact_errors: bool = False) -> None:
         from src.application.plugin_runtime import PluginUnavailableError
 
-        if isinstance(exc, PluginUnavailableError):
+        if isinstance(exc, (PluginUnavailableError, _FetchControlTimeout)):
             raise exc
         mapped = _map_error(exc, action=action)
         if redact_errors:
@@ -1139,17 +1172,27 @@ class FutuGateway:
             self._raise_mapped(exc, action="ensure_quote_client")
         raise AssertionError("unreachable")
 
-    def _trade_client(self, *, redact_errors: bool = False) -> Any:
+    def _trade_client(
+        self, *, redact_errors: bool = False, deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> Any:
+        check_fetch_control(deadline, cancelled)
         from src.application.plugin_runtime import require_plugin
 
         require_plugin("broker-futu")
         try:
             ensure = getattr(self.backend, "_ensure_trade_client", None)
             if callable(ensure):
-                return ensure()
-            _, trade = self.backend._ensure_clients()
+                controls = {}
+                if isinstance(self.backend, _FutuAPIBackend) and (deadline is not None or cancelled is not None):
+                    controls = {"deadline": deadline, "cancelled": cancelled}
+                trade = ensure(**controls)
+            else:
+                _, trade = self.backend._ensure_clients()
+            check_fetch_control(deadline, cancelled)
             return trade
         except Exception as exc:
+            check_fetch_control(deadline, cancelled)
             self._raise_mapped(exc, action="ensure_trade_client", redact_errors=redact_errors)
         raise AssertionError("unreachable")
 
@@ -1205,13 +1248,16 @@ class FutuGateway:
             self._raise_mapped(exc, action="ensure_quote_ready")
         raise AssertionError("unreachable")
 
+    @_with_fetch_control
     def ensure_broker_ready(
         self,
         *,
         expected_account_ids: Iterable[str],
         trd_env: str,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        trade = self._trade_client()
+        trade = self._trade_client(deadline=deadline, cancelled=cancelled)
         required = _normalize_required_account_ids(expected_account_ids)
         environment = _normalize_trade_environment(trd_env)
         if not required:
@@ -1229,7 +1275,9 @@ class FutuGateway:
             if state.get("trd_logined") is not True:
                 raise RuntimeError("OpenD trade not logged in")
 
+            check_fetch_control(deadline, cancelled)
             result = trade.get_acc_list()
+            check_fetch_control(deadline, cancelled)
             rows = self.client._rows(self.client._unwrap(result))
             observed: set[str] = set()
             for row in rows:
@@ -1258,6 +1306,7 @@ class FutuGateway:
                 ],
             }
         except Exception as exc:
+            check_fetch_control(deadline, cancelled)
             self._raise_mapped(exc, action="ensure_broker_ready")
         raise AssertionError("unreachable")
 
@@ -1385,53 +1434,82 @@ class FutuGateway:
             self._raise_mapped(exc, action="get_account_metadata", redact_errors=True)
         raise AssertionError("unreachable")
 
-    def get_option_expiration_dates(self, code: str) -> Any:
-        quote = self._quote_client()
+    @_with_fetch_control
+    def get_option_expiration_dates(
+        self, code: str, *, deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> Any:
+        quote = self._quote_client(deadline=deadline, cancelled=cancelled)
         try:
             ret, data = quote.get_option_expiration_date(code)
+            check_fetch_control(deadline, cancelled)
             if ret != 0:
                 raise RuntimeError(data)
             return data
         except Exception as exc:
+            check_fetch_control(deadline, cancelled)
             self._raise_mapped(exc, action="get_option_expiration_date")
         raise AssertionError("unreachable")
 
-    def get_option_chain(self, *, is_force_refresh: bool = False, **kwargs: Any) -> Any:
-        from src.application.plugin_runtime import require_plugin
-
-        require_plugin("market-opend")
-        try:
-            return self.client.get_option_chain(is_force_refresh=is_force_refresh, **kwargs)
-        except TypeError as exc:
-            if "is_force_refresh" not in str(exc):
-                self._raise_mapped(exc, action="get_option_chain")
-            try:
-                return self.client.get_option_chain(**kwargs)
-            except Exception as exc2:
-                self._raise_mapped(exc2, action="get_option_chain")
-        except Exception as exc:
-            self._raise_mapped(exc, action="get_option_chain")
-        raise AssertionError("unreachable")
-
-    def get_snapshot(self, codes: Iterable[str]) -> Any:
-        return self.get_snapshot_with_request_hook(codes)
-
-    def get_snapshot_with_request_hook(
-        self, codes: Iterable[str], *, before_request: Callable[[], None] | None = None,
+    @_with_fetch_control
+    def get_option_chain(
+        self, *, is_force_refresh: bool = False, deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None, **kwargs: Any,
     ) -> Any:
         from src.application.plugin_runtime import require_plugin
 
         require_plugin("market-opend")
         try:
+            check_fetch_control(deadline, cancelled)
+            result = self.client.get_option_chain(is_force_refresh=is_force_refresh, **kwargs)
+            check_fetch_control(deadline, cancelled)
+            return result
+        except TypeError as exc:
+            check_fetch_control(deadline, cancelled)
+            if "is_force_refresh" not in str(exc):
+                self._raise_mapped(exc, action="get_option_chain")
+            try:
+                result = self.client.get_option_chain(**kwargs)
+                check_fetch_control(deadline, cancelled)
+                return result
+            except Exception as exc2:
+                check_fetch_control(deadline, cancelled)
+                self._raise_mapped(exc2, action="get_option_chain")
+        except Exception as exc:
+            check_fetch_control(deadline, cancelled)
+            self._raise_mapped(exc, action="get_option_chain")
+        raise AssertionError("unreachable")
+
+    @_with_fetch_control
+    def get_snapshot(
+        self, codes: Iterable[str], *, deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> Any:
+        return self.get_snapshot_with_request_hook(codes, deadline=deadline, cancelled=cancelled)
+
+    @_with_fetch_control
+    def get_snapshot_with_request_hook(
+        self, codes: Iterable[str], *, before_request: Callable[[], None] | None = None,
+        deadline: float | None = None, cancelled: Callable[[], bool] | None = None,
+    ) -> Any:
+        from src.application.plugin_runtime import require_plugin
+
+        require_plugin("market-opend")
+        try:
+            check_fetch_control(deadline, cancelled)
             code_list = list(codes)
             guarded_request = getattr(self.client, "get_snapshot_with_request_hook", None)
             if callable(guarded_request):
-                return guarded_request(code_list=code_list, before_request=before_request)
-            snapshot = self.client.get_snapshot
-            if before_request is not None:
-                before_request()
-            return snapshot(code_list=code_list)
+                result = guarded_request(code_list=code_list, before_request=before_request)
+            else:
+                snapshot = self.client.get_snapshot
+                if before_request is not None:
+                    before_request()
+                result = snapshot(code_list=code_list)
+            check_fetch_control(deadline, cancelled)
+            return result
         except Exception as exc:
+            check_fetch_control(deadline, cancelled)
             self._raise_mapped(exc, action="get_snapshot")
         raise AssertionError("unreachable")
 
@@ -1449,13 +1527,21 @@ class FutuGateway:
             self._raise_mapped(exc, action="get_stock_basicinfo")
         raise AssertionError("unreachable")
 
-    def get_market_state(self, codes: Iterable[str]) -> Any:
+    @_with_fetch_control
+    def get_market_state(
+        self, codes: Iterable[str], *, deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> Any:
         from src.application.plugin_runtime import require_plugin
 
         require_plugin("market-opend")
         try:
-            return self.client.get_market_state(code_list=list(codes))
+            check_fetch_control(deadline, cancelled)
+            result = self.client.get_market_state(code_list=list(codes))
+            check_fetch_control(deadline, cancelled)
+            return result
         except Exception as exc:
+            check_fetch_control(deadline, cancelled)
             self._raise_mapped(exc, action="get_market_state")
         raise AssertionError("unreachable")
 
@@ -1469,7 +1555,11 @@ class FutuGateway:
             self._raise_mapped(exc, action="get_rehab")
         raise AssertionError("unreachable")
 
-    def get_quote_rights(self, *, market: str) -> dict[str, Any]:
+    @_with_fetch_control
+    def get_quote_rights(
+        self, *, market: str, deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
         """Read quote-only SDK capabilities, discarding all user information."""
         from src.application.plugin_runtime import require_plugin
 
@@ -1480,7 +1570,8 @@ class FutuGateway:
         unavailable = {"status": "unavailable", "market": market,
                        "underlier_right": "UNKNOWN", "option_right": "UNKNOWN"}
         try:
-            response = self._quote_client().get_user_info()
+            response = self._quote_client(deadline=deadline, cancelled=cancelled).get_user_info()
+            check_fetch_control(deadline, cancelled)
             if not isinstance(response, tuple) or len(response) != 2 or response[0] != 0:
                 return unavailable
             payload = response[1]
@@ -1495,26 +1586,43 @@ class FutuGateway:
                     "underlier_right": right(f"{prefix}_qot_right"),
                     "option_right": right(f"{prefix}_option_qot_right")}
         except Exception:
+            check_fetch_control(deadline, cancelled)
             # SDK errors can contain credentials; no raw payload crosses this boundary.
             return unavailable
 
-    def get_positions(self, **kwargs: Any) -> Any:
+    @_with_fetch_control
+    def get_positions(
+        self, *, deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None, **kwargs: Any,
+    ) -> Any:
         from src.application.plugin_runtime import require_plugin
 
         require_plugin("broker-futu")
         try:
-            return self.client.get_positions(**kwargs)
+            check_fetch_control(deadline, cancelled)
+            result = self.client.get_positions(**kwargs)
+            check_fetch_control(deadline, cancelled)
+            return result
         except Exception as exc:
+            check_fetch_control(deadline, cancelled)
             self._raise_mapped(exc, action="get_positions")
         raise AssertionError("unreachable")
 
-    def get_account_balance(self, **kwargs: Any) -> Any:
+    @_with_fetch_control
+    def get_account_balance(
+        self, *, deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None, **kwargs: Any,
+    ) -> Any:
         from src.application.plugin_runtime import require_plugin
 
         require_plugin("broker-futu")
         try:
-            return self.client.get_account_balance(**kwargs)
+            check_fetch_control(deadline, cancelled)
+            result = self.client.get_account_balance(**kwargs)
+            check_fetch_control(deadline, cancelled)
+            return result
         except Exception as exc:
+            check_fetch_control(deadline, cancelled)
             self._raise_mapped(exc, action="get_account_balance")
         raise AssertionError("unreachable")
 
@@ -1588,7 +1696,11 @@ class FutuGateway:
             self._raise_mapped(exc, action="get_order_fees")
         raise AssertionError("unreachable")
 
-    def get_trading_days(self, **kwargs: Any) -> Any:
+    @_with_fetch_control
+    def get_trading_days(
+        self, *, deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None, **kwargs: Any,
+    ) -> Any:
         from src.application.plugin_runtime import require_plugin
 
         require_plugin("market-opend")
@@ -1596,26 +1708,40 @@ class FutuGateway:
             params = dict(kwargs)
             if "market" in params:
                 params["market"] = _normalize_trade_date_market(params["market"])
-            return self.client.get_trading_days(**params)
+            check_fetch_control(deadline, cancelled)
+            result = self.client.get_trading_days(**params)
+            check_fetch_control(deadline, cancelled)
+            return result
         except Exception as exc:
+            check_fetch_control(deadline, cancelled)
             self._raise_mapped(exc, action="get_trading_days")
         raise AssertionError("unreachable")
 
-    def get_positions_with_receipt(self, **kwargs: Any) -> Any:
+    @_with_fetch_control
+    def get_positions_with_receipt(
+        self, *, deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None, **kwargs: Any,
+    ) -> Any:
         from src.application.plugin_runtime import require_plugin
 
         require_plugin("broker-futu")
         try:
-            return self.client.get_positions_with_receipt(**kwargs)
+            check_fetch_control(deadline, cancelled)
+            result = self.client.get_positions_with_receipt(**kwargs)
+            check_fetch_control(deadline, cancelled)
+            return result
         except Exception as exc:
+            check_fetch_control(deadline, cancelled)
             self._raise_mapped(
                 exc,
                 action="get_positions_with_receipt",
             )
         raise AssertionError("unreachable")
 
+    @_with_fetch_control
     def get_trading_days_with_receipt(
-        self,
+        self, *, deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
         **kwargs: Any,
     ) -> Any:
         from src.application.plugin_runtime import require_plugin
@@ -1625,10 +1751,12 @@ class FutuGateway:
             params = dict(kwargs)
             if "market" in params:
                 params["market"] = _normalize_trade_date_market(params["market"])
-            return self.client.get_trading_days_with_receipt(
-                **params
-            )
+            check_fetch_control(deadline, cancelled)
+            result = self.client.get_trading_days_with_receipt(**params)
+            check_fetch_control(deadline, cancelled)
+            return result
         except Exception as exc:
+            check_fetch_control(deadline, cancelled)
             self._raise_mapped(
                 exc,
                 action="get_trading_days_with_receipt",
@@ -1653,6 +1781,7 @@ class FutuGateway:
             self._raise_mapped(exc, action="request_history_kline")
         raise AssertionError("unreachable")
 
+    @_with_fetch_control
     def get_earnings_calendar(
         self,
         *,
@@ -1661,6 +1790,8 @@ class FutuGateway:
         end_date: str,
         sort_type: Any | None = None,
         filter_list: Any | None = None,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> Any:
         kwargs: dict[str, Any] = {
             "market": market,
@@ -1675,10 +1806,15 @@ class FutuGateway:
 
         require_plugin("market-opend")
         try:
-            return self.client.get_earnings_calendar(**kwargs)
+            check_fetch_control(deadline, cancelled)
+            result = self.client.get_earnings_calendar(**kwargs)
+            check_fetch_control(deadline, cancelled)
+            return result
         except FutuGatewayCapabilityUnavailableError:
+            check_fetch_control(deadline, cancelled)
             raise
         except Exception as exc:
+            check_fetch_control(deadline, cancelled)
             self._raise_mapped(exc, action=FUTU_EARNINGS_CALENDAR_CAPABILITY)
         raise AssertionError("unreachable")
 
@@ -1793,6 +1929,8 @@ def build_ready_futu_broker_gateway(
     is_option_chain_cache_enabled: bool = False,
     backend_cls: Any | None = None,
     client_cls: Any | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> FutuGateway:
     """Lazy compatibility facade for the optional Futu broker package."""
     from src.application.plugin_runtime import require_plugin
@@ -1802,6 +1940,7 @@ def build_ready_futu_broker_gateway(
         host=host, port=port,
         is_option_chain_cache_enabled=is_option_chain_cache_enabled,
         backend_cls=backend_cls, client_cls=client_cls,
+        **({"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}),
     )
 
 
@@ -1863,38 +2002,6 @@ def _mask_account_id(value: str) -> str:
     if len(raw) <= 4:
         return "*" * len(raw)
     return f"{'*' * (len(raw) - 4)}{raw[-4:]}"
-
-
-def check_fetch_control(
-    deadline: float | None = None,
-    cancelled: Callable[[], bool] | None = None,
-) -> None:
-    """Cooperative control; SDK calls already in flight cannot be interrupted."""
-    if cancelled is not None and cancelled():
-        raise TimeoutError("OpenD fetch cancelled")
-    if deadline is not None and time.monotonic() >= deadline:
-        raise TimeoutError("OpenD fetch deadline reached")
-
-
-def wait_fetch_control(
-    seconds: float,
-    *,
-    deadline: float | None = None,
-    cancelled: Callable[[], bool] | None = None,
-) -> None:
-    check_fetch_control(deadline, cancelled)
-    if deadline is None and cancelled is None:
-        time.sleep(seconds)
-        return
-    end = time.monotonic() + seconds
-    while True:
-        check_fetch_control(deadline, cancelled)
-        remaining = end - time.monotonic()
-        if remaining <= 0:
-            return
-        if deadline is not None:
-            remaining = min(remaining, max(0.0, deadline - time.monotonic()))
-        time.sleep(min(remaining, 0.05) if cancelled is not None else remaining)
 
 
 @_with_fetch_control

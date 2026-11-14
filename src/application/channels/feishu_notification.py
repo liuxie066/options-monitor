@@ -3,13 +3,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Callable
 
 from domain.domain.multi_tick import FEISHU_APP_NOTIFICATION_PROVIDER, notification_route_identity_hash
 from domain.domain.tool_boundary import normalize_subprocess_adapter_payload
 from src.application.channels.feishu_notification_renderer import normalize_feishu_notification_envelope
 from src.application.secret_resolver import resolve_feishu_bot_config
 from src.infrastructure.feishu_bitable import FeishuError, FeishuPermanentError
+from src.infrastructure.fetch_control import _FetchControlTimeout, check_fetch_control
 from src.infrastructure.feishu_bot import (
     FEISHU_SEND_TOO_LARGE,
     permanent_failure_allows_fallback,
@@ -55,7 +56,12 @@ def send_feishu_app_message(
     receive_id_type: str = "open_id",
     idempotency_key: str | None = None,
     transport_envelope: dict[str, Any] | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
+    check_fetch_control(deadline, cancelled)
+    controls = ({"deadline": deadline, "cancelled": cancelled}
+                if deadline is not None or cancelled is not None else {})
     del base
     resolved_channel = str(channel or "").strip().lower()
     if resolved_channel != FEISHU_APP_NOTIFICATION_PROVIDER:
@@ -98,6 +104,7 @@ def send_feishu_app_message(
                 markdown=str(message or ""),
                 uuid=idempotency_key,
                 log_fn=http_attempts.append,
+                **controls,
             )
         else:
             transport = dict(envelope["transport"])
@@ -110,8 +117,10 @@ def send_feishu_app_message(
                     content=dict(transport["content"]),
                     uuid=idempotency_key,
                     log_fn=http_attempts.append,
+                    **controls,
                 )
             except FeishuPermanentError as exc:
+                check_fetch_control(deadline, cancelled)
                 if (
                     not _card_permanent_failure_allows_fallback(exc)
                     or _http_attempts_have_ambiguous_send(http_attempts)
@@ -127,6 +136,7 @@ def send_feishu_app_message(
                     markdown=str(fallback["markdown"]),
                     uuid=effective_idempotency_key,
                     log_fn=http_attempts.append,
+                    **controls,
                 )
         return {
             "ok": True,
@@ -141,7 +151,12 @@ def send_feishu_app_message(
             "fallback_used": fallback_used,
             "attribution_route_key": attribution_route_key,
         }
-    except FeishuError as exc:
+    except (FeishuError, _FetchControlTimeout) as exc:
+        if isinstance(exc, _FetchControlTimeout):
+            # An uncertain send must reach durable delivery even when retries stop.
+            if not isinstance(exc.__cause__, FeishuError) or not _http_attempts_have_ambiguous_send(http_attempts):
+                raise
+            exc = exc.__cause__
         response = exc.response if isinstance(exc.response, dict) else {}
         body_text = str(response.get("body") or "")
         response_json = response if isinstance(response.get("code"), int) else None
@@ -332,6 +347,8 @@ def send_feishu_app_message_process(
     notifications: dict[str, Any] | None = None,
     idempotency_key: str | None = None,
     transport_envelope: dict[str, Any] | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> Any:
     send_result = send_feishu_app_message(
         base=base,
@@ -341,6 +358,8 @@ def send_feishu_app_message_process(
         notifications=notifications,
         idempotency_key=idempotency_key,
         transport_envelope=transport_envelope,
+        **({"deadline": deadline, "cancelled": cancelled}
+           if deadline is not None or cancelled is not None else {}),
     )
     normalized = normalize_feishu_app_send_output(send_result=send_result)
     stdout = json.dumps(

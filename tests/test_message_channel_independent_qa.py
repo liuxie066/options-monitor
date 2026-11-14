@@ -462,7 +462,7 @@ def test_mixed_fanout_process_loss_retries_only_explicit_failure(tmp_path):
 def test_actual_tick_alloff_legacy_routes_absent_keeps_local_report_no_transport(tmp_path, monkeypatch, provider, explicit_empty):
     from src.application import tick_notification_flow as flow
     from src.application import daily_decision_brief_repository as repo
-    from tests.test_daily_decision_brief_notification_flow import _request, _patch_assembler
+    from tests.test_daily_decision_brief_notification_flow import _request, _patch_assembler, _run_flow
     cfg = {"channels": {"feishu": switches(), "wechat_clawbot": switches()},
         "notifications": {"enabled": True, "provider": provider, "channel": provider,
                           "target": "ou_legacy" if provider == "feishu_app" else "wechat:qa:ops"},
@@ -473,7 +473,7 @@ def test_actual_tick_alloff_legacy_routes_absent_keeps_local_report_no_transport
     monkeypatch.setattr(flow, "select_notification_delivery_adapter", forbidden(calls, "tick adapter"))
     _patch_assembler(monkeypatch)
     req = _request(tmp_path, run_id="qa-disabled", config=cfg)
-    result = flow.run_tick_notification_flow(req.request)
+    result = _run_flow(req.request)
     assert result == 0
     assert repo.read_latest_daily_decision_brief(base=tmp_path, account="lx", market="US")["available"]
     assert not list(tmp_path.rglob("nf_*.json"))
@@ -515,7 +515,7 @@ def test_actual_tick_crash_recovers_b_only_and_queries_independent_child_receipt
     from src.application import daily_decision_brief_repository as repo
     from src.application.channels import plugins
     from src.application.notification_delivery_route import notification_reminder_route_key
-    from tests.test_daily_decision_brief_notification_flow import _request, _patch_assembler
+    from tests.test_daily_decision_brief_notification_flow import _request, _patch_assembler, _run_flow
     cfg = route_config("A", "B", "C", account="lx")
     cfg["schedule"] = {"timezone": "America/New_York"}
     clock = ["2026-07-21T14:00:30+00:00"]
@@ -536,14 +536,14 @@ def test_actual_tick_crash_recovers_b_only_and_queries_independent_child_receipt
         send_fn=send, normalize_fn=identity, failure_stage="qa"))
     first = _request(tmp_path, run_id="qa-tick-crash", config=cfg)
     with pytest.raises(SystemExit, match="QA tick transport process lost"):
-        flow.run_tick_notification_flow(first.request)
+        _run_flow(first.request)
     assert repo.read_latest_daily_decision_brief(base=tmp_path, account="lx", market="US")["available"]
     prohibited = []
-    monkeypatch.setattr(flow, "assemble_daily_decision_briefs", forbidden(prohibited, "rerun scan/brief business"))
+    monkeypatch.setattr("src.application.tick_brief_preparation.assemble_daily_decision_briefs", forbidden(prohibited, "rerun scan/brief business"))
     clock[0] = "2026-07-21T14:06:00+00:00"
     cfg["notifications"]["routes"].append({"id": "D", "provider": "feishu_app", "target": "ou_D", "accounts": ["lx"]})
     retry = _request(tmp_path, run_id="qa-tick-retry", delivery_only=True, config=cfg)
-    assert flow.run_tick_notification_flow(retry.request) == 1
+    assert _run_flow(retry.request) == 1
     assert [c["target"] for c in sent] == ["ou_A", "ou_B", "ou_C", "ou_B"]
     assert sent[1] == sent[3]
     assert prohibited == [] and retry.commits == []
@@ -559,7 +559,7 @@ def test_actual_tick_account_bodies_reach_only_selected_account_target(tmp_path,
     from src.application import daily_decision_brief_repository as repo
     from src.application.channels import plugins
     from src.application.notification_delivery_route import notification_reminder_route_key
-    from tests.test_daily_decision_brief_notification_flow import _request, _patch_assembler
+    from tests.test_daily_decision_brief_notification_flow import _request, _patch_assembler, _run_flow
     cfg = route_config("lx", account="lx")
     cfg["notifications"]["routes"].append({"id": "sy", "provider": "feishu_app", "target": "ou_sy", "accounts": ["sy"]})
     cfg["schedule"] = {"timezone": "America/New_York"}
@@ -574,7 +574,7 @@ def test_actual_tick_account_bodies_reach_only_selected_account_target(tmp_path,
             config={"notifications": kw["notifications"]}, base=tmp_path)}
     monkeypatch.setattr(flow, "select_notification_delivery_adapter", lambda _: SimpleNamespace(
         send_fn=send, normalize_fn=identity, failure_stage="qa"))
-    assert flow.run_tick_notification_flow(_request(tmp_path, run_id="qa-accounts", accounts=("lx", "sy"), config=cfg).request) == 0
+    assert _run_flow(_request(tmp_path, run_id="qa-accounts", accounts=("lx", "sy"), config=cfg).request) == 0
     assert len(sent) == 2
     bodies = {c["target"]: c["message"] for c in sent}
     assert set(bodies) == {"ou_lx", "ou_sy"}

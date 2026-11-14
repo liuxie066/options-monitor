@@ -38,6 +38,7 @@ from src.application.required_data_coverage import covered_required_data_frame
 from src.application.required_data_snapshot import (
     FrozenRequiredDataBatch,
     FrozenRequiredDataUnavailable,
+    assert_required_data_discovery_scope,
 )
 from src.application.short_vol_risk_context import enrich_short_vol_contract_cny_fields
 
@@ -105,6 +106,7 @@ def _frames_from_snapshot(
         for symbol in symbols:
             try:
                 entry, csv_bytes = snapshot.resolve(symbol)
+                assert_required_data_discovery_scope(entry, symbol=symbol)
                 frame = pd.read_csv(BytesIO(csv_bytes), converters={field: str for field in ("multiplier", "chain_multiplier", "snapshot_multiplier")})
                 coverage = entry.get("required_data_coverage")
                 frames[symbol] = covered_required_data_frame(frame, coverage)

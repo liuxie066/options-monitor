@@ -469,13 +469,14 @@ def test_cancelled_capture_preserves_physical_calls(tmp_path, monkeypatch, cance
 
 @pytest.mark.parametrize("fallback", [False, True])
 @pytest.mark.parametrize("no_retry", [False, True])
-def test_inflight_cancellation_is_not_replaced_by_control_check(tmp_path, fallback, no_retry):
+@pytest.mark.parametrize("rate_limited_call", [immediate, snapshots.rate_limited_opend_call], ids=["isolated_limiter", "real_limiter"])
+def test_inflight_cancellation_is_not_replaced_by_control_check(tmp_path, fallback, no_retry, rate_limited_call):
     cancellation = KeyboardInterrupt("original cancellation")
     calls = []
     stopped = False
 
     class Gateway:
-        def get_snapshot(self, codes):
+        def get_snapshot(self, codes, **_controls):
             nonlocal stopped
             calls.append(list(codes))
             if fallback and len(calls) == 1:
@@ -486,7 +487,7 @@ def test_inflight_cancellation_is_not_replaced_by_control_check(tmp_path, fallba
     with pytest.raises(KeyboardInterrupt) as raised:
         snapshots.fetch_option_snapshots(
             option_codes=["US.ACME261120P90000"], gateway=Gateway(), base_dir=tmp_path,
-            snapshot_limit=quote.SNAPSHOT_LIMIT, rate_limited_call=immediate,
+            snapshot_limit=quote.SNAPSHOT_LIMIT, rate_limited_call=rate_limited_call,
             cancelled=lambda: stopped, no_retry=no_retry,
         )
     assert raised.value is cancellation

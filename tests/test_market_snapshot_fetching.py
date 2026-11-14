@@ -187,7 +187,8 @@ def test_underlier_observations_stop_before_next_endpoint_or_chunk(
     monkeypatch.setattr("src.infrastructure.futu_gateway.time.monotonic", lambda: now[0])
 
     class Gateway:
-        def get_snapshot(self, codes):  # type: ignore[no-untyped-def]
+        def get_snapshot(self, codes, **controls):  # type: ignore[no-untyped-def]
+            assert controls == {"deadline": 1.0, "cancelled": None}
             calls.append(("snapshot", list(codes)))
             now[0] = 2.0
             return pd.DataFrame([{"code": codes[0], "last_price": 1.0}])
@@ -319,7 +320,8 @@ def test_snapshot_result_can_recover_fully_while_retaining_diagnostics(tmp_path:
     assert set(result.snap_map) == {"US.NVDA.A", "US.NVDA.B"}
     assert result.fallback_filled == 2
     assert result.fallback_failed == 0
-    assert any(error["error_code"] == "PROVIDER_ERROR" for error in result.errors)
+    assert any(error["error_code"] == "PROVIDER_ERROR" for error in result.attempt_errors)
+    assert not any(error["error_code"] == "PROVIDER_ERROR" for error in result.errors)
     assert any(error["error_code"] == "SNAPSHOT_UNEXPECTED_CODES" for error in result.errors)
     assert not any(error["error_code"] == "SNAPSHOT_COVERAGE_INCOMPLETE" for error in result.errors)
 

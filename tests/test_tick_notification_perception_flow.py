@@ -4,6 +4,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
+from test_daily_decision_brief_notification_flow import _RunFlowRequest, _run_flow
+
 
 def test_no_account_notification_perception_does_not_resolve_delivery_route(monkeypatch, tmp_path: Path) -> None:
     import src.application.tick_notification_flow as mod
@@ -12,9 +14,8 @@ def test_no_account_notification_perception_does_not_resolve_delivery_route(monk
     completions: list[dict] = []
 
     monkeypatch.setattr(
-        mod,
-        "_prepare_daily_brief_notification",
-        lambda _request: mod.DailyBriefNotificationPreparation(
+        "src.application.multi_account_tick._prepare_daily_brief_notification",
+        lambda _request, **_kwargs: mod.DailyBriefNotificationPreparation(
             prepared_messages=SimpleNamespace(
                 messages_by_account={},
                 threshold_met=False,
@@ -31,9 +32,9 @@ def test_no_account_notification_perception_does_not_resolve_delivery_route(monk
         "resolve_notification_delivery_route",
         lambda **_kwargs: (_ for _ in ()).throw(AssertionError("delivery route must not be resolved")),
     )
-    monkeypatch.setattr(mod, "finalize_no_account_notification", lambda **_kwargs: 0)
+    monkeypatch.setattr("src.application.multi_account_tick.finalize_no_account_notification", lambda **_kwargs: 0)
 
-    request = mod.TickNotificationRequest(
+    request = _RunFlowRequest(
         base=tmp_path,
         cfg_path=tmp_path / "config.us.json",
         state_path=tmp_path / "state.json",
@@ -56,7 +57,7 @@ def test_no_account_notification_perception_does_not_resolve_delivery_route(monk
         trigger_kind="scheduled",
     )
 
-    assert mod.run_tick_notification_flow(request) == 0
+    assert _run_flow(request) == 0
     perception_actions = [action for event_type, action, _kwargs in audits if event_type == "assistant_perception"]
     assert perception_actions == ["notification_prepared", "no_account_notification"]
     assert completions == [{"status": "skipped", "message": "no_daily_brief_delivery"}]

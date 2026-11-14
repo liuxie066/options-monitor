@@ -167,6 +167,7 @@ def test_agent_tool_masks_state_invalid_source_path(monkeypatch, tmp_path: Path)
         lambda **_kwargs: {
             "available": False, "reason": "state_invalid",
             "error": f"invalid state at {raw_path}", "brief": None, "path": raw_path,
+            "latest_attempt": {"available": False, "reason": "state_invalid", "account": "lx", "market": "US"},
         },
     )
 

@@ -27,7 +27,7 @@ class OfflineQuotes:
         self.closed = 0
         self.bundle = None
 
-    def get_option_expiration_dates(self, code):
+    def get_option_expiration_dates(self, code, *, deadline=None, cancelled=None):
         self.calls.append(("expirations", code))
         return pd.DataFrame({"strike_time": [fixtures.OLD_EXPIRY, fixtures.NEW_EXPIRY]})
 
@@ -40,7 +40,7 @@ class OfflineQuotes:
             "suspension": False,
         } for row in self.rows.values() if row["expiration"] == start])
 
-    def get_snapshot(self, codes):
+    def get_snapshot(self, codes, *, deadline=None, cancelled=None):
         self.calls.append(("snapshot", list(codes)))
         output = []
         for code in codes:
@@ -59,7 +59,7 @@ class OfflineQuotes:
             })
         return pd.DataFrame(output)
 
-    def get_market_state(self, codes):
+    def get_market_state(self, codes, *, deadline=None, cancelled=None):
         self.calls.append(("state", list(codes)))
         return pd.DataFrame([{"code": code, "market_state": "MORNING"} for code in codes])
 

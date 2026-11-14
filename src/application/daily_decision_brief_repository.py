@@ -8,7 +8,7 @@ from contextvars import ContextVar
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any, Callable, Iterable, Iterator, Mapping
 
 from domain.domain.daily_decision_brief import (
     RETIRED_DAILY_BRIEF_FIELDS,
@@ -187,10 +187,80 @@ class DailyBriefReadScope:
             _DELIVERY_VALIDATION.reset(token)
 
 
+class _BriefHistoryObservation(DailyBriefReadScope):
+    """Private snapshot for one batch or delivery observation; never a freshness lease."""
+
+    def __init__(self, *, base: Path, account: str, market: str, stack: ExitStack) -> None:
+        super().__init__(base=base, account=account, market=market)
+        self._store = DecisionHistoryStore(history_path(self._identity[0]))
+        self._stack = stack
+        self._connection = None
+        self._payloads: dict[tuple, Any] = {}
+        self._revisions: dict[str, list[int]] = {}
+        self._delivery: dict[str, Any] | None = None
+
+    def matches(self, *, base: Path, account: str, market: str) -> bool:
+        return self._identity == (Path(base).resolve(), account, market)
+
+    def connection(self):
+        if self._connection is None:
+            self._connection = self._stack.enter_context(self._store.connect())
+        return self._connection
+
+    def payload(self, *, market_date: str | None, revision: int | None, successful: bool) -> Any:
+        key = (market_date, revision, successful)
+        if key not in self._payloads:
+            row = self._store.get(account=self._identity[1], market=self._identity[2],
+                                  market_date=market_date, revision=revision, successful=successful,
+                                  conn=self.connection())
+            self._payloads[key] = row["payload"] if row else None
+        raw = self._payloads[key]
+        # These source objects stay private to one observation; normalizers
+        # construct the consumer results. Recopying every source adds no isolation.
+        return raw if raw is not None else _MISSING
+
+    def revisions(self, market_date: str) -> list[int]:
+        if market_date not in self._revisions:
+            self._revisions[market_date] = self._store.revisions(
+                account=self._identity[1], market=self._identity[2], market_date=market_date,
+                conn=self.connection())
+        return list(self._revisions[market_date])
+
+    def delivery_state(self, *, base: Path, account: str, market: str) -> dict[str, Any]:
+        if not self.matches(base=base, account=_normalize_account(account), market=_normalize_market(market)):
+            raise ValueError("daily brief read scope identity mismatch")
+        if self._delivery is None:
+            self._delivery = super().delivery_state(base=base, account=account, market=market)
+        # This private scope never escapes the batch. The exposure reader only
+        # reads its state and constructs separate output objects for every date.
+        return self._delivery
+
+
+_BRIEF_HISTORY_OBSERVATION: ContextVar[_BriefHistoryObservation | None] = ContextVar("brief_history_observation", default=None)
+
+
+@contextmanager
+def _brief_history_observation(*, base: Path, account: str, market: str) -> Iterator[_BriefHistoryObservation]:
+    current = _BRIEF_HISTORY_OBSERVATION.get()
+    if current is not None and current.matches(base=base, account=account, market=market):
+        yield current
+        return
+    with ExitStack() as stack:
+        observation = _BriefHistoryObservation(base=base, account=account, market=market, stack=stack)
+        token = _BRIEF_HISTORY_OBSERVATION.set(observation)
+        try:
+            yield observation
+        finally:
+            _BRIEF_HISTORY_OBSERVATION.reset(token)
+
+
 def _observe_delivery_state(raw: Any, *, base: Path, path: Path, account: str, market: str) -> dict[str, Any]:
     validation = _DELIVERY_VALIDATION.get()
     normalize = validation.normalize if validation is not None else _normalize_delivery_state
-    return normalize(raw, base=base, path=path, account=account, market=market)
+    # A new independent observation always reopens history. A batch's nested
+    # normalization shares only that batch's already-open read-only transaction.
+    with _brief_history_observation(base=base, account=account, market=market):
+        return normalize(raw, base=base, path=path, account=account, market=market)
 
 
 @contextmanager
@@ -348,6 +418,9 @@ def persist_daily_decision_brief_failure(*, base: Path, brief: Mapping[str, Any]
 def _history_raw(*, base: Path, account: str, market: str, market_date: str | None = None,
                  revision: int | None = None, successful: bool = False) -> Any:
     try:
+        observation = _BRIEF_HISTORY_OBSERVATION.get()
+        if observation is not None and observation.matches(base=base, account=account, market=market):
+            return observation.payload(market_date=market_date, revision=revision, successful=successful)
         row = DecisionHistoryStore(history_path(base)).get(account=account, market=market, market_date=market_date,
                                                           revision=revision, successful=successful)
     except (DecisionHistoryError, OSError) as exc:
@@ -1025,7 +1098,7 @@ def read_daily_brief_fanout_recovery_source(
                     continue
                 brief = normalize_persisted_daily_decision_brief(row["payload"])
                 generated = datetime.fromisoformat(brief["generated_at_utc"].replace("Z", "+00:00"))
-                if after < generated < min(before, datetime.fromisoformat(recovery["cutoff_utc"])):
+                if after < generated <= before and generated < datetime.fromisoformat(recovery["cutoff_utc"]):
                     return {"brief": brief, "recovery_intent": deepcopy(recovery),
                         "current_candidate_identities": sorted(_candidate_identity_set(brief)),
                         "current_revision": brief["revision"], "current_brief_digest": daily_brief_digest(brief)}
@@ -1541,14 +1614,38 @@ def read_run_daily_decision_brief(
     }
 
 
+def _read_latest_attempt(*, base: Path, account: str, market: str) -> dict[str, Any]:
+    unavailable = {"available": False, "account": account, "market": market}
+    try:
+        if not history_path(base).exists():
+            return {**unavailable, "reason": "not_found"}
+        row = DecisionHistoryStore(history_path(base)).get(account=account, market=market)
+        if row is None:
+            return {**unavailable, "reason": "not_found"}
+        brief = _normalize_persisted_brief(row["payload"], path=history_path(base), account=account, market=market)
+    except (DecisionHistoryError, DailyDecisionBriefStateError, OSError):
+        return {**unavailable, "reason": "state_invalid"}
+    return {
+        "available": True,
+        "reason": "ok" if row["successful"] else "scan_failed",
+        **{key: brief[key] for key in (
+            "account", "market", "market_trading_date", "run_id", "revision",
+            "generated_at_utc", "status", "actionability",
+        )},
+        "reason_codes": sorted({str(gap["reason"]) for gap in brief["data_gaps"] if gap.get("reason")}),
+    }
+
+
 def read_latest_daily_decision_brief(*, base: Path, account: str, market: str) -> dict[str, Any]:
+    """Read the latest successful content alongside the latest recorded attempt."""
     base_path = Path(base).resolve()
     account_norm = _normalize_account(account)
     market_norm = _normalize_market(market)
     path = _current_path(base_path, account_norm, market_norm)
     result = _read_brief_result(base=base_path, path=path, account=account_norm, market=market_norm)
+    attempt = _read_latest_attempt(base=base_path, account=account_norm, market=market_norm)
     if not result.get("available"):
-        return result
+        return {**result, "latest_attempt": attempt}
     try:
         _validate_current_revision(
             base=base_path,
@@ -1556,8 +1653,11 @@ def read_latest_daily_decision_brief(*, base: Path, account: str, market: str) -
             current_path=path,
         )
     except DailyDecisionBriefStateError as exc:
-        return {"available": False, "reason": "state_invalid", "error": str(exc), "brief": None, "path": path}
-    return result
+        return {
+            "available": False, "reason": "state_invalid", "error": str(exc),
+            "brief": None, "path": path, "latest_attempt": attempt,
+        }
+    return {**result, "latest_attempt": attempt}
 
 
 def read_daily_decision_brief(
@@ -1631,6 +1731,22 @@ def list_daily_decision_brief_revisions(
         "market_trading_date": date_norm,
         "revisions": revisions,
     }
+
+
+def read_combo_candidate_exposures_batch(
+    *, base: Path, account: str, market: str, market_trading_dates: Iterable[str],
+) -> dict[str, dict[str, Any]]:
+    """Observe one account/market's requested dates in one read-only operation.
+
+    Delivery bytes and referenced sources are validated once against one history
+    transaction. Only requested revisions and delivery references are decoded.
+    No observation survives this call; independent readers always observe anew.
+    """
+    identity = dict(base=Path(base).resolve(), account=_normalize_account(account), market=_normalize_market(market))
+    dates = list(dict.fromkeys(_normalize_market_date(day) for day in market_trading_dates))
+    with _brief_history_observation(**identity) as observation:
+        return {day: read_combo_candidate_exposures(
+            **identity, market_trading_date=day, read_scope=observation) for day in dates}
 
 
 def read_combo_candidate_exposures(
@@ -1817,6 +1933,9 @@ def _list_revision_numbers(
     market_trading_date: str,
 ) -> list[int]:
     try:
+        observation = _BRIEF_HISTORY_OBSERVATION.get()
+        if observation is not None and observation.matches(base=base, account=account, market=market):
+            return observation.revisions(market_trading_date)
         return DecisionHistoryStore(history_path(base)).revisions(account=account, market=market, market_date=market_trading_date)
     except (DecisionHistoryError, OSError) as exc:
         raise DailyDecisionBriefStateError(str(exc)) from exc
@@ -3251,6 +3370,7 @@ __all__ = [
     "record_daily_brief_fanout_plan",
     "read_daily_decision_brief_fixed_recovery",
     "read_combo_candidate_exposures",
+    "read_combo_candidate_exposures_batch",
     "read_latest_daily_decision_brief",
     "read_run_daily_decision_brief",
     "read_retryable_daily_decision_brief_delivery",

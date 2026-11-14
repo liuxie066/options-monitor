@@ -2,10 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-# Daily-brief entrypoints owned by tick_notification_flow.py.
+# Source formation and delivery keep separate owners.
+_SOURCE_ENTRYPOINTS = ('assemble_daily_decision_briefs(', 'persist_daily_decision_brief_success(')
 _BRIEF_ENTRYPOINTS = (
-    'assemble_daily_decision_briefs(',
-    'persist_daily_decision_brief_success(',
     'prepare_daily_decision_brief_delivery(',
     '_select_daily_brief_delivery(',
     'select_daily_brief_notification(',
@@ -145,8 +144,12 @@ def test_decide_notify_dispatch_gate_matches_legacy_branching() -> None:
 def test_main_uses_notify_dispatch_gate_entrypoint_batch4() -> None:
     base = Path(__file__).resolve().parents[1]
     notification_flow_src = (base / 'src' / 'application' / 'tick_notification_flow.py').read_text(encoding='utf-8')
+    preparation_src = (base / 'src' / 'application' / 'tick_brief_preparation.py').read_text(encoding='utf-8')
     for entrypoint in (*_BRIEF_ENTRYPOINTS, 'decision_builder=decide_notification_delivery'):
         assert entrypoint in notification_flow_src
+    for entrypoint in _SOURCE_ENTRYPOINTS:
+        assert entrypoint in preparation_src
+        assert entrypoint not in notification_flow_src
 
 
 def test_main_orchestrator_guard_batch4_no_legacy_rule_reflow() -> None:
@@ -156,8 +159,13 @@ def test_main_orchestrator_guard_batch4_no_legacy_rule_reflow() -> None:
     guard_flow_src = (base / 'src' / 'application' / 'tick_guard_flow.py').read_text(encoding='utf-8')
     notification_flow_src = (base / 'src' / 'application' / 'tick_notification_flow.py').read_text(encoding='utf-8')
 
+    preparation_src = (base / 'src' / 'application' / 'tick_brief_preparation.py').read_text(encoding='utf-8')
     # Keep main.py as orchestration-only and check delegated owner modules for key Batch-4 decisions.
     assert 'TickSchedulerRequest(' in src
+    assert 'prepare_tick_briefs(' in src
+    for entrypoint in _SOURCE_ENTRYPOINTS:
+        assert entrypoint in preparation_src
+        assert entrypoint not in notification_flow_src
 
     for entrypoint in (
         'decide_trading_day_guard=decide_trading_day_guard',

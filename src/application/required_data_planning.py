@@ -4,7 +4,9 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, timezone
 import math
 from pathlib import Path
-from typing import Any, Literal, MutableMapping
+from typing import Any, Callable, Literal, MutableMapping
+
+from src.infrastructure.futu_gateway import check_fetch_control
 
 from domain.domain.candidate_defaults import (
     DEFAULT_SELL_CALL_WINDOW,
@@ -215,6 +217,7 @@ class RequiredDataFetchPlanBundle:
     require_realized_volatility: bool = False
     spot_observation_complete: bool = False
     spot_observation_error: str | None = None
+    failed_planning_scopes: list[dict[str, Any]] = field(default_factory=list)
 
     def to_debug_dict(self) -> dict[str, Any]:
         payload = {
@@ -240,6 +243,8 @@ class RequiredDataFetchPlanBundle:
             diagnostics = getattr(self.underlier_observation, "fetch_diagnostics", None)
             if diagnostics:
                 payload["spot_observation_diagnostics"] = list(diagnostics)
+        if self.failed_planning_scopes:
+            payload["failed_planning_scopes"] = [dict(scope) for scope in self.failed_planning_scopes]
         return payload
 
 
@@ -262,7 +267,11 @@ def _resolve_underlier_observation(
     snapshot_window_sec: float = 30.0,
     snapshot_max_calls: int = 60,
     market_data_provider: str = "opend",
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> OpeningUnderlierObservation | None:
+    check_fetch_control(deadline, cancelled)
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
     try:
         observed = get_underlier_spot(
             symbol, market_data_provider=market_data_provider,
@@ -272,7 +281,9 @@ def _resolve_underlier_observation(
             snapshot_max_wait_sec=snapshot_max_wait_sec,
             snapshot_window_sec=snapshot_window_sec,
             snapshot_max_calls=snapshot_max_calls,
+            **controls,
         )
+        check_fetch_control(deadline, cancelled)
         if isinstance(observed, OpeningUnderlierObservation):
             return observed
         legacy_spot = _safe_float(observed)
@@ -294,7 +305,7 @@ def _resolve_underlier_observation(
             reason_code="legacy_test_observation",
         )
     except Exception:
-        pass
+        check_fetch_control(deadline, cancelled)
     return None
 
 
@@ -1170,7 +1181,11 @@ def build_required_data_fetch_plan(
     expiration_max_calls: int = 60,
     planning_identity: RequiredDataPlanningIdentity | None = None,
     market_data_provider: str = "opend",
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> RequiredDataFetchPlanBundle:
+    check_fetch_control(deadline, cancelled)
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
     fetch_source = market_data_source(market_data_provider, fetch_source)
     assert_strategy_config_resolved(symbol_cfg)
     if planning_identity is not None:
@@ -1311,6 +1326,7 @@ def build_required_data_fetch_plan(
                 snapshot_max_wait_sec=snapshot_max_wait_sec,
                 snapshot_window_sec=snapshot_window_sec,
                 snapshot_max_calls=snapshot_max_calls,
+                **controls,
             )
             if spot_observation_cache is not None:
                 spot_observation_cache[spot_cache_key] = underlier_observation
@@ -1350,7 +1366,9 @@ def build_required_data_fetch_plan(
             expiration_max_calls=expiration_max_calls,
             list_expirations_fn=list_option_expirations,
             trading_date=(frozen_trading_date or ""),
+            **controls,
         )
+        check_fetch_control(deadline, cancelled)
         if (
             trading_date_resolution_error is not None
             and expiration_discovery.reason_code
@@ -1490,6 +1508,27 @@ def build_required_data_fetch_plan(
                 planning_reason=f"{source_prefix} has no opening strikes at current spot",
             )
     side_plans.extend(position_side_plans)
+    failed_planning_scopes: list[dict[str, Any]] = []
+    discovery_failed = expiration_discovery.outcome in {"provider_error", "parse_error"}
+    if discovery_failed:
+        directory_plans = [plan for plan in side_plans
+                           if plan.source_fields != ["close_advice.position_requirements"]]
+        sources = _unique_preserve_order([
+            *[source for plan in directory_plans for source in plan.source_fields],
+            *(["position_advice.roll_scope"] if any(item.get("roll_scope") for item in ready_position_requirements) else []),
+        ])
+        failed_planning_scopes.append({
+            "source_fields": sources or ["generic_compatibility_window"],
+            "outcome": expiration_discovery.outcome,
+            "reason_code": expiration_discovery.reason_code,
+            "error": expiration_discovery.error,
+            "request_identity": dict(expiration_discovery.request_identity),
+            "side_plans": [plan.to_debug_dict() for plan in directory_plans],
+        })
+        # Exact held contracts have their own bound dates/strikes. Directory
+        # failure blocks opening/roll enumeration, not these independent quotes.
+        side_plans = [plan for plan in position_side_plans
+                      if plan.source_fields == ["close_advice.position_requirements"]]
     side_plans = _merge_same_side_plans(side_plans)
     projected_expirations = _unique_preserve_order(
         [
@@ -1502,8 +1541,8 @@ def build_required_data_fetch_plan(
         projected_expirations = list(expiration_discovery.expirations)
     if expiration_discovery.outcome == "success_empty":
         projection_outcome: FetchPlanOutcome = "success_empty"
-    elif expiration_discovery.outcome in {"provider_error", "parse_error"}:
-        projection_outcome = expiration_discovery.outcome
+    elif discovery_failed:
+        projection_outcome = "success_rows" if side_plans and trading_date is not None else expiration_discovery.outcome
     elif spot_observation_error is not None:
         projection_outcome = "provider_error"
     elif side_plans and not projected_expirations:
@@ -1517,20 +1556,24 @@ def build_required_data_fetch_plan(
         )
     else:
         projection_outcome = "success_rows"
-    require_realized_volatility = bool(
+    directory_requires_rv = bool(
         (want_put and sell_put_semantics.scan_requires_rv)
         or (want_call and sell_call_semantics.scan_requires_rv)
         or (
             combo_yield_enabled
             and combo_yield_policy.requires_realized_volatility
         )
-        or any(
-            bool(item.get("requires_realized_volatility"))
-            for item in ready_position_requirements
-        )
         or bool(wheel_call_cfg.get("requires_realized_volatility", False))
         or bool(wheel_put_cfg.get("requires_realized_volatility", False))
     )
+    exact_requires_rv = any(
+        bool(item.get("requires_realized_volatility")) for item in ready_position_requirements
+    )
+    require_realized_volatility = directory_requires_rv or exact_requires_rv
+    if discovery_failed:
+        failed_planning_scopes[0]["require_realized_volatility"] = directory_requires_rv
+        require_realized_volatility = exact_requires_rv
+    check_fetch_control(deadline, cancelled)
     return RequiredDataFetchPlanBundle(
         symbol=symbol,
         spot_reference=spot_reference,
@@ -1555,4 +1598,5 @@ def build_required_data_fetch_plan(
         require_realized_volatility=require_realized_volatility,
         spot_observation_complete=spot_observation_complete,
         spot_observation_error=spot_observation_error,
+        failed_planning_scopes=failed_planning_scopes,
     )

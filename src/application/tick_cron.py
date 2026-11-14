@@ -8,6 +8,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,9 +23,10 @@ from src.application.runtime_config_freshness import (
     ensure_runtime_config_identity,
 )
 from src.application.runtime_paths import resolve_runtime_root
+from src.application.runtime_trigger_context import resolve_tick_deadline, tick_subprocess_env
 from src.application.symbol_mutations import split_symbol_whitelist
 from src.application.system_alerts import report_system_failure, report_system_recovery
-from src.infrastructure.io_utils import read_json
+from src.infrastructure.io_utils import atomic_write_json, read_json
 from src.infrastructure.run_log import create_run_id
 
 
@@ -414,6 +416,8 @@ def run_tick_cron(
         ).runtime_root
         run_id = create_run_id()
         env.update(plan.trigger_env)
+        deadline = resolve_tick_deadline(timeout_seconds=plan.timeout_seconds, environ=env)
+        env = tick_subprocess_env(deadline=deadline, environ=env)
         env["OM_TICK_CRON_RUN_ID"] = run_id
         trace_path = base / "output_runs" / run_id / "state" / "tick_hang_traceback.txt"
         env["OM_TICK_HANG_TRACEBACK_PATH"] = str(trace_path)
@@ -438,20 +442,25 @@ def run_tick_cron(
                 _write_line(stderr, "<3>" + str(exc))
                 return 1
 
+        process_timings: dict[str, float] = {}
         try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(list(plan.tick_argv), plan.timeout_seconds)
             if run_cmd is None:
                 proc = _run_tick_process_group(
                     command=list(plan.tick_argv),
                     cwd=cwd,
                     env=env,
                     timeout_seconds=plan.timeout_seconds,
+                    timings=process_timings,
                 )
             else:
                 proc = run_cmd(
                     list(plan.tick_argv),
                     cwd=str(cwd) if cwd is not None else None,
                     env=env,
-                    timeout=plan.timeout_seconds,
+                    timeout=remaining,
                     check=False,
                 )
         except subprocess.TimeoutExpired:
@@ -466,6 +475,15 @@ def run_tick_cron(
                             message=f"{type(exc).__name__}: {exc}", stderr=stderr, cwd=cwd)
             _write_line(stderr, "<3>EXEC_START_FAILED_RC_1")
             return 1
+        finally:
+            if process_timings:
+                try:
+                    atomic_write_json(
+                        base / "output_runs" / run_id / "state" / "tick_process_timings.json",
+                        process_timings,
+                    )
+                except OSError:
+                    _write_line(stderr, "[WARN] tick process timings could not be saved")
         rc = int(getattr(proc, "returncode", 1))
         if rc != 0:
             receipt = _completed_receipt(base, run_id, plan, rc=rc)
@@ -526,23 +544,10 @@ def _install_tick_hang_diagnostics() -> None:
     atexit.register(cleanup)
 
 
-def _run_tick_process_group(
-    *,
-    command: list[str],
-    cwd: str | Path | None,
-    env: dict[str, str],
-    timeout_seconds: int,
-    terminate_grace_seconds: float = 5.0,
-) -> subprocess.CompletedProcess[Any]:
-    proc = subprocess.Popen(
-        command,
-        cwd=str(cwd) if cwd is not None else None,
-        env=env,
-        start_new_session=True,
-    )
-    try:
-        returncode = proc.wait(timeout=timeout_seconds)
-    except subprocess.TimeoutExpired:
+def _diagnose_tick_process_timeout(
+    proc: subprocess.Popen[Any], exc: BaseException, env: dict[str, str],
+) -> None:
+    if isinstance(exc, subprocess.TimeoutExpired):
         trace_path = env.get("OM_TICK_HANG_TRACEBACK_PATH")
         if trace_path and Path(trace_path).exists():
             try:
@@ -551,20 +556,71 @@ def _run_tick_process_group(
                 proc.wait(timeout=2.0)
             except (ProcessLookupError, subprocess.TimeoutExpired):
                 pass
+
+
+def _run_tick_process_group(
+    *,
+    command: list[str],
+    cwd: str | Path | None,
+    env: dict[str, str],
+    timeout_seconds: int,
+    terminate_grace_seconds: float = 5.0,
+    timings: dict[str, float] | None = None,
+) -> subprocess.CompletedProcess[Any]:
+    phases = timings if timings is not None else {}
+    started = time.monotonic()
+    deadline = resolve_tick_deadline(timeout_seconds=timeout_seconds, environ=env)
+    if deadline is not None and time.monotonic() >= deadline:
+        raise subprocess.TimeoutExpired(command, timeout_seconds)
+    proc = subprocess.Popen(
+        command,
+        cwd=str(cwd) if cwd is not None else None,
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        returncode = proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+    except BaseException as exc:
+        phases["business_wait_seconds"] = time.monotonic() - started
+        diagnostic_started = time.monotonic()
         try:
-            os.killpg(proc.pid, signal.SIGTERM)
+            _diagnose_tick_process_timeout(proc, exc, env)
+        finally:
+            phases["diagnostic_seconds"] = time.monotonic() - diagnostic_started
+            cleanup_started = time.monotonic()
+            try:
+                _stop_tick_process_group(proc, terminate_grace_seconds)
+            finally:
+                phases["cleanup_seconds"] = time.monotonic() - cleanup_started
+        raise
+    phases.update(business_wait_seconds=time.monotonic() - started, diagnostic_seconds=0.0, cleanup_seconds=0.0)
+    if returncode:
+        cleanup_started = time.monotonic()
+        try:
+            # A failed child can still have SDK descendants in our original group.
+            _stop_tick_process_group(proc, terminate_grace_seconds)
+        finally:
+            phases["cleanup_seconds"] = time.monotonic() - cleanup_started
+    return subprocess.CompletedProcess(command, int(returncode))
+
+
+def _stop_tick_process_group(proc: subprocess.Popen[Any], grace_seconds: float) -> None:
+    """Stop this wrapper's group and reap its child before its lock is released."""
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=max(0.1, float(grace_seconds)))
+    except subprocess.TimeoutExpired:
+        pass
+    finally:
+        # The direct child can exit while a descendant still ignores TERM.
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        try:
-            proc.wait(timeout=max(0.1, float(terminate_grace_seconds)))
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            proc.wait()
-        raise
-    return subprocess.CompletedProcess(command, int(returncode))
+        proc.wait()
 
 
 __all__ = ["TickCronPlan", "build_tick_cron_plan", "run_tick_cron"]

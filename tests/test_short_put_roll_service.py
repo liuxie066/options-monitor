@@ -693,6 +693,25 @@ def test_frozen_partial_ranges_never_become_complete(frozen_roll_ranges, complet
     assert arguments["provenance"]["required_data_coverage"] == original
 
 
+def test_frozen_exact_only_quotes_cannot_enable_directory_dependent_roll(frozen_roll_ranges):
+    arguments, _ = frozen_roll_ranges
+    baseline = service.evaluate_frozen_position_roll(**arguments)
+    assert baseline["outcome"] == "found" and baseline["candidates"]
+    plan = arguments["provenance"]["expected_fetch_contract"]["fetch_plan"]
+    plan.update(
+        expiration_discovery_complete=False,
+        expiration_discovery={"outcome": "provider_error", "error": "TimeoutError: directory timed out"},
+        failed_planning_scopes=[{"outcome": "provider_error", "error": "TimeoutError: directory timed out"}],
+    )
+    for side in plan["side_plans"]:
+        side["source_fields"] = ["close_advice.position_requirements"]
+    result = service.evaluate_frozen_position_roll(**arguments)
+    assert result["status"] == "unavailable" and result["outcome"] == "unable"
+    assert result["candidates"] == [] and result["coverage"] is None
+    assert result["reason_codes"] == ["roll_scope_not_covered"]
+    assert result["source"]["required_data_coverage"]["status"] == "partial"
+
+
 def test_frozen_partial_ranges_do_not_replace_missing_held_contract(frozen_roll_ranges):
     arguments, _ = frozen_roll_ranges
     arguments["quotes"] = arguments["quotes"][1:]

@@ -66,7 +66,7 @@ def sdk(monkeypatch):
         RET_OK=0, OpenQuoteContext=Context, OpenSecTradeContext=Trade,
         TradeDealHandlerBase=type("DealBase", (), {}),
     ))
-    monkeypatch.setattr(gateway, "port_open", lambda *_args: True)
+    monkeypatch.setattr(gateway, "port_open", lambda *_args, **_kwargs: True)
 
     def start(kind, kwargs, *, deadline=None, cancelled=None):
         return gateway._FutuQueryContext(

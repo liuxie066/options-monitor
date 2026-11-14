@@ -281,6 +281,8 @@ class _Audit:
 
 def test_manual_trigger_updates_snapshot_without_sending_ordinary_notification(monkeypatch, tmp_path: Path) -> None:
     import src.application.tick_notification_flow as mod
+    from src.application.tick_brief_preparation import TickBriefPreparation
+    from test_daily_decision_brief_notification_flow import _RunFlowRequest, _run_flow
 
     completions: list[dict] = []
     finalizations: list[dict] = []
@@ -293,7 +295,7 @@ def test_manual_trigger_updates_snapshot_without_sending_ordinary_notification(m
             "daily_brief": {},
         }
     }
-    request = mod.TickNotificationRequest(
+    request = _RunFlowRequest(
         base=tmp_path,
         cfg_path=tmp_path / "config.us.json",
         state_path=tmp_path / "scheduler_state.json",
@@ -315,7 +317,7 @@ def test_manual_trigger_updates_snapshot_without_sending_ordinary_notification(m
         trigger_kind="manual",
     )
 
-    def _prepare(_request):
+    def _prepare(_request, **_kwargs):
         preparations.append(_request.run_id)
         return mod.DailyBriefNotificationPreparation(
             prepared_messages=SimpleNamespace(
@@ -329,7 +331,9 @@ def test_manual_trigger_updates_snapshot_without_sending_ordinary_notification(m
             markets=("US",),
         )
 
-    monkeypatch.setattr(mod, "_prepare_daily_brief_notification", _prepare)
+    monkeypatch.setattr("src.application.multi_account_tick.prepare_tick_briefs",
+                        lambda **_kwargs: TickBriefPreparation(markets=("US",)))
+    monkeypatch.setattr("src.application.multi_account_tick._prepare_daily_brief_notification", _prepare)
     monkeypatch.setattr(
         mod,
         "resolve_notification_delivery_route",
@@ -340,9 +344,9 @@ def test_manual_trigger_updates_snapshot_without_sending_ordinary_notification(m
         finalizations.append(dict(kwargs))
         return 0
 
-    monkeypatch.setattr(mod, "finalize_no_account_notification", _finalize)
+    monkeypatch.setattr("src.application.multi_account_tick.finalize_no_account_notification", _finalize)
 
-    assert mod.run_tick_notification_flow(request) == 0
+    assert _run_flow(request) == 0
     assert preparations == ["run-manual"]
     assert finalizations[0]["reason"] == "non_scheduled_ordinary_notification_disabled"
     assert completions == [

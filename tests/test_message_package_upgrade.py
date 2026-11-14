@@ -50,6 +50,7 @@ def message_transition(transition):
         for name in (
             "src/application/channels/plugins.py", "src/application/agent_tool_contracts.py",
             "src/infrastructure/feishu_bot.py", "src/infrastructure/feishu_bitable.py",
+            "src/infrastructure/fetch_control.py",
             "src/application/channels/wechat_clawbot/ilink_client.py",
         ):
             path = release / name

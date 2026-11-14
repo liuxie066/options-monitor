@@ -37,6 +37,9 @@ from src.application.position_advice_plugin import (
 )
 from src.application.quality.gate import assert_quality_allows
 from src.application.read_execution import RunStopped, check_run
+from src.application.required_data_snapshot import (
+    FrozenRequiredDataUnavailable, assert_required_data_discovery_scope,
+)
 from src.application.runtime_config_freshness import infer_runtime_config_market
 from src.application.runtime_paths import runtime_root_scope
 from src.infrastructure.io_utils import atomic_write_json
@@ -380,6 +383,7 @@ def evaluate_frozen_position_roll(
         result["reason_codes"] = [unavailable_reason or "roll_scope_not_planned"]
         return result
     try:
+        assert_required_data_discovery_scope(provenance, symbol=str(position.get("symbol") or ""))
         policy = require_position_advice_plugin()
         position = dict(position)
         broker = normalize_broker(position.get("broker"))
@@ -472,6 +476,9 @@ def evaluate_frozen_position_roll(
             # Keep a failed refresh visible even when no candidate survives.
             result["quote_evidence"] = dict(quote_evidence)
         return result
+    except FrozenRequiredDataUnavailable:
+        result.update(status="unavailable", outcome="unable", candidates=[], displayed=0,
+            omitted=0, coverage=None, reason_codes=["roll_scope_not_covered"])
     except PositionAdviceUnavailableError:
         result.update(status="unavailable", outcome="unable", candidates=[], displayed=0,
             omitted=0, coverage=None, reason_codes=["position_advice_unavailable"])

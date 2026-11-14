@@ -1,9 +1,11 @@
 """Stable iLink imports and lazy construction of the optional WeChat transport."""
 from __future__ import annotations
 
+from time import monotonic
 from typing import Any, Callable
 
 from src.application.channels.plugins import load_channel_plugin
+from src.infrastructure.fetch_control import _FetchControlTimeout, check_fetch_control
 
 
 DEFAULT_ILINK_BASE_URL = "https://ilinkai.weixin.qq.com"
@@ -12,7 +14,9 @@ ILINK_CHANNEL_VERSION = "1.0.0"
 
 
 class WechatClawbotError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, request_attempted: bool = False):
+        super().__init__(message)
+        self.request_attempted = request_attempted
 
 
 def http_json(
@@ -22,10 +26,21 @@ def http_json(
     *,
     headers: dict[str, str] | None = None,
     timeout: int = 20,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
-    return load_channel_plugin("wechat_clawbot", module="ilink_client").http_json(
-        method, url, payload, headers=headers, timeout=timeout,
-    )
+    check_fetch_control(deadline, cancelled)
+    request_timeout = timeout if deadline is None else min(timeout, max(0.0, deadline - monotonic()))
+    try:
+        return load_channel_plugin("wechat_clawbot", module="ilink_client").http_json(
+            method, url, payload, headers=headers, timeout=request_timeout,
+        )
+    except WechatClawbotError as exc:
+        try:
+            check_fetch_control(deadline, cancelled)
+        except _FetchControlTimeout as stopped:
+            raise stopped from exc
+        raise
 
 
 class WechatClawbotClient:

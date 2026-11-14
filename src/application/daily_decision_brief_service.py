@@ -820,6 +820,15 @@ def assemble_daily_decision_brief(
     return normalized_brief
 
 
+def daily_brief_scan_is_reliable(*, brief: Mapping[str, Any], pipeline_succeeded: bool) -> bool:
+    """A completed pipeline still needs consumable account/market source facts."""
+    return bool(
+        pipeline_succeeded
+        and brief.get("status") in {"ready", "degraded"}
+        and brief.get("actionability") != "blocked"
+    )
+
+
 def assemble_daily_decision_briefs(
     *,
     base: Path,

@@ -78,6 +78,7 @@ def fetch_market_earnings_calendar(
     """Fetch one market calendar and project its coverage to exact expiries."""
 
     _check_earnings_budget(deadline, cancelled)
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
     market_norm = str(market or "").strip().upper()
     if market_norm not in _MARKET_TIMEZONES:
         raise ValueError(f"unsupported earnings calendar market: {market}")
@@ -122,6 +123,7 @@ def fetch_market_earnings_calendar(
                     market=market_norm,
                     begin_date=interval_start.isoformat(),
                     end_date=interval_end.isoformat(),
+                    **controls,
                 )
             except FutuGatewayCapabilityUnavailableError as exc:
                 unsupported_reason = str(
@@ -685,14 +687,19 @@ def prefetch_market_earnings_calendars(
     output_dir: Path,
     scan_at_utc: datetime,
     gateway_builder: Callable[..., Any] | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Fetch and publish one shared earnings snapshot per market and run."""
+    _check_earnings_budget(deadline, cancelled)
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
 
     builder = gateway_builder or build_ready_futu_quote_gateway
     root = Path(output_dir).resolve()
     root.mkdir(parents=True, exist_ok=True)
     market_results: dict[str, Any] = {}
     for market in sorted(market_requests):
+        _check_earnings_budget(deadline, cancelled)
         request = market_requests[market]
         host = str(request.get("host") or "127.0.0.1")
         port = int(request.get("port") or 11111)
@@ -702,8 +709,10 @@ def prefetch_market_earnings_calendars(
                 host=host,
                 port=port,
                 is_option_chain_cache_enabled=False,
+                **controls,
             )
         except Exception as exc:
+            _check_earnings_budget(deadline, cancelled)
             gateway = _UnavailableEarningsGateway(exc)
         try:
             snapshot = fetch_market_earnings_calendar(
@@ -721,6 +730,7 @@ def prefetch_market_earnings_calendars(
                     )
                     else {}
                 ),
+                **controls,
             )
         finally:
             try:

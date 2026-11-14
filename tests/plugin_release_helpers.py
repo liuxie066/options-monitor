@@ -50,6 +50,7 @@ def copy_channel_core(source, target):
     """Copy the actual channel facades and their core imports into an isolated release."""
     for name in (
         "src/infrastructure/__init__.py",
+        "src/infrastructure/fetch_control.py",
         "src/infrastructure/feishu_bot.py",
         "src/infrastructure/feishu_bitable.py",
         "src/infrastructure/feishu_ws_client.py",

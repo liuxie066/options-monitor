@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from functools import partial
 from typing import Any, Callable
 
 from src.application.channels.plugins import load_channel_plugin
@@ -114,7 +115,13 @@ def send_message(
     uuid: str | None = None,
     log_fn: Callable[[dict[str, Any]], Any] | None = None,
     http_json_fn: HttpJsonFn = http_json,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
+    token_retry_fn = with_tenant_token_retry
+    if deadline is not None or cancelled is not None:
+        http_json_fn = partial(http_json_fn, deadline=deadline, cancelled=cancelled)
+        token_retry_fn = partial(token_retry_fn, deadline=deadline, cancelled=cancelled)
     return load_channel_plugin("feishu", module="bot").send_message(
         app_id=app_id,
         app_secret=app_secret,
@@ -124,7 +131,7 @@ def send_message(
         uuid=uuid,
         log_fn=log_fn,
         http_json_fn=http_json_fn,
-        token_retry_fn=with_tenant_token_retry,
+        token_retry_fn=token_retry_fn,
     )
 
 
@@ -236,7 +243,13 @@ def send_post_message(
     uuid: str | None = None,
     log_fn: Callable[[dict[str, Any]], Any] | None = None,
     http_json_fn: HttpJsonFn = http_json,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
+    token_retry_fn = with_tenant_token_retry
+    if deadline is not None or cancelled is not None:
+        http_json_fn = partial(http_json_fn, deadline=deadline, cancelled=cancelled)
+        token_retry_fn = partial(token_retry_fn, deadline=deadline, cancelled=cancelled)
     return load_channel_plugin("feishu", module="bot").send_post_message(
         app_id=app_id,
         app_secret=app_secret,
@@ -245,5 +258,5 @@ def send_post_message(
         uuid=uuid,
         log_fn=log_fn,
         http_json_fn=http_json_fn,
-        token_retry_fn=with_tenant_token_retry,
+        token_retry_fn=token_retry_fn,
     )

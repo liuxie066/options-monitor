@@ -30,6 +30,7 @@ from src.application.source_receipts import (
 from src.application.required_data_plan_identity import (
     required_data_plan_id,
     validate_required_data_expected_fetch_contract,
+    validate_required_data_failed_planning_scopes,
 )
 from src.application.required_data_blobs import (
     RequiredDataBlobError,
@@ -110,16 +111,21 @@ class FrozenRequiredDataBatch:
     entries: dict[str, FrozenRequiredDataEntry]
     unavailable: dict[str, FrozenRequiredDataUnavailable]
     require_fresh: bool = True
+    require_expiration_discovery: bool = False
 
     def resolve(
         self,
         symbol: str,
         *,
         now: datetime | None = None,
+        require_expiration_discovery: bool = False,
     ) -> FrozenRequiredDataEntry:
         symbol_norm = _required_text(symbol, "symbol").upper()
         resolved = self.entries.get(symbol_norm)
         if resolved is not None:
+            evidence, _ = resolved
+            if self.require_expiration_discovery or require_expiration_discovery:
+                assert_required_data_discovery_scope(evidence, symbol=symbol_norm)
             if self.require_fresh:
                 validated, _csv_bytes = resolved
                 try:
@@ -214,7 +220,14 @@ def seal_required_data_snapshot(
     result_index = _prefetch_result_index(summary)
     symbol_entries: dict[str, dict[str, Any]] = {}
     for plan_item, expected_contract in validated_plan_symbols:
-        symbol = str(expected_contract["symbol"])
+        symbol = str(plan_item["symbol"]).strip().upper()
+        if expected_contract is None:
+            discovery = plan_item["fetch_plan"]["expiration_discovery"]
+            symbol_entries[symbol] = {
+                "status": "failed", "reason": discovery["outcome"],
+                "error_type": discovery["outcome"], "detail": discovery["error"],
+            }
+            continue
         try:
             evidence = resolve_exact_fresh_required_data_quote_receipt(
                 runtime_root=_runtime_root_from_required_data_root(
@@ -256,6 +269,7 @@ def seal_required_data_snapshot(
     failed = len(symbol_entries) - ready
     has_partial_coverage = any(
         (item.get("required_data_coverage") or {}).get("status") == "partial"
+        or bool((item.get("fetch_plan") or {}).get("failed_planning_scopes"))
         for item in symbol_entries.values()
     )
     if ready == len(symbol_entries) and symbol_entries and not has_partial_coverage:
@@ -876,6 +890,7 @@ def _validate_manifest_symbols(
             )
     has_partial_coverage = any(
         (evidence.get("required_data_coverage") or {}).get("status") == "partial"
+        or bool(((evidence.get("expected_fetch_contract") or {}).get("fetch_plan") or {}).get("failed_planning_scopes"))
         for evidence, _csv_bytes in resolved_entries.values()
     )
     if ready_count == total and total and not has_partial_coverage:
@@ -907,6 +922,14 @@ def resolve_frozen_required_data(
         now=now,
     )
     return validated
+
+
+def assert_required_data_discovery_scope(evidence: Mapping[str, Any], *, symbol: str) -> None:
+    scopes = ((evidence.get("expected_fetch_contract") or {}).get("fetch_plan") or {}).get("failed_planning_scopes") or []
+    if scopes:
+        raise FrozenRequiredDataUnavailable(
+            symbol=symbol, reason=str(scopes[0]["outcome"]), detail=str(scopes[0]["error"]),
+        )
 
 
 def assert_required_data_source(
@@ -974,6 +997,7 @@ def resolve_frozen_required_data_csv_bytes_batch(
     required_data_root: Path,
     now: datetime | None = None,
     require_fresh: bool = True,
+    require_expiration_discovery: bool = False,
 ) -> FrozenRequiredDataBatch:
     try:
         manifest, _root, manifest_bytes, resolved_entries = (
@@ -1018,7 +1042,7 @@ def resolve_frozen_required_data_csv_bytes_batch(
             unavailable[symbol] = FrozenRequiredDataUnavailable(
                 symbol=symbol,
                 reason=str(entry.get("reason") or "symbol_snapshot_failed"),
-                detail=str(entry.get("error_type") or ""),
+                detail=str(entry.get("detail") or entry.get("error_type") or ""),
             )
             continue
         validated, csv_bytes = resolved_entries[symbol]
@@ -1053,6 +1077,7 @@ def resolve_frozen_required_data_csv_bytes_batch(
         entries=entries,
         unavailable=unavailable,
         require_fresh=require_fresh,
+        require_expiration_discovery=require_expiration_discovery,
     )
 
 
@@ -1077,8 +1102,8 @@ def _validate_resolved_entry_freshness(
 
 def _validate_global_plan_symbols(
     plan_symbols: list[dict[str, Any]],
-) -> list[tuple[dict[str, Any], dict[str, Any]]]:
-    validated: list[tuple[dict[str, Any], dict[str, Any]]] = []
+) -> list[tuple[dict[str, Any], dict[str, Any] | None]]:
+    validated: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
     seen_symbols: set[str] = set()
     for plan_item in plan_symbols:
         symbol = _required_text(plan_item.get("symbol"), "plan symbol").upper()
@@ -1088,6 +1113,24 @@ def _validate_global_plan_symbols(
             )
         seen_symbols.add(symbol)
         contract_payload = plan_item.get("expected_fetch_contract")
+        if contract_payload is None and plan_item.get("projection_outcome") in {"provider_error", "parse_error"}:
+            fetch_plan = plan_item.get("fetch_plan")
+            binding = plan_item.get("fetch_binding")
+            try:
+                if not isinstance(fetch_plan, Mapping) or not isinstance(binding, Mapping):
+                    raise ValueError("failed planning identity is missing")
+                validate_required_data_failed_planning_scopes(fetch_plan, symbol=symbol, binding=binding)
+                if (fetch_plan.get("projection_outcome") != plan_item["projection_outcome"]
+                        or fetch_plan.get("projection_outcome") != fetch_plan["expiration_discovery"]["outcome"]
+                        or fetch_plan.get("merged_requests") != []
+                        or fetch_plan.get("side_plans") != []
+                        or fetch_plan.get("projected_expirations") != []
+                        or _normalize_source(plan_item.get("source")) != binding["source"]):
+                    raise ValueError("failed planning scope contains executable or inconsistent demand")
+            except (TypeError, ValueError, KeyError) as exc:
+                raise RequiredDataSnapshotError(f"{symbol} failed planning authority is invalid: {exc}") from exc
+            validated.append((plan_item, None))
+            continue
         if not isinstance(contract_payload, Mapping):
             raise RequiredDataSnapshotError(
                 f"{symbol} expected fetch contract is unavailable"

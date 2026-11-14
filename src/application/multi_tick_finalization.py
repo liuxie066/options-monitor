@@ -6,6 +6,14 @@ from domain.domain import build_no_account_notification_payloads, build_shared_l
 from src.application.cron_runtime import build_run_end_payload, build_shared_last_run_meta
 
 
+def merge_scan_outcomes(tick_metrics: dict[str, Any], qualifications: dict[str, bool]) -> None:
+    """Business qualification cannot erase a known execution failure or scope."""
+    outcomes = dict(tick_metrics.get("scan_outcomes") or {})
+    for account, reliable in qualifications.items():
+        outcomes[account] = False if outcomes.get(account) is False else reliable
+    tick_metrics["scan_outcomes"] = outcomes
+
+
 def failed_scan_accounts(tick_metrics: dict[str, Any]) -> list[str]:
     return sorted(account for account, reliable in (tick_metrics.get("scan_outcomes") or {}).items() if reliable is False)
 

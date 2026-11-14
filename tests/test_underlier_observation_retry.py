@@ -61,10 +61,10 @@ class Gateway:
             ]
         return [{"code": code, "market_state": "MORNING"} for code in codes]
 
-    def get_snapshot(self, codes):
+    def get_snapshot(self, codes, **_controls):
         return self._call("get_snapshot", codes)
 
-    def get_market_state(self, codes):
+    def get_market_state(self, codes, **_controls):
         return self._call("get_market_state", codes)
 
     def limited(self, **kwargs):

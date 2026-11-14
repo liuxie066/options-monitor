@@ -449,11 +449,14 @@ def get_exchange_rates_or_fetch_latest(
     write_through_path: Path | None = None,
     log: Callable[[str], None] | None = None,
     write_cache: bool = True,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict | None:
     """Compatibility view of the single current FX owner; rates are capacity-safe."""
     del max_age_hours
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
     try:
-        snapshot = current_exchange_rate_snapshot(cache_path=cache_path, write_cache=write_cache)
+        snapshot = current_exchange_rate_snapshot(cache_path=cache_path, write_cache=write_cache, **controls)
     except OSError as exc:
         _warn(log, f"[WARN] FX cache unavailable: {exc}")
         return None

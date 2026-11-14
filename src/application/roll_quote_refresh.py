@@ -14,7 +14,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
+
+from src.infrastructure.futu_gateway import check_fetch_control
 
 from domain.domain.symbol_identity import symbol_market
 from src.application.market_data_provider import resolve_market_data_provider
@@ -54,11 +56,16 @@ def _received_after(received: datetime, rows: list[Mapping[str, Any]]) -> dateti
 
 def _quote_rights_receipt(
     provider: Any, gateway: Any, *, market: str, received: datetime,
+    deadline: float | None = None, cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any] | None:
+    check_fetch_control(deadline, cancelled)
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
     try:
-        response = provider.get_quote_rights(gateway, market=market)
+        response = provider.get_quote_rights(gateway, market=market, **controls)
     except Exception:
+        check_fetch_control(deadline, cancelled)
         return None
+    check_fetch_control(deadline, cancelled)
     if not isinstance(response, Mapping) or response.get("market") != market:
         return None
     allowed = {"LV1", "LV2", "LV3", "BMP", "NO", "SF"}
@@ -75,14 +82,9 @@ def _quote_rights_receipt(
     return rights
 
 
-def _market_state_receipt(
-    provider: Any, gateway: Any, *, symbol: str, received: datetime,
+def _market_state_receipt_from_rows(
+    rows: Any, *, code: str, received: datetime,
 ) -> dict[str, Any] | None:
-    try:
-        code = normalize_underlier(symbol).code
-        rows = provider.get_market_state(gateway, [code])
-    except Exception:
-        return None
     matching = [
         row
         for row in rows or []
@@ -99,11 +101,29 @@ def _market_state_receipt(
     }
 
 
+def _market_state_receipt(
+    provider: Any, gateway: Any, *, symbol: str, received: datetime,
+    deadline: float | None = None, cancelled: Callable[[], bool] | None = None,
+) -> dict[str, Any] | None:
+    check_fetch_control(deadline, cancelled)
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
+    try:
+        code = normalize_underlier(symbol).code
+        rows = provider.get_market_state(gateway, [code], **controls)
+    except Exception:
+        check_fetch_control(deadline, cancelled)
+        return None
+    check_fetch_control(deadline, cancelled)
+    return _market_state_receipt_from_rows(rows, code=code, received=received)
+
+
 def refresh_roll_quote_evidence(
     *,
     targets: list[Mapping[str, Any]],
     config: Mapping[str, Any],
     base_dir: Path,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Re-fetch the requested put contracts and their post-snapshot receipts.
 
@@ -112,6 +132,7 @@ def refresh_roll_quote_evidence(
     evaluation's ``state_time >= snapshot`` coherence rule still holds.
     """
     provider = resolve_market_data_provider(dict(config))
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
     rows_by_symbol: dict[str, list[dict[str, Any]]] = {}
     market_state: dict[str, dict[str, Any]] = {}
     quote_rights: dict[str, dict[str, Any]] = {}
@@ -119,6 +140,7 @@ def refresh_roll_quote_evidence(
     observations: list[datetime] = []
     refreshed_contracts = 0
     for target in targets:
+        check_fetch_control(deadline, cancelled)
         symbol = str(target.get("symbol") or "").strip()
         expirations = [str(value) for value in target.get("expirations") or []]
         if not symbol or not expirations:
@@ -139,9 +161,12 @@ def refresh_roll_quote_evidence(
                     trading_date=target.get("trading_date"),
                     chain_cache=True,
                     market_data_provider=provider.name,
+                    deadline=deadline,
+                    cancelled=cancelled,
                 ),
             )
         except Exception:
+            check_fetch_control(deadline, cancelled)
             reason_codes.append("quote_refresh_failed")
             continue
         rows = [
@@ -163,12 +188,15 @@ def refresh_roll_quote_evidence(
                     observations.append(value)
         market = str(symbol_market(symbol) or "").upper()
         received = _received_after(datetime.now(timezone.utc), rows)
+        check_fetch_control(deadline, cancelled)
         try:
             gateway = provider.open_quote_gateway(
                 host=str(target.get("host") or "127.0.0.1"),
                 port=int(target.get("port") or 11111),
+                **controls,
             )
         except Exception:
+            check_fetch_control(deadline, cancelled)
             gateway = None
         if gateway is None:
             reason_codes.append("quote_refresh_state_unavailable")
@@ -176,6 +204,7 @@ def refresh_roll_quote_evidence(
         try:
             state = _market_state_receipt(
                 provider, gateway, symbol=symbol, received=received,
+                deadline=deadline, cancelled=cancelled,
             )
             if state is not None:
                 market_state[symbol] = state
@@ -184,6 +213,7 @@ def refresh_roll_quote_evidence(
             if market and market not in quote_rights:
                 rights = _quote_rights_receipt(
                     provider, gateway, market=market, received=received,
+                    deadline=deadline, cancelled=cancelled,
                 )
                 if rights is not None:
                     quote_rights[market] = rights
@@ -194,6 +224,7 @@ def refresh_roll_quote_evidence(
                 gateway.close()
             except Exception:
                 pass
+    check_fetch_control(deadline, cancelled)
     if not rows_by_symbol:
         status = "unavailable"
     elif reason_codes:

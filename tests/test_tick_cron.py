@@ -107,7 +107,7 @@ def test_run_tick_cron_invokes_tick_with_trigger_environment(tmp_path) -> None:
         "--accounts",
         "lx",
     ]
-    assert calls[0]["timeout"] == 700
+    assert 0 < calls[0]["timeout"] <= 700
     assert calls[0]["env"]["OM_TRIGGER_SOURCE"] == "cron"
     assert calls[0]["env"]["OM_TRIGGER_JOB_ID"] == "om-tick-us"
     assert calls[0]["env"]["OM_TRIGGER_TIMEZONE"] == "America/New_York"

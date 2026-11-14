@@ -4,14 +4,17 @@ import argparse
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from functools import partial
 import json
 import os
 import sys
 from pathlib import Path
+from time import monotonic
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from src.infrastructure.io_utils import (
+    read_json,
     utc_now,
 )
 from src.infrastructure.run_log import RunLogger
@@ -65,8 +68,22 @@ from src.application.tick_account_execution import (
 )
 from src.application.tick_notification_flow import (
     TickNotificationRequest,
+    TickNotificationOutcome,
+    _daily_brief_recovery_intent_for_preparation,
+    _prepare_daily_brief_notification,
+    has_daily_brief_recovery_to_resume,
     run_tick_notification_flow,
 )
+from src.application.tick_brief_preparation import TickBriefPreparation, prepare_tick_briefs
+from src.application.daily_decision_brief_repository import daily_brief_delivery_validation_scope
+from src.application.multi_tick_finalization import (
+    _record_finalize_degraded,
+    failed_scan_accounts,
+    finalize_multi_tick_run,
+    finalize_no_account_notification,
+    merge_scan_outcomes,
+)
+from src.application.multi_tick_audit import record_tick_latency
 from src.application.tick_run_context import (
     build_tick_idempotency_context,
     tick_account_outcomes,
@@ -75,7 +92,7 @@ from src.application.tick_run_context import (
 )
 from src.application.tick_run_workspace import prepare_tick_run_workspace
 from src.application.scan_scheduler import mark_scheduler_accounts
-from src.application.runtime_trigger_context import build_trigger_context
+from src.application.runtime_trigger_context import build_trigger_context, resolve_tick_deadline
 from src.application.runtime_paths import resolve_runtime_root
 from src.application.runtime_config_freshness import (
     RuntimeConfigFreshnessError,
@@ -91,6 +108,7 @@ from src.application.experience_mode import validate_experience_request
 from src.application.futu_quote_routing import resolve_futu_quote_route
 from src.application.market_data_provider import require_market_data_provider
 from src.application.opend_market_snapshot_fetching import trading_calendar_dates
+from src.infrastructure.futu_gateway import check_fetch_control
 from src.infrastructure.external_services import (
     run_opend_watchdog,
     run_scan_scheduler_cli,
@@ -156,11 +174,16 @@ def _experience_scan_completed(
     return requested == completed
 
 
-def _is_trading_day_guard_for_market(cfg: dict[str, Any], market: str) -> tuple[bool | None, str]:
+def _is_trading_day_guard_for_market(
+    cfg: dict[str, Any], market: str, *, deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> tuple[bool | None, str]:
     """Return (is_trading_day, market_used) for one market.
 
     None means guard check failed and caller should continue without blocking.
     """
+    check_fetch_control(deadline, cancelled)
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
     market_used = str(market or "").strip().upper() or "US"
     provider = require_market_data_provider(cfg)
     if provider.name != "opend":
@@ -173,9 +196,11 @@ def _is_trading_day_guard_for_market(cfg: dict[str, Any], market: str) -> tuple[
                 market_used, "UTC"))).date()
             gateway = provider.open_quote_gateway(host=str(route.host), port=int(route.port))
             response = provider.get_trading_days_with_receipt(
-                gateway, market=market_used, start=day.isoformat(), end=day.isoformat())
+                gateway, market=market_used, start=day.isoformat(), end=day.isoformat(), **controls)
+            check_fetch_control(deadline, cancelled)
             return day.isoformat() in trading_calendar_dates(response, start=day, end=day, allow_empty=True), market_used
         except Exception:
+            check_fetch_control(deadline, cancelled)
             return None, market_used
         finally:
             if gateway is not None:
@@ -187,6 +212,7 @@ def _is_trading_day_guard_for_market(cfg: dict[str, Any], market: str) -> tuple[
         host=str(route.host),
         port=int(route.port),
         market=market_used,
+        **controls,
     )
 
 
@@ -268,6 +294,8 @@ def main(
     argv: list[str] | None = None,
     *,
     _on_execution: Callable[[TickExecutionResult], None] | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> int:
     ap = argparse.ArgumentParser(description='Multi-account tick with per-account notifications')
     ap.add_argument('--config', required=True)
@@ -283,6 +311,11 @@ def main(
     ap.add_argument('--opend-phone-verify-continue', action='store_true', help='Clear OpenD phone-verify pending pause and continue running.')
     ap.add_argument('--allow-stale-config', action='store_true', help='Emergency override: skip generated runtime config freshness checks.')
     args = ap.parse_args(argv)
+    trigger_context = build_trigger_context()
+    deadline = resolve_tick_deadline(
+        timeout_seconds=trigger_context.get("timeout_seconds") or 600,
+        deadline=deadline,
+    )
     symbols_arg = ",".join(str(item) for item in args.symbols) if args.symbols is not None else None
     try:
         split_symbol_whitelist(symbols_arg)
@@ -373,7 +406,6 @@ def main(
     execution = replace(execution, accounts=tuple(args.accounts))
     if _on_execution is not None:
         _on_execution(execution)
-    trigger_context = build_trigger_context()
     if experience:
         try:
             validate_experience_request(
@@ -596,7 +628,7 @@ def main(
             apply_project_load_shed_fn=apply_project_load_shed,
             clear_opend_phone_verify_pending_fn=clear_opend_phone_verify_pending,
             is_opend_phone_verify_pending_fn=is_opend_phone_verify_pending,
-            run_opend_watchdog_fn=run_opend_watchdog,
+            run_opend_watchdog_fn=partial(run_opend_watchdog, deadline=deadline, cancelled=cancelled),
             mark_opend_phone_verify_pending_fn=mark_opend_phone_verify_pending,
             send_opend_alert_fn=send_opend_alert,
             send_opend_recovery_notice_fn=send_opend_recovery_notice,
@@ -626,8 +658,10 @@ def main(
             run_id=run_id,
             runlog=runlog,
             audit_helper=audit_helper,
-            check_trading_day_for_market=lambda gm: _is_trading_day_guard_for_market(base_cfg, gm),
-            run_scan_scheduler_cli_fn=run_scan_scheduler_cli,
+            check_trading_day_for_market=lambda gm: _is_trading_day_guard_for_market(
+                base_cfg, gm, deadline=deadline, cancelled=cancelled,
+            ),
+            run_scan_scheduler_cli_fn=partial(run_scan_scheduler_cli, deadline=deadline, cancelled=cancelled),
             account_view_cls=AccountSchedulerDecisionView,
         )
     )
@@ -679,7 +713,11 @@ def main(
         delivery_only_allowed = (
             trigger_kind == "scheduled"
             and len(scheduler_markets) == 1
-            and any(item.get("in_run_window") is True for item in scheduler_decisions_by_account.values())
+            and (any(item.get("in_run_window") is True for item in scheduler_decisions_by_account.values())
+                 or (not no_send and any(has_daily_brief_recovery_to_resume(
+                     base=base, config=base_cfg, account=account, market=scheduler_markets[0],
+                     scheduler=scheduler_decisions_by_account.get(account, scheduler_decision),
+                 ) for account in account_ids)))
         )
         if not delivery_only_allowed:
             runlog.safe_event(
@@ -709,8 +747,9 @@ def main(
             account_ids=account_ids,
             scheduler_decisions_by_account=scheduler_decisions_by_account,
         )
-        notification_rc = run_tick_notification_flow(
-            TickNotificationRequest(
+        tick_metrics["delivery_only"] = True
+        notification_rc = _run_notification_with_post_delivery_fallback(
+            notification_request=TickNotificationRequest(
                 base=base,
                 repo_root=repo_root,
                 cfg_path=cfg_path,
@@ -720,12 +759,13 @@ def main(
                 run_id=run_id,
                 runlog=runlog,
                 results=[],
-                tick_metrics={"delivery_only": True},
+                tick_metrics=tick_metrics,
                 no_send=no_send,
                 bj_tz=bj_tz,
                 audit_helper=audit_helper,
                 vpy=vpy,
-                complete_tick_idempotency_fn=complete_tick_idempotency,
+                deadline=deadline,
+                cancelled=cancelled,
                 markets_to_run=markets_to_run,
                 scheduler_markets=scheduler_markets,
                 scheduler_decision=scheduler_decision,
@@ -733,7 +773,8 @@ def main(
                 scheduler_decisions_by_account=scheduler_decisions_by_account,
                 delivery_only=True,
                 trigger_kind=trigger_kind,
-            )
+            ),
+            complete_tick_idempotency_fn=complete_tick_idempotency,
         )
         if notification_rc == 0:
             publish_scheduler_skips(tuple(
@@ -750,6 +791,8 @@ def main(
                 accounts=account_ids,
                 markets_to_run=markets_to_run,
                 symbols_arg=symbols_arg,
+                deadline=deadline,
+                cancelled=cancelled,
                 **warmup_context,
             )
         except Exception as exc:
@@ -844,9 +887,12 @@ def main(
         symbols_arg=symbols_arg,
         trigger_kind=trigger_kind,
         experience=experience,
+        deadline=deadline,
+        cancelled=cancelled,
     )
     account_execution = run_tick_account_execution(account_execution_request)
     tick_metrics['accounts'].extend(account_execution.account_metrics)
+    tick_metrics["scan_outcomes"] = dict(account_execution.scan_outcomes)
     tick_metrics["required_data_prefetch_invocation_count"] = (
         account_execution.prefetch_invocation_count
     )
@@ -952,7 +998,8 @@ def main(
         bj_tz=bj_tz,
         audit_helper=audit_helper,
         vpy=vpy,
-        complete_tick_idempotency_fn=complete_tick_idempotency,
+        deadline=deadline,
+        cancelled=cancelled,
         markets_to_run=markets_to_run,
         scheduler_markets=scheduler_markets,
         scheduler_decision=scheduler_decision,
@@ -960,12 +1007,12 @@ def main(
         account_ids=tuple(account_ids),
         scheduler_decisions_by_account=scheduler_decisions_by_account,
         scheduled_scan_targets_by_account=account_execution.scheduled_scan_targets_by_account,
-        commit_scan_targets_fn=commit_scan_targets,
-        post_delivery_sidecars_fn=publish_post_delivery_sidecars_once,
         trigger_kind=trigger_kind,
     )
     rc = _run_notification_with_post_delivery_fallback(
         notification_request=notification_request,
+        complete_tick_idempotency_fn=complete_tick_idempotency,
+        commit_scan_targets_fn=commit_scan_targets,
         post_delivery_sidecars_fn=publish_post_delivery_sidecars_once,
     )
     try:
@@ -984,15 +1031,255 @@ def main(
     return rc
 
 
-def _run_notification_with_post_delivery_fallback(
-    *,
-    notification_request: TickNotificationRequest,
-    post_delivery_sidecars_fn: Callable[[], None],
+def _validate_scheduled_scan_targets(request: TickNotificationRequest) -> None:
+    if request.delivery_only or request.trigger_kind != "scheduled":
+        return
+    targets = request.scheduled_scan_targets_by_account or {}
+    missing = sorted(account for account in request.ran_pipeline_accounts if not targets.get(account))
+    if missing:
+        request.audit_helper.audit(
+            "scheduler", "scheduled_scan_target_missing", run_id=request.run_id,
+            status="error", extra={"accounts": missing},
+        )
+        raise RuntimeError(f"scheduled scan target missing for accounts: {', '.join(missing)}")
+
+
+def _finish_delivery_only_notification(
+    request: TickNotificationRequest, outcome: TickNotificationOutcome, *,
+    sent_accounts: list[str], failures: list[Any], error_code: str | None,
 ) -> int:
+    rc = 2 if error_code and outcome.skip_reason else 1 if failures or error_code else 0
+    request.runlog.safe_event(
+        "run_end", "error" if rc else "skip" if outcome.skip_reason else "ok",
+        error_code=error_code or ("NOTIFY_FAILED" if failures else None),
+        data=_safe_runlog_data({
+            "reason": outcome.skip_reason or "daily_brief_delivery_only",
+            "delivery_only": True, "sent_accounts": sent_accounts,
+            "notify_failures": failures, "notify_summary": outcome.notify_summary,
+        }),
+    )
+    return rc
+
+
+def _finish_skipped_tick_notification(
+    request: TickNotificationRequest, outcome: TickNotificationOutcome,
+    common: dict[str, Any], *, error_code: str | None,
+) -> int:
+    reason = outcome.skip_reason or str(error_code)
+    return finalize_no_account_notification(
+        **{**common, "no_send": request.no_send or reason == "notifications_disabled"},
+        reason=reason, run_end_outcome="error" if error_code else "ok" if reason == "no_daily_brief_delivery" else "skip",
+        error_code=error_code, return_code=2 if error_code else 0,
+    )
+
+
+def _complete_tick_notification(
+    request: TickNotificationRequest, outcome: TickNotificationOutcome, *,
+    rc: int, scan_failures: list[str], error_code: str | None,
+    complete_tick_idempotency_fn: Callable[..., None],
+) -> None:
+    if rc:
+        error_code = error_code or ("SCAN_FAILED" if scan_failures else "NOTIFY_FAILED")
+        request.audit_helper.guard_mark_failure(
+            error_code, "daily_brief_retry_guard" if outcome.error_code else "candidate_scan" if scan_failures else "tick_finalization",
+        )
+        complete_tick_idempotency_fn(
+            status="unsupported_failed" if outcome.error_code else "failed",
+            message=error_code, ok=False, error_code=error_code,
+        )
+    else:
+        if outcome.skip_reason:
+            complete_tick_idempotency_fn(
+                status="skipped" if outcome.skip_reason in {"no_daily_brief_delivery", "no_retryable_delivery", "delivery_only_no_send", "quiet_hours"} else "completed",
+                message=outcome.skip_reason,
+            )
+        elif request.delivery_only:
+            complete_tick_idempotency_fn(status="completed", message="daily_brief_delivery_only")
+        else:
+            complete_tick_idempotency_fn()
+        request.audit_helper.guard_mark_success()
+
+
+def _finish_tick_notification(
+    request: TickNotificationRequest, outcome: TickNotificationOutcome,
+    complete_tick_idempotency_fn: Callable[..., None],
+) -> int:
+    """The Tick owner alone combines scan qualification with delivery facts."""
+    sent_accounts = list(outcome.sent_accounts)
+    failures = list(outcome.notify_failures)
+    scan_failures = failed_scan_accounts(request.tick_metrics)
+    request.tick_metrics["scan_failure_notified_accounts"] = [
+        account for account in outcome.failure_source_confirmed_accounts if account in scan_failures
+    ]
+    request.tick_metrics["would_send_accounts"] = list(outcome.would_send_accounts)
+    common = dict(
+        base=request.base, run_id=request.run_id, runlog=request.runlog,
+        results=request.results, tick_metrics=request.tick_metrics, no_send=request.no_send,
+        state_repo=state_repo, utc_now_fn=utc_now, audit_fn=request.audit_helper.audit,
+        safe_data_fn=_safe_runlog_data, on_success=lambda: None,
+    )
+    error_code = outcome.error_code
+    if request.delivery_only:
+        rc = _finish_delivery_only_notification(
+            request, outcome, sent_accounts=sent_accounts, failures=failures, error_code=error_code,
+        )
+    elif outcome.skip_reason or (error_code and not outcome.notify_summary):
+        rc = _finish_skipped_tick_notification(request, outcome, common, error_code=error_code)
+    else:
+        rc = finalize_multi_tick_run(
+            **common, sent_accounts=sent_accounts, notify_failures=failures,
+            notify_summary=outcome.notify_summary, channel=outcome.channel, target=outcome.target,
+            read_json_fn=read_json, shared_state_dir_getter=state_repo.shared_state_dir,
+        )
+    _complete_tick_notification(
+        request, outcome, rc=rc, scan_failures=scan_failures, error_code=error_code,
+        complete_tick_idempotency_fn=complete_tick_idempotency_fn,
+    )
+    return rc
+
+
+def _prepare_tick_notification_sources(
+    request: TickNotificationRequest, prepared_outcomes: dict[str, bool],
+) -> TickBriefPreparation:
+    if request.delivery_only:
+        markets = tuple(dict.fromkeys(str(value).strip().upper() for value in
+            (request.markets_to_run or request.scheduler_markets) if str(value).strip()))
+        briefs = TickBriefPreparation(markets=markets)
+    else:
+        briefs = prepare_tick_briefs(
+            base=request.base, run_id=request.run_id, config=request.base_cfg,
+            markets=request.markets_to_run or request.scheduler_markets,
+            results=request.results, ran_pipeline_accounts=request.ran_pipeline_accounts,
+            scheduled_scan_targets_by_account=request.scheduled_scan_targets_by_account,
+            scheduler_decisions_by_account=request.scheduler_decisions_by_account,
+            scheduler_decision=request.scheduler_decision, runlog=request.runlog,
+            recovery_intent_factory=partial(_daily_brief_recovery_intent_for_preparation, request),
+            deadline=request.deadline, cancelled=request.cancelled,
+            on_account_prepared=prepared_outcomes.__setitem__,
+        )
+    return briefs
+
+
+def _commit_prepared_tick_scan_targets(
+    request: TickNotificationRequest, briefs: TickBriefPreparation,
+    commit_scan_targets_fn: Callable[[dict[str, str | None]], None] | None,
+) -> None:
+    if not request.delivery_only and request.trigger_kind == "scheduled":
+        for (account, _market), source in briefs.sources.items():
+            if not source["pipeline_reliable"]:
+                continue
+            target = (request.scheduled_scan_targets_by_account or {}).get(account)
+            if not target:
+                continue
+            if commit_scan_targets_fn is None:
+                raise RuntimeError("scheduled scan target commit callback is required")
+            targets = {account: target}
+            commit_started = monotonic()
+            try:
+                commit_scan_targets_fn(targets)
+            except Exception as exc:
+                request.audit_helper.audit(
+                    "scheduler", "scan_target_commit_failed", run_id=request.run_id,
+                    status="error", message=str(exc), extra={"targets": targets},
+                )
+                raise
+            finally:
+                record_tick_latency(
+                    runlog=request.runlog, stage="scheduler_target_commit", started=commit_started,
+                    data={"account": account},
+                )
+            request.audit_helper.audit(
+                "scheduler", "scan_target_committed", run_id=request.run_id,
+                account=account, status="ok", extra={
+                    "target": target, "brief_digest": source["persisted"]["current_brief_digest"],
+                },
+            )
+
+
+@daily_brief_delivery_validation_scope()
+def _run_notification_with_post_delivery_fallback(
+    *, notification_request: TickNotificationRequest,
+    complete_tick_idempotency_fn: Callable[..., None],
+    commit_scan_targets_fn: Callable[[dict[str, str | None]], None] | None = None,
+    post_delivery_sidecars_fn: Callable[[], None] | None = None,
+) -> int:
+    request = notification_request
+    prepared_outcomes: dict[str, bool] = {}
+    stage = "validate_scan_targets"
     try:
-        return run_tick_notification_flow(notification_request)
+        _validate_scheduled_scan_targets(request)
+        stage = "prepare_daily_brief"
+        started = monotonic()
+        request.runlog.safe_event("daily_brief_prepare", "start")
+        prepare_outcome = "error"
+        try:
+            briefs = _prepare_tick_notification_sources(request, prepared_outcomes)
+            merge_scan_outcomes(request.tick_metrics, briefs.scan_outcomes_by_account)
+            stage = "prepare_notification"
+            preparation = _prepare_daily_brief_notification(request, brief_preparation=briefs)
+            prepare_outcome = "ok"
+            request.runlog.safe_event("daily_brief_prepare", "ok")
+        except BaseException as exc:
+            request.runlog.safe_event("daily_brief_prepare", "error", data={"error_type": type(exc).__name__})
+            raise
+        finally:
+            record_tick_latency(
+                runlog=request.runlog, stage="daily_brief_prepare", started=started,
+                data={"outcome": prepare_outcome, "delivery_only": request.delivery_only},
+            )
+        # History, recovery intent (including its frozen absence), and every
+        # selected envelope/fanout are durable before the scheduler target moves.
+        stage = "commit_scan_targets"
+        _commit_prepared_tick_scan_targets(request, briefs, commit_scan_targets_fn)
+        stage = "notify"
+        outcome = run_tick_notification_flow(replace(request, preparation=preparation))
+    except BaseException as exc:
+        codes = {
+            "validate_scan_targets": "SCHEDULED_SCAN_TARGET_MISSING",
+            "prepare_daily_brief": "DAILY_BRIEF_PREPARE_FAILED",
+            "prepare_notification": "DAILY_BRIEF_PREPARE_FAILED",
+            "commit_scan_targets": "SCHEDULER_TARGET_COMMIT_FAILED",
+            "notify": "NOTIFY_FAILED",
+        }
+        code = codes[stage]
+        if stage == "prepare_daily_brief":
+            merge_scan_outcomes(request.tick_metrics, {
+                account: prepared_outcomes.get(account, False)
+                for account in request.ran_pipeline_accounts
+            })
+        # Terminal evidence and cleanup do not consume the cancelled business
+        # budget. Preserve the original exception even if evidence writing fails.
+        try:
+            request.audit_helper.guard_mark_failure(code, stage)
+            finalize_no_account_notification(
+                base=request.base, run_id=request.run_id, runlog=request.runlog,
+                results=request.results, tick_metrics=request.tick_metrics,
+                no_send=request.no_send, state_repo=state_repo, utc_now_fn=utc_now,
+                audit_fn=request.audit_helper.audit, safe_data_fn=_safe_runlog_data,
+                on_success=lambda: None, reason=code, error_code=code,
+                run_end_outcome="error", return_code=1,
+            )
+            complete_tick_idempotency_fn(status="failed", message=str(exc), ok=False, error_code=code)
+        except Exception as terminal_exc:
+            request.runlog.safe_event("finalize", "degraded", message=str(terminal_exc))
+        raise
     finally:
-        post_delivery_sidecars_fn()
+        if post_delivery_sidecars_fn is not None:
+            try:
+                post_delivery_sidecars_fn()
+            except Exception as exc:
+                request.audit_helper.audit(
+                    "observe", "post_delivery_sidecars_failed", run_id=request.run_id,
+                    status="degraded", message=str(exc), extra={"exception_type": type(exc).__name__},
+                )
+                try:
+                    request.runlog.safe_event(
+                        "post_delivery_sidecars", "degraded", message=str(exc),
+                        data={"exception_type": type(exc).__name__},
+                    )
+                except Exception:
+                    pass
+    return _finish_tick_notification(request, outcome, complete_tick_idempotency_fn)
 
 
 multi_tick_main = main
@@ -1002,7 +1289,11 @@ def run_tick(argv: list[str] | None = None) -> int:
     return int(multi_tick_main(list(argv or [])))
 
 
-def execute_tick(argv: list[str] | None = None) -> TickExecutionResult:
+def execute_tick(
+    argv: list[str] | None = None,
+    *, deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> TickExecutionResult:
     """Run the same tick entry with a reference captured inside this invocation."""
     result = TickExecutionResult()
 
@@ -1011,7 +1302,7 @@ def execute_tick(argv: list[str] | None = None) -> TickExecutionResult:
         result = value
 
     try:
-        rc = main(list(argv or []), _on_execution=observe)
+        rc = main(list(argv or []), _on_execution=observe, deadline=deadline, cancelled=cancelled)
     except SystemExit as exc:
         if result.runtime_root is None:
             raise

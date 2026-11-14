@@ -120,7 +120,7 @@ def test_cli_facade_reaches_real_fetch_policy_and_bounded_envelope(configured, m
     calls = []
 
     class Gateway:
-        def get_snapshot(self, codes):
+        def get_snapshot(self, codes, *, deadline=None, cancelled=None):
             calls.append(('snapshot', codes))
             if codes == [f'US.{symbol}']:
                 return pd.DataFrame([{'code': f'US.{symbol}', 'last_price': 110, 'update_time': source.isoformat(),
@@ -130,14 +130,14 @@ def test_cli_facade_reaches_real_fetch_policy_and_bounded_envelope(configured, m
                                   'price_spread': .01, 'option_contract_size': 100,
                                   'option_implied_volatility': 30, 'option_delta': -.3} for value in codes])
 
-        def get_market_state(self, codes):
+        def get_market_state(self, codes, *, deadline=None, cancelled=None):
             return pd.DataFrame([{'code': value, 'market_state': 'CLOSED' if closed else 'MORNING'} for value in codes])
 
         def get_trading_days_with_receipt(self, **kwargs):
             return {'retcode': 0, 'coverage_complete': True, 'pagination_complete': True, 'page_count': 1,
                     'rows': [{'time': value, 'trade_date_type': 'WHOLE'} for value in ('2026-01-05', '2026-01-06')]}
 
-        def get_option_expiration_dates(self, underlier):
+        def get_option_expiration_dates(self, underlier, *, deadline=None, cancelled=None):
             return pd.DataFrame([{'strike_time': expiry}])
 
         def get_option_chain(self, **kwargs):

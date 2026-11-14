@@ -5,7 +5,7 @@ import pytest
 import src.application.daily_decision_brief_repository as repo
 import src.application.tick_notification_flow as mod
 from src.application.notification_delivery_adapter import build_notification_transport_key
-from test_daily_decision_brief_notification_flow import _request
+from test_daily_decision_brief_notification_flow import _request, _run_flow, _prepare_flow
 from test_daily_decision_brief_recovery_flow import _day, _recovery, recovery
 from test_daily_decision_brief_recovery_repository import SCOPE, identity
 from test_daily_decision_brief_repository_v2 import _legacy_combo_brief, _prepare
@@ -23,8 +23,8 @@ def test_confirmed_recovery_is_read_as_delivered_combo_exposure(recovery, monkey
         brief["generated_at_utc"] = clock["now"]
         return {market: brief for market in markets_to_run}
 
-    monkeypatch.setattr(mod, "assemble_daily_decision_briefs", assemble)
-    prepared = mod._prepare_daily_brief_notification(
+    monkeypatch.setattr("src.application.tick_brief_preparation.assemble_daily_decision_briefs", assemble)
+    prepared = _prepare_flow(
         _request(tmp_path, run_id="combo-recovery", fixed=False).request,
     )
     envelope = prepared.lifecycles_by_account["lx"]["envelope"]
@@ -42,9 +42,9 @@ def test_confirmed_recovery_is_read_as_delivered_combo_exposure(recovery, monkey
     def forbid_scan(**kwargs):
         raise AssertionError("delivery-only must not scan")
 
-    monkeypatch.setattr(mod, "assemble_daily_decision_briefs", forbid_scan)
+    monkeypatch.setattr("src.application.tick_brief_preparation.assemble_daily_decision_briefs", forbid_scan)
     assert (
-        mod.run_tick_notification_flow(
+        _run_flow(
             _request(tmp_path, run_id="send-combo-recovery", delivery_only=True).request,
         )
         == 0
@@ -75,9 +75,21 @@ def test_delivery_only_prioritizes_unknown_candidate_over_unrendered_supplement(
 
     monkeypatch.setattr(mod, "select_daily_brief_notification", crash_render)
     with pytest.raises(RuntimeError, match="render crash"):
-        mod.run_tick_notification_flow(_request(tmp_path, run_id="bound", fixed=False).request)
+        _run_flow(_request(tmp_path, run_id="bound", fixed=False).request)
     bound = _recovery(tmp_path)
     assert not bound.get("rendered_message")
+    # Rendering failed before candidate observation. Register the committed source
+    # through its owner before constructing the independent candidate obligation.
+    observed = repo.record_daily_decision_brief_candidates(
+        base=tmp_path,
+        **SCOPE,
+        revision=bound["revision"],
+        brief_digest=bound["source_digest"],
+        candidate_identities=bound["candidate_identities"],
+        observed_at_utc=clock["now"],
+    )
+    assert observed["applied"] is True
+    assert observed["pending_candidate_identities"] == bound["candidate_identities"]
     candidate = _prepare(
         tmp_path,
         run_id="candidate-before-rebuild",
@@ -105,10 +117,10 @@ def test_delivery_only_prioritizes_unknown_candidate_over_unrendered_supplement(
     def forbid_scan(**kwargs):
         raise AssertionError("delivery-only must not scan")
 
-    monkeypatch.setattr(mod, "assemble_daily_decision_briefs", forbid_scan)
+    monkeypatch.setattr("src.application.tick_brief_preparation.assemble_daily_decision_briefs", forbid_scan)
     clock["now"] = "2026-07-21T14:40:30+00:00"
     request = _request(tmp_path, run_id="retry-priority", delivery_only=True)
-    assert mod.run_tick_notification_flow(request.request) == 0
+    assert _run_flow(request.request) == 0
     assert not request.commits
     assert len(calls) == 2
     if ambiguous:

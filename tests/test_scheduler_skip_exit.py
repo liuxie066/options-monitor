@@ -87,20 +87,23 @@ def test_cron_cli_preserves_proven_skip_and_keeps_failures(monkeypatch, tmp_path
                 row.pop("scan_outcome")
         if mode == "incomplete_metric":
             rows[1].pop("ran_pipeline")
-        return SimpleNamespace(account_metrics=rows, results=[], prefetch_invocation_count=0,
+        return SimpleNamespace(account_metrics=rows,
+                               scan_outcomes={row["account"]: row["scan_outcome"] for row in rows
+                                              if "scan_outcome" in row and "ran_pipeline" in row},
+                               results=[], prefetch_invocation_count=0,
                                snapshot_status=None, snapshot_manifest_sha256=None, prepared_context_metrics=[],
                                ran_pipeline_accounts=[], scheduled_scan_targets_by_account={},
                                runtime_portfolio_snapshot_shadow_tasks=[])
     monkeypatch.setattr(tick, "run_tick_account_execution", execution)
     # The tested contract starts after account scheduling; external work is never invoked.
     monkeypatch.setattr(tick, "publish_runtime_portfolio_snapshot_shadows", lambda **_kw: None)
-    def notification(_request):
+    def notification(*, notification_request, **_kwargs):
         if mode == "exception":
             raise OSError("fixture failure")
         if mode == "cancel":
             raise KeyboardInterrupt
         return 7 if mode in {"failure", "delivery_failure"} else 0
-    monkeypatch.setattr(tick, "run_tick_notification_flow", notification)
+    monkeypatch.setattr(tick, "_run_notification_with_post_delivery_fallback", notification)
     failures = []
     recoveries = []
     monkeypatch.setattr(tick_cron, "report_system_failure", lambda **kw: failures.append(kw))

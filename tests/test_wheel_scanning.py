@@ -224,6 +224,40 @@ def test_wheel_complete_or_legacy_frozen_coverage_keeps_clean_status(direction, 
 
 
 @pytest.mark.parametrize("direction", ["call", "put"])
+def test_wheel_direct_consumer_rejects_exact_only_directory_failure(direction):
+    from src.application.required_data_snapshot import FrozenRequiredDataBatch
+
+    row = phase2_opening_row({
+        **_call_row(), "option_type": direction,
+        "strike": 99 if direction == "put" else 110,
+        "delta": -0.3 if direction == "put" else 0.3,
+    })
+    evidence = {}
+    snapshot = FrozenRequiredDataBatch(
+        manifest={}, manifest_bytes=b"{}", entries={
+            "NVDA": (evidence, pd.DataFrame([row]).to_csv(index=False).encode("utf-8")),
+        }, unavailable={}, require_fresh=False,
+    )
+    def scan():
+        args = (_eligibility_model(direction), _policy(), snapshot)
+        fees = {"exchange_rate_converter": _converter()}
+        now_ms = int(AS_OF.timestamp() * 1000)
+        return (run_wheel_put_scan(*args, fees, decision_time_ms=now_ms) if direction == "put"
+                else run_wheel_call_scan(*args, {}, fees, decision_time_ms=now_ms))
+    baseline = scan()
+    assert baseline["scope_results"][0]["reason_code"] == "candidates_found"
+    assert baseline["raw_candidates"]["stock-1"]
+    evidence["expected_fetch_contract"] = {"fetch_plan": {
+        "side_plans": [{"source_fields": ["close_advice.position_requirements"]}],
+        "failed_planning_scopes": [{"outcome": "provider_error", "error": "TimeoutError: directory timed out"}],
+    }}
+    result = scan()
+    assert not result["raw_candidates"].get("stock-1")
+    assert result["scope_results"][0]["status"] == "unavailable"
+    assert result["scope_results"][0]["reason_code"] == "provider_error"
+
+
+@pytest.mark.parametrize("direction", ["call", "put"])
 def test_wheel_frozen_partial_expirations_filter_rows_and_retain_gap(direction):
     from src.application.required_data_snapshot import FrozenRequiredDataBatch
     from src.application.wheel.scanning import _frames_from_snapshot

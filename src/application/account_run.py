@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 import re
+from concurrent.futures import CancelledError
 from dataclasses import dataclass
+from functools import partial
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
@@ -37,6 +39,8 @@ from src.application.prepared_option_positions_context import (
     load_prepared_option_positions_context,
 )
 from src.infrastructure.external_services import run_pipeline_script
+from src.infrastructure.futu_gateway import check_fetch_control
+from src.application.runtime_trigger_context import tick_subprocess_env
 from src.infrastructure.io_utils import utc_now
 from src.application.multi_tick.misc import (
     AccountResult,
@@ -94,6 +98,8 @@ class AccountRunRequest:
     has_wheel_scope: bool = False
     experience: bool = False
     account_display_name: str | None = None
+    deadline: float | None = None
+    cancelled: Callable[[], bool] | None = None
 
 
 @dataclass(frozen=True)
@@ -102,6 +108,7 @@ class AccountRunOutcome:
     acct_metrics: dict[str, Any]
     prefetch_done: bool
     ran_pipeline: bool
+    scan_succeeded: bool | None = None
 
 
 _ROLL_PORTFOLIO_REFRESH_AGE_SECONDS = 120
@@ -175,6 +182,8 @@ def _refresh_roll_portfolio_context(
     config: Mapping[str, Any],
     prepared: Mapping[str, Any] | None,
     now: datetime,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> Mapping[str, Any] | None:
     """Re-observe stock holdings when the sealed snapshot is near the roll window edge.
 
@@ -184,6 +193,7 @@ def _refresh_roll_portfolio_context(
     it at the point of use; the sealed context stays the fallback when the live
     observation is unavailable or itself fails validation.
     """
+    check_fetch_control(deadline, cancelled)
     if not isinstance(prepared, Mapping):
         return prepared
     age = _roll_portfolio_snapshot_age_seconds(prepared, now=now)
@@ -209,9 +219,14 @@ def _refresh_roll_portfolio_context(
             write_cache=False,
             required_position_asset_types=("stock",),
             now_utc=now,
+            **({"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}),
         )
+    except (TimeoutError, CancelledError):
+        raise
     except Exception:
+        check_fetch_control(deadline, cancelled)
         return prepared
+    check_fetch_control(deadline, cancelled)
     refreshed_age = _roll_portfolio_snapshot_age_seconds(refreshed, now=now)
     snapshot = refreshed.get("position_snapshot_input")
     if (
@@ -438,6 +453,7 @@ def run_one_account(
             acct_metrics=acct_metrics,
             prefetch_done=prefetch_done,
             ran_pipeline=False,
+            scan_succeeded=False,
         )
 
     notify_decisions: dict[str, bool | dict[str, Any] | AccountSchedulerDecisionView] = {}
@@ -506,6 +522,7 @@ def run_one_account(
             and isinstance(account_decision, dict)
             and account_decision.get("source") == "account_scheduler"
             and account_decision.get("should_run") is False
+            and "error" not in account_decision
             and should_run is False
             and scan_gate.get("run_pipeline") is False
             and scan_gate.get("ran_scan") is False
@@ -523,6 +540,7 @@ def run_one_account(
             acct_metrics=acct_metrics,
             prefetch_done=request.prefetch_done,
             ran_pipeline=False,
+            scan_succeeded=None if acct_metrics.get("scan_outcome") == "scheduler_skipped" else False,
         )
 
     prefetch_done = bool(request.prefetch_done)
@@ -534,6 +552,7 @@ def run_one_account(
         data=_safe_runlog_data({"account": acct}),
     )
 
+    check_fetch_control(request.deadline, request.cancelled)
     t_pipe0 = monotonic()
     acct_metrics["pipeline_started_at_utc"] = utc_now()
     pipe = run_pipeline_script(
@@ -570,7 +589,12 @@ def run_one_account(
         ),
         capture_output=True,
         text=True,
-        env=dict(os.environ, PYTHONPATH=str(repo_root)),
+        env=tick_subprocess_env(
+            deadline=request.deadline,
+            environ=dict(os.environ, PYTHONPATH=str(repo_root)),
+        ),
+        deadline=request.deadline,
+        cancelled=request.cancelled,
         experience=request.experience,
         account_display_name=request.account_display_name,
     )
@@ -648,6 +672,7 @@ def run_one_account(
             acct_metrics=acct_metrics,
             prefetch_done=prefetch_done,
             ran_pipeline=False,
+            scan_succeeded=False,
         )
 
     runlog.safe_event(
@@ -735,6 +760,8 @@ def run_one_account(
                     config=cfg,
                     prepared=prepared_portfolio,
                     now=datetime.now(timezone.utc),
+                    deadline=request.deadline,
+                    cancelled=request.cancelled,
                 )
                 roll_refresh_used = prepared_portfolio is not sealed_portfolio
             record_tick_latency(
@@ -749,6 +776,7 @@ def run_one_account(
                 },
             )
             t_stage = monotonic()
+            check_fetch_control(request.deadline, request.cancelled)
             raw_close_result = run_close_advice(
                 config=cfg,
                 context_path=(acct_state_dir / "option_positions_context.json").resolve(),
@@ -767,12 +795,14 @@ def run_one_account(
                 context_override=prepared_option_context,
                 portfolio_context_override=prepared_portfolio,
                 roll_quote_refresh_fn=(
-                    refresh_roll_quote_evidence if quote_refresh_gate else None
+                    partial(refresh_roll_quote_evidence, deadline=request.deadline, cancelled=request.cancelled)
+                    if quote_refresh_gate else None
                 ),
                 required_data_snapshot_manifest_sha256=(
                     request.required_data_snapshot_sha256
                 ),
             )
+            check_fetch_control(request.deadline, request.cancelled)
             record_tick_latency(
                 runlog=runlog,
                 stage="account_close_advice",
@@ -845,8 +875,12 @@ def run_one_account(
                     acct_metrics=acct_metrics,
                     prefetch_done=prefetch_done,
                     ran_pipeline=False,
+                    scan_succeeded=False,
                 )
+        except (TimeoutError, CancelledError):
+            raise
         except Exception as exc:
+            check_fetch_control(request.deadline, request.cancelled)
             audit_fn(
                 "tool_call",
                 "close_advice",
@@ -874,4 +908,5 @@ def run_one_account(
         acct_metrics=acct_metrics,
         prefetch_done=prefetch_done,
         ran_pipeline=True,
+        scan_succeeded=True,
     )

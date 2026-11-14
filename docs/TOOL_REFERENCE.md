@@ -192,9 +192,9 @@ CSP 现金担保与余量使用 `query_cash_headroom`。其 `assessment.supporte
 
 ### 通知
 
-- `preview_notification`：用 `account`、`market`、`date`、`revision` 选择已持久化的成功 Daily Brief，并通过 canonical Daily Brief query renderer 生成只读正文；不扫描、不发送、不改变 delivery state，也不接受 legacy alert/change 文本或路径
+- `preview_notification`：用 `account`、`market`、`date`、`revision` 选择已持久化的 Daily Brief；默认沿用最近成功内容与最近尝试，失败提示及各账户/市场的 `latest_attempt` 与查询一致。通过 canonical Daily Brief query renderer 生成只读正文；不扫描、不发送、不改变 delivery state，也不接受 legacy alert/change 文本或路径
 - `notification_perception_read`
-- `daily_decision_brief_read`
+- `daily_decision_brief_read`：默认读取最近成功简报，并列返回同账户、同市场的 `latest_attempt`；较新的扫描失败在正文中明确提示，聚合查询在各 `sections` 保留该事实。指定日期或 revision 时只读对应历史；不扫描、不发送、不推进发送状态
 
 历史 `monthly_income_report` 和 `portfolio_capital_bridge` 已移除。Research 的 collect 与 archive inventory/pull/verify 使用 `./om research` 人工 CLI，不注册成通用 Tool Gateway 工具。
 

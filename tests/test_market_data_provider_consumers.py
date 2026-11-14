@@ -142,9 +142,10 @@ def test_close_advice_bounded_entry_keeps_provider_in_sealed_plan(monkeypatch, t
 
     def run(command, **kwargs):
         assert command[1:3] == ["-m", "src.application.close_advice_required_data"]
-        assert kwargs["timeout"] == 30 and kwargs["check"] is True
+        assert kwargs["timeout"] == 30 and kwargs["capture_output"] is True
         # Isolate process launching while exercising the subprocess's real entry.
         close_data.enrich_close_advice_required_data_plan(plan_path=path, expected_run_id=command[-1])
+        return close_data.subprocess.CompletedProcess(command, 0)
 
     monkeypatch.setattr(close_data.subprocess, "run", run)
     assert close_data.enrich_close_advice_required_data_plan_bounded(plan_path=path,

@@ -29,7 +29,7 @@ from src.application.write_contract import write_control
 from src.application.trades.account_mapping import combo_reconciliation_mode_for_account
 from domain.domain.symbol_identity import resolve_symbol_identity, symbol_market
 from src.application.wheel.read_model import build_wheel_read_model_from_rows
-from src.application.daily_decision_brief_repository import DailyBriefReadScope, read_combo_candidate_exposures
+from src.application.daily_decision_brief_repository import read_combo_candidate_exposures_batch
 
 
 def attribution_result_payload(fact: Mapping[str, Any]) -> dict[str, Any]:
@@ -58,12 +58,13 @@ def read_attribution_combo_evidence(rows: Mapping[str, Any], *, account: str, ru
     scopes = {(item["market"], item["market_date"]) for item in preview["lot_facts"]
               if focus_open_event_id is None or item["open_event_id"] == focus_open_event_id}
     exposures, reads = {}, []
-    read_scopes = {}
+    history = {}
+    for market in sorted({market for market, _day in scopes}):
+        history[market] = read_combo_candidate_exposures_batch(
+            base=runtime_root, account=account, market=market,
+            market_trading_dates=sorted(day for scope_market, day in scopes if scope_market == market))
     for market, market_date in sorted(scopes):
-        if market not in read_scopes:
-            read_scopes[market] = DailyBriefReadScope(base=runtime_root, account=account, market=market)
-        result = read_combo_candidate_exposures(base=runtime_root, account=account, market=market,
-                                                market_trading_date=market_date, read_scope=read_scopes[market])
+        result = history[market][market_date]
         reads.append({"market": market, "market_date": market_date, "complete": (
             result.get("available") is True and result.get("complete") is True
             and result.get("delivery_available") is True and result.get("reason") in {None, "ok"}

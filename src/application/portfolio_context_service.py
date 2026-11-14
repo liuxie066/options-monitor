@@ -23,6 +23,7 @@ from src.application.config_defaults import cash_snapshot_ttl_sec
 from src.application.futu_portfolio_context import infer_futu_portfolio_settings, _runtime_market
 from src.infrastructure.exchange_rates import exchange_rate_observation_status, project_exchange_rate_snapshot, shared_exchange_rate_cache_path
 from src.infrastructure.io_utils import atomic_write_json
+from src.infrastructure.futu_gateway import check_fetch_control
 
 _FX_NOT_PROVIDED = object()
 
@@ -237,7 +238,10 @@ def load_account_portfolio_context(
     include_options: bool = False,
     required_position_asset_types: tuple[str, ...] = (),
     now_utc: datetime | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
+    check_fetch_control(deadline, cancelled)
     config = runtime_config or {}
     port_path = (state_dir / "portfolio_context.json").resolve()
     source_plan = build_account_portfolio_source_plan(config, account=account, portfolio_source=portfolio_source)
@@ -270,6 +274,7 @@ def load_account_portfolio_context(
         fx = exchange_rate_observation if exchange_rate_observation is not _FX_NOT_PROVIDED else result.get("exchange_rates")
         result["exchange_rates"] = project_exchange_rate_snapshot(fx, purpose="capacity", now=now_utc) if isinstance(fx, Mapping) else None
         result["exchange_rate_status"] = exchange_rate_observation_status(result["exchange_rates"])
+        check_fetch_control(deadline, cancelled)
         return result
 
     try:
@@ -299,6 +304,7 @@ def load_account_portfolio_context(
         account_valid = _validate_portfolio_context_account(result, requested_account=account, log=log, source="account_cache")
         if cash_snapshot_is_usable(result) and not errors and account_valid:
             log(f"[CTX] portfolio_context source=account_cache account={account or '-'}")
+            check_fetch_control(deadline, cancelled)
             return result
         if cash_snapshot_is_usable(result) and account_valid and errors:
             trusted_cached_cash = result
@@ -311,8 +317,12 @@ def load_account_portfolio_context(
         kwargs["include_options"] = True
     if exchange_rate_observation is not _FX_NOT_PROVIDED:
         kwargs["exchange_rate_observation"] = exchange_rate_observation
+    if source_plan.primary_source == "futu" and (deadline is not None or cancelled is not None):
+        kwargs.update(deadline=deadline, cancelled=cancelled)
     try:
+        check_fetch_control(deadline, cancelled)
         context = provider(**kwargs)
+        check_fetch_control(deadline, cancelled)
         if not isinstance(context, dict):
             raise ValueError("portfolio response is not an object")
     except (TimeoutError, CancelledError):
@@ -321,6 +331,7 @@ def load_account_portfolio_context(
         log(f"[WARN] broker portfolio unavailable: {exc}")
         return evaluate({"cash_provider_error": type(exc).__name__, "errors": [str(exc)]}, "unavailable")
     except Exception as exc:
+        check_fetch_control(deadline, cancelled)
         log(f"[WARN] portfolio cash provider unavailable: {exc}")
         if trusted_cached_cash is not None:
             return {**trusted_cached_cash, "position_refresh_error": type(exc).__name__}
@@ -332,7 +343,9 @@ def load_account_portfolio_context(
     errors = position_errors(result)
     if errors and isinstance(result.get("position_snapshot_input"), dict):
         result["position_snapshot_input"]["errors"] = errors
+    check_fetch_control(deadline, cancelled)
     if write_cache:
         atomic_write_json(port_path, result)
     log(f"[CTX] portfolio_context source={direct_source} account={account or '-'}")
+    check_fetch_control(deadline, cancelled)
     return result

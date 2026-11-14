@@ -9,7 +9,9 @@ import sys
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
+from src.infrastructure.fetch_control import check_fetch_control
 from domain.domain.multi_tick import (
     DEFAULT_NOTIFICATION_PROVIDER,
 )
@@ -89,7 +91,12 @@ def _fingerprint(unit: str, market: str, account: str, failure_code: str, stage:
     return hashlib.sha256(json.dumps(fields, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
 
-def _send(base: Path, config: dict | None, message: str, key: str, *, account: str = "") -> dict:
+def _send(
+    base: Path, config: dict | None, message: str, key: str, *, account: str = "",
+    deadline: float | None = None, cancelled: Callable[[], bool] | None = None,
+) -> dict:
+    check_fetch_control(deadline, cancelled)
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
     if not notifications_enabled(config) and not uses_proactive_fanout(config):
         return {"delivery_confirmed": False, "provider": None, "fallback_used": False,
                 "attempted": False, "reason": "notifications_disabled"}
@@ -111,7 +118,7 @@ def _send(base: Path, config: dict | None, message: str, key: str, *, account: s
                         routes.append(selected)
         delivery = send_notification_fanout(base=base, config=config, account=account, routes=routes,
             logical_key="system-alert:" + key, message=message,
-            adapter_selector=select_notification_delivery_adapter)
+            adapter_selector=select_notification_delivery_adapter, **controls)
         delivery["fanout_status"] = delivery.pop("status")
         if not delivery.get("attempted") and delivery.get("has_retryable_children"):
             delivery["reason"] = "notifications_disabled"
@@ -128,11 +135,13 @@ def _send(base: Path, config: dict | None, message: str, key: str, *, account: s
                 "attempted": False, "reason": "notifications_disabled"}
 
     def attempt(selected: dict, delivery_key: str, *, fallback_used: bool) -> dict:
+        check_fetch_control(deadline, cancelled)
         adapter = select_notification_delivery_adapter(selected.get("provider"))
         result = adapter.send_fn(
             base=base, channel=str(selected.get("channel") or ""), target=str(selected["target"]),
             message=message, notifications=selected.get("notifications") or {},
             idempotency_key="om-" + delivery_key[:32],
+            **controls,
         )
         normalized = normalize_notification_delivery_result(result, normalize_fn=adapter.normalize_fn)
         return {"delivery_confirmed": normalized.get("delivery_confirmed") is True,
@@ -366,6 +375,7 @@ def report_system_meta_signal(
     *, base: Path, unit: str, market: str, account: str, failure_code: str,
     stage: str, run_id: str, degraded: bool, reason: str = "",
     config: dict | None = None, external: bool = False,
+    deadline: float | None = None, cancelled: Callable[[], bool] | None = None,
 ) -> str:
     """Record a meta incident and attempt one external delivery per incident when configured."""
     key = _fingerprint(unit, market, account, failure_code, stage)
@@ -401,7 +411,12 @@ def report_system_meta_signal(
                                       fields=(("market", market), ("account", account),
                                               ("failure_code", failure_code), ("stage", stage), ("reason", reason)))
         try:
-            delivery = _send(base, config, notice, hashlib.sha256((key + str(state[key].get("reserved_at") or now) + ("-recovery" if not degraded else "")).encode()).hexdigest(), **({"account": account} if uses_proactive_fanout(config) else {}))
+            controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
+            delivery = _send(
+                base, config, notice,
+                hashlib.sha256((key + str(state[key].get("reserved_at") or now) + ("-recovery" if not degraded else "")).encode()).hexdigest(),
+                **({"account": account} if uses_proactive_fanout(config) else {}), **controls,
+            )
         except Exception:
             delivery = {"delivery_confirmed": False, "provider": None, "fallback_used": False, "attempted": False}
         with _state_lock(path):

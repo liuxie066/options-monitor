@@ -272,37 +272,42 @@ def test_run_tick_restores_sys_argv_after_exception(monkeypatch) -> None:
 @pytest.mark.parametrize("notification_error", (False, True))
 def test_post_delivery_sidecars_run_after_notification_flow(
     monkeypatch,
+    tmp_path,
     notification_error: bool,
 ) -> None:
     from src.application import multi_account_tick as mod
+    from src.application.tick_notification_flow import TickNotificationOutcome
+    import test_daily_decision_brief_notification_flow as fixture
 
+    fixture._patch_assembler(monkeypatch)
+    fixed = fixture._request(tmp_path, run_id="sidecars")
     order: list[str] = []
+    outcome = TickNotificationOutcome()
 
-    def notify(_request):
+    def notify(request):
+        assert request.preparation is not None
         order.append("notification")
         if notification_error:
             raise RuntimeError("notification finalization failed")
-        return 7
+        return outcome
 
     def publish():
         order.append("runtime_snapshot")
 
-    monkeypatch.setattr(mod, "run_tick_notification_flow", notify)
+    def finish(_request, delivered, _complete):
+        assert delivered is outcome
+        return 7
 
+    monkeypatch.setattr(mod, "run_tick_notification_flow", notify)
+    monkeypatch.setattr(mod, "_finish_tick_notification", finish)
+    kwargs = {"notification_request": fixed.request, "post_delivery_sidecars_fn": publish,
+              "complete_tick_idempotency_fn": fixed.request.complete_tick_idempotency_fn,
+              "commit_scan_targets_fn": fixed.request.commit_scan_targets_fn}
     if notification_error:
         with pytest.raises(RuntimeError, match="notification finalization failed"):
-            mod._run_notification_with_post_delivery_fallback(
-                notification_request="notification-request",
-                post_delivery_sidecars_fn=publish,
-            )
+            mod._run_notification_with_post_delivery_fallback(**kwargs)
     else:
-        assert (
-            mod._run_notification_with_post_delivery_fallback(
-                notification_request="notification-request",
-                post_delivery_sidecars_fn=publish,
-            )
-            == 7
-        )
+        assert mod._run_notification_with_post_delivery_fallback(**kwargs) == 7
 
     assert order == ["notification", "runtime_snapshot"]
 
@@ -766,19 +771,25 @@ def test_mark_scheduler_accounts_does_not_regress_processed_target(tmp_path) -> 
 
 def test_tick_account_execution_keeps_pipeline_results_after_later_scheduler_skip(monkeypatch, tmp_path) -> None:
     from src.application import tick_account_execution as mod
+    from src.application.account_run import AccountRunOutcome
+    from src.application.multi_tick.misc import AccountResult
     from src.application.tick_account_execution import TickAccountExecutionRequest
 
     def fake_run_account_outcomes(**_kwargs):
         return [
-            SimpleNamespace(
-                result=SimpleNamespace(account="lx"),
+            AccountRunOutcome(
+                result=AccountResult("lx", True, False, "scan_completed", ""),
                 acct_metrics={"account": "lx"},
+                prefetch_done=False,
                 ran_pipeline=True,
+                scan_succeeded=True,
             ),
-            SimpleNamespace(
-                result=SimpleNamespace(account="sy"),
+            AccountRunOutcome(
+                result=AccountResult("sy", False, False, "scheduler_skipped", ""),
                 acct_metrics={"account": "sy"},
+                prefetch_done=False,
                 ran_pipeline=False,
+                scan_succeeded=None,
             ),
         ]
 
@@ -1107,12 +1118,12 @@ def test_main_scheduler_no_scan_warms_only_after_successful_delivery(
     monkeypatch.setattr(mod, "prepare_tick_run_workspace", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("no workspace")))
     monkeypatch.setattr(mod, "run_tick_account_execution", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no pipeline")))
 
-    def notification(request):
+    def notification(*, notification_request, **_kwargs):
         order.append("notification")
-        captured["request"] = request
+        captured["request"] = notification_request
         return notification_rc
 
-    monkeypatch.setattr(mod, "run_tick_notification_flow", notification)
+    monkeypatch.setattr(mod, "_run_notification_with_post_delivery_fallback", notification)
 
     def warmup(**kwargs):
         order.append("warmup")
@@ -1430,6 +1441,7 @@ def test_experience_history_failure_keeps_scan_outcome(monkeypatch, tmp_path, co
     from zoneinfo import ZoneInfo
     from domain.domain.engine import SchedulerDecisionView
     from src.application import multi_account_tick as mod
+    from src.application.tick_account_execution import TickAccountExecutionOutcome
     from src.application.tick_guard_flow import TickGuardOutcome
     from src.application.tick_scheduler_context import TickSchedulerContext, TickSchedulerOutcome
 
@@ -1459,10 +1471,11 @@ def test_experience_history_failure_keeps_scan_outcome(monkeypatch, tmp_path, co
     )
     monkeypatch.setattr(mod, "build_tick_scheduler_context", lambda request: TickSchedulerOutcome(
         should_continue=True, return_code=0, results=[], context=context))
-    monkeypatch.setattr(mod, "run_tick_account_execution", lambda request: SimpleNamespace(
+    monkeypatch.setattr(mod, "run_tick_account_execution", lambda request: TickAccountExecutionOutcome(
         account_metrics=[], prefetch_invocation_count=0, snapshot_status="ready",
         snapshot_manifest_sha256=None, prepared_context_metrics=[], results=[],
-        ran_pipeline_accounts=["lx"] if completed else [],
+        ran_any_pipeline=completed, ran_pipeline_accounts=["lx"] if completed else [],
+        scheduled_scan_targets_by_account={}, scan_outcomes={"lx": True if completed else None},
     ))
     monkeypatch.setattr(mod, "run_tick_notification_flow", lambda request: pytest.fail("experience must not send"))
     history = tmp_path / "runtime/output_shared/state/tick_metrics_history.json"
