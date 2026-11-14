@@ -1535,6 +1535,72 @@ def test_confirmed_candidate_delivery_rolls_to_later_candidate_batch(tmp_path: P
     assert day["pending_candidates"] == {}
 
 
+@pytest.mark.parametrize("index_shape", ["missing", "null"])
+@pytest.mark.parametrize("missing_field", ["expiration", "strike", "contract_symbol"])
+def test_derived_persisted_index_rejects_incomplete_contracts(
+    tmp_path: Path, index_shape: str, missing_field: str,
+) -> None:
+    from domain.domain.daily_decision_brief import normalize_persisted_daily_decision_brief
+    from src.application.daily_decision_brief_repository import (
+        read_combo_candidate_exposures_batch,
+        read_daily_decision_brief,
+    )
+
+    raw = _persist(tmp_path, actions=[_action()])["brief"]
+    if index_shape == "missing":
+        raw.pop("candidate_index")
+    else:
+        raw["candidate_index"] = None
+    raw["actions"][0].pop("action_id")
+    raw["actions"][0][missing_field] = ""
+    replace_history_payload(tmp_path, raw)
+
+    with pytest.raises(ValueError, match="representative contract fields are incomplete"):
+        normalize_persisted_daily_decision_brief(raw)
+    result = read_daily_decision_brief(
+        base=tmp_path, account="lx", market="US", market_trading_date=MARKET_DATE, revision=0,
+    )
+    assert result["available"] is False
+    assert result["reason"] == "state_invalid"
+    assert result["brief"] is None
+    assert "representative contract fields are incomplete" in result["error"]
+    batch = read_combo_candidate_exposures_batch(
+        base=tmp_path, account="lx", market="US", market_trading_dates=[MARKET_DATE],
+    )
+    assert batch[MARKET_DATE]["complete"] is False
+    assert batch[MARKET_DATE]["invalid_revisions"] == [0]
+    assert batch[MARKET_DATE]["exposures"] == []
+
+
+def test_derived_persisted_index_keeps_zero_capacity_action_outside_candidates() -> None:
+    from domain.domain.daily_decision_brief import normalize_persisted_daily_decision_brief
+
+    action = _action(contracts=0)
+    action["expiration"] = ""
+    action["contract_symbol"] = ""
+    raw = _brief(run_id="unavailable-candidate", actions=[action])
+    normalized = normalize_persisted_daily_decision_brief(raw)
+    assert normalized["candidate_index"] == []
+    assert normalize_persisted_daily_decision_brief(normalized) == normalized
+
+
+def test_derived_persisted_index_preserves_legacy_combo_group_identity() -> None:
+    from domain.domain.daily_decision_brief import normalize_persisted_daily_decision_brief
+
+    raw = _legacy_combo_brief()
+    representative = raw.pop("candidate_index")[0]["representative"]
+    for field in (
+        "put_contract_symbol", "call_contract_symbol", "put_expiration", "call_expiration",
+        "put_strike", "call_strike",
+    ):
+        raw["actions"][0][field] = representative[field]
+    normalized = normalize_persisted_daily_decision_brief(raw)
+    derived = normalized["candidate_index"][0]["representative"]
+    assert derived["strategy_group_id"] == "pair-nvda-100-110"
+    assert "candidate_pair_id" not in derived
+    assert normalize_persisted_daily_decision_brief(normalized) == normalized
+
+
 @pytest.mark.parametrize("retired_overlay", [False, True])
 @pytest.mark.parametrize("display_state", [None, "expanded", "summary_notified", "not_shown"])
 def test_legacy_combo_revision_remains_source_for_recovery_delivery_and_exposure(
