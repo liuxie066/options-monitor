@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from src.application.daily_decision_brief_repository import (
-    read_combo_candidate_exposures,
+    read_combo_candidate_exposures_batch,
 )
 from src.application.ledger.api import (
     reconcile_combo_pair_inferences,
@@ -71,33 +71,38 @@ def reconcile_account_post_trade_combos(
     }
     exposures_by_id: dict[str, dict[str, Any]] = {}
     evidence_reads: list[dict[str, Any]] = []
-    for market, market_date in sorted(scopes):
-        result = read_combo_candidate_exposures(
+    for market in sorted({market for market, _day in scopes}):
+        dates = sorted(day for scope_market, day in scopes if scope_market == market)
+        results = read_combo_candidate_exposures_batch(
             base=Path(runtime_root).resolve(),
             account=account_value,
             market=market,
-            market_trading_date=market_date,
+            market_trading_dates=dates,
         )
-        evidence_reads.append(
-            {
-                "market": market,
-                "market_date": market_date,
-                "available": bool(result.get("available")),
-                "reason": result.get("reason"),
-                "complete": (
-                    result.get("available") is True
-                    and result.get("reason") in {None, "ok"}
-                    and not result.get("invalid_revisions")
-                    and result.get("complete") is True
-                    and result.get("delivery_available") is True
-                ),
-                "exposure_count": len(result.get("exposures") or []),
-            }
-        )
-        for item in result.get("exposures") or []:
-            exposure_id = str(item.get("candidate_exposure_id") or "").strip()
-            if exposure_id:
-                exposures_by_id[exposure_id] = dict(item)
+        for market_date in dates:
+            result = results[market_date]
+            evidence_reads.append(
+                {
+                    "market": market,
+                    "market_date": market_date,
+                    "available": bool(result.get("available")),
+                    "reason": result.get("reason"),
+                    "complete": (
+                        result.get("available") is True
+                        and result.get("reason") in {None, "ok"}
+                        and not result.get("invalid_revisions")
+                        and result.get("complete") is True
+                        and result.get("delivery_available") is True
+                    ),
+                    "exposure_count": len(result.get("exposures") or []),
+                }
+            )
+            for item in result.get("exposures") or []:
+                exposure_id = str(item.get("candidate_exposure_id") or "").strip()
+                if exposure_id:
+                    exposures_by_id[exposure_id] = dict(item)
+        # Do not retain a whole market's batch while opening the next one.
+        del results
 
     reconciled = reconcile_combo_pair_inferences(
         repo=repo,
