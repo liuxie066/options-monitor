@@ -144,7 +144,7 @@ def close_not_worthwhile(root, config, folder, deadline, command, posted, reason
     ledger = read_json(ledger_path, {})
     token = next(key for key, row in ledger.items() if row.get("marker") == posted["marker"])
     if ledger[token].get("close_status") == "closed":
-        return True
+        return False
     number = posted["number"]
     ledger[token]["close_status"] = "pending"
     save_json(ledger_path, ledger)
@@ -153,9 +153,14 @@ def close_not_worthwhile(root, config, folder, deadline, command, posted, reason
         target = json.loads(call("api", f"repos/{config['repository']}/issues/{number}"))
         if target.get("number") != number or "pull_request" in target or target.get("state") not in {"open", "closed"}:
             raise ValueError("closure target does not match the handled issue")
+        requested = bool(ledger[token].get("close_requested_at"))
         if target["state"] == "open":
             explanation = f"按 not_worthwhile 分诊结论关闭：{reason}\n\n分诊评论：{posted['url']}"
             comment(root, config, folder, deadline, command, kind="issue", number=number, body=explanation)
+            ledger = read_json(ledger_path, {})
+            ledger[token]["close_requested_at"] = repair.timestamp()
+            save_json(ledger_path, ledger)
+            requested = True
             call("issue", "close", str(number), "--repo", config["repository"], "--reason", "not planned")
             target = json.loads(call("api", f"repos/{config['repository']}/issues/{number}"))
             if target.get("number") != number or target.get("state") != "closed":
@@ -164,7 +169,7 @@ def close_not_worthwhile(root, config, folder, deadline, command, posted, reason
         ledger[token].update({"close_status": "closed", "closed_at": target.get("closed_at") or repair.timestamp()})
         ledger[token].pop("close_error", None)
         save_json(ledger_path, ledger)
-        return True
+        return requested
     except Exception as exc:
         ledger = read_json(ledger_path, {})
         ledger[token]["close_error"] = f"{type(exc).__name__}: {exc}"
@@ -525,6 +530,7 @@ def process_delivery(root, config, run_dir, deadline, invoke, *, command, receip
     issues = read_json(root / "issue-state.json", {}).get("issues", {})
     closable = {int(number) for number, row in issues.items()
                 if row.get("outcome") == "not_worthwhile" and row.get("disposition") == "reply"
+                and row.get("review_outcome") in issue_intake.OUTCOMES - {"blocked", "needs_decision"}
                 and row.get("triage", {}).get("decision") == "not_worthwhile"
                 and row["triage"].get("third_party_service") is False}
     # A failed delivery must retry even when intake did not re-review the issue this run.

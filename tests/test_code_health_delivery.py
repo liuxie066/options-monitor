@@ -34,6 +34,7 @@ def test_confirmed_reproduction_is_not_automatic_repair_admission(tmp_path, deci
     record = issues.read_state(tmp_path)["issues"]["1"]
     assert result["reviewed"] == [1] and result["repair_tasks"] == []
     assert record["outcome"] == outcome and record["disposition"] == disposition
+    assert record["review_outcome"] == "confirmed"
     assert not list((tmp_path / "repairs").glob("*/task.json"))
 
 
@@ -299,7 +300,8 @@ def test_comments_cannot_target_an_unhandled_issue_or_pr(tmp_path):
 def issue_closure_transport(comment_transport):
     root, config, comments, calls, fail, transport, _ = comment_transport
     config["release_enabled"] = False
-    row = {"number": 7, "outcome": "not_worthwhile", "disposition": "reply", "reviewed_at": "2026-11-14",
+    row = {"number": 7, "outcome": "not_worthwhile", "review_outcome": "not_worthwhile",
+           "disposition": "reply", "reviewed_at": "2026-11-14",
            "triage": {"decision": "not_worthwhile", "third_party_service": False,
                       "reason": "The short duplicate logic is consistent; extraction costs exceed its benefit."}}
     delivery.save_json(root / "issue-state.json", {"issues": {"7": row}})
@@ -322,7 +324,8 @@ def issue_closure_transport(comment_transport):
         if argv[-1].endswith("/issues/7") and not fail["before_get"]:
             calls.append(argv)
             return json.dumps({"number": 7, "state": remote["state"]})
-        if argv[1:3] == ["issue", "comment"] and remote["comment_failure"]:
+        if (argv[1:3] == ["issue", "comment"] and remote["comment_failure"]
+                and (remote["comment_failure"] != "explanation" or comments)):
             calls.append(argv)
             raise RuntimeError("comment temporarily unavailable")
         return transport(argv, **kwargs)
@@ -351,8 +354,44 @@ def test_not_worthwhile_closes_after_comments_and_updates_summary_once(issue_clo
         published = delivery.read_json(root / "issues" / filename, {})
         assert published.get("summary", published)["github_closed"] == [7]
     assert "GitHub 已确认关闭：#7" in (root / "issues/report.md").read_text()
-    assert run(reviewed=[])["github_closed"] == [7]
+    assert run(reviewed=[])["github_closed"] == []
     assert sum(argv[1:3] == ["issue", "close"] for argv in calls) == 1 and len(comments) == 2
+
+
+def test_reopened_issue_is_not_reported_or_closed_again_from_an_old_marker(issue_closure_transport):
+    _, _, comments, calls, _, remote, receipt, run = issue_closure_transport
+    assert run()["github_closed"] == [7]
+    remote["state"] = "open"
+    receipt["issues"]["summary"]["github_closed"] = []  # A fresh run's issue summary.
+    before = len(calls)
+    assert run(reviewed=[])["github_closed"] == []
+    assert receipt["issues"]["summary"]["github_closed"] == [] and remote["state"] == "open"
+    assert len(calls) == before and len(comments) == 2
+
+
+def test_externally_closed_issue_is_not_counted_as_a_loop_closure(issue_closure_transport):
+    root, _, comments, calls, _, remote, _, run = issue_closure_transport
+    remote["state"] = "closed"
+    assert run()["github_closed"] == []
+    assert not any(argv[1:3] == ["issue", "close"] for argv in calls) and len(comments) == 1
+    assert delivery.read_json(root / "issues/summary.json", {})["github_closed"] == []
+
+
+@pytest.mark.parametrize("review_outcome", [None, "blocked", "needs_decision"])
+def test_unproven_or_blocked_review_cannot_close_a_not_worthwhile_record(issue_closure_transport, review_outcome):
+    root, _, _, calls, _, remote, _, run = issue_closure_transport
+    state = delivery.read_json(root / "issue-state.json", {})
+    row = state["issues"]["7"]
+    if review_outcome is None:
+        row.pop("review_outcome")
+        row.update(target=A, input_digest="legacy")
+        assert issues.completed_review(row, A, "legacy") is None
+        assert issues.completed_review({"completed_reviews": {issues.review_identity(A, "legacy"): row}}, A, "legacy") is None
+    else:
+        row["review_outcome"] = review_outcome
+    delivery.save_json(root / "issue-state.json", state)
+    assert run()["github_closed"] == [] and remote["state"] == "open"
+    assert not any(argv[1:3] == ["issue", "close"] for argv in calls)
 
 
 @pytest.mark.parametrize("lost_response", [False, True])
@@ -367,6 +406,17 @@ def test_not_worthwhile_comment_failure_does_not_close_and_retries_without_revie
     fail["after_post"] = remote["comment_failure"] = False
     assert run(reviewed=[])["github_closed"] == [7]
     assert len(comments) == 2 and remote["state"] == "closed"
+
+
+def test_failed_closure_explanation_keeps_issue_open_and_retries(issue_closure_transport):
+    root, _, comments, calls, _, remote, _, run = issue_closure_transport
+    remote["comment_failure"] = "explanation"
+    assert run()["errors"] and remote["state"] == "open" and len(comments) == 1
+    assert not any(argv[1:3] == ["issue", "close"] for argv in calls)
+    row = next(iter(delivery.read_json(root / "comment-state.json", {}).values()))
+    assert row["close_status"] == "pending" and row["close_error"] and "close_requested_at" not in row
+    remote["comment_failure"] = False
+    assert run(reviewed=[])["github_closed"] == [7] and len(comments) == 2
 
 
 @pytest.mark.parametrize("failure", ["before", "after", "no_effect"])

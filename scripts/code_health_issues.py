@@ -86,13 +86,17 @@ def review_identity(target, input_digest):
 
 def completed_review(previous, target, token):
     saved = previous.get("completed_reviews", {}).get(review_identity(target, token))
-    if saved and saved.get("triage"):
-        return saved
-    # Decisions made before value triage must be reviewed under the current policy.
-    if (previous.get("target") == target and previous.get("input_digest") == token
-            and previous.get("reviewed_at") and previous.get("outcome") != "blocked" and previous.get("triage")):
-        return {key: value for key, value in previous.items() if key != "completed_reviews"}
-    return None
+    if not saved or not saved.get("triage"):
+        # Decisions made before value triage must be reviewed under the current policy.
+        if (previous.get("target") == target and previous.get("input_digest") == token
+                and previous.get("reviewed_at") and previous.get("outcome") != "blocked" and previous.get("triage")):
+            saved = {key: value for key, value in previous.items() if key != "completed_reviews"}
+        else:
+            return None
+    # Old not_worthwhile records lost whether the review was blocked or undecided.
+    if saved.get("outcome") == "not_worthwhile" and "review_outcome" not in saved:
+        return None
+    return saved
 
 
 def github_api(config, command, deadline=None):
@@ -365,7 +369,7 @@ def persist_decision(root, config, run, plan, snapshot, item, command, deadline)
     previous = state["issues"].get(str(number), {})
     record = {**previous, "number": number, "target": plan["target"], "input_digest": snapshot["input_digest"],
               "fingerprint_version": snapshot.get("fingerprint_version", 1),
-              "reviewed_at": datetime.now(timezone.utc).isoformat(), "outcome": item["outcome"],
+              "reviewed_at": datetime.now(timezone.utc).isoformat(), "outcome": item["outcome"], "review_outcome": item["outcome"],
               "run_dir": str(run), "disposition": "needs_decision", "triage": item["triage"],
               "comment_draft": item["comment_draft"], "reason": item["triage"]["reason"]}
     triage = item["triage"]
