@@ -1535,9 +1535,10 @@ def test_confirmed_candidate_delivery_rolls_to_later_candidate_batch(tmp_path: P
     assert day["pending_candidates"] == {}
 
 
+@pytest.mark.parametrize("retired_overlay", [False, True])
 @pytest.mark.parametrize("display_state", [None, "expanded", "summary_notified", "not_shown"])
 def test_legacy_combo_revision_remains_source_for_recovery_delivery_and_exposure(
-    tmp_path: Path, display_state: str | None,
+    tmp_path: Path, display_state: str | None, retired_overlay: bool,
 ) -> None:
     from domain.domain.combo_candidate_evidence import (
         combo_exposure_render_context,
@@ -1555,7 +1556,17 @@ def test_legacy_combo_revision_remains_source_for_recovery_delivery_and_exposure
         build_notification_transport_key,
     )
 
-    legacy, digest, _seeded = _install_legacy_combo_revision(tmp_path)
+    from domain.domain.daily_decision_brief import daily_brief_compatible_digests
+
+    legacy, current_digest, _seeded = _install_legacy_combo_revision(tmp_path)
+    if retired_overlay:
+        legacy["ai_decision_advice"] = {"opaque": {"original": "历史值"}}
+        legacy["ai_decision_advice_evidence_index"] = {"symbols": []}
+        replace_history_payload(tmp_path, legacy)
+    compatible = daily_brief_compatible_digests(legacy)
+    assert compatible[0] == current_digest
+    assert len(compatible) == (2 if retired_overlay else 1)
+    digest = compatible[-1]
     identity = "candidate:v1:lx:US:NVDA:combo_yield"
     assert read_latest_daily_decision_brief(
         base=tmp_path,
@@ -1568,7 +1579,7 @@ def test_legacy_combo_revision_remains_source_for_recovery_delivery_and_exposure
         market="US",
         market_trading_date=MARKET_DATE,
         revision=0,
-    )["brief_digest"] == digest
+    )["brief_digest"] == current_digest
 
     record_daily_decision_brief_fixed_recovery(
         base=tmp_path,

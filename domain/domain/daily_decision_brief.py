@@ -1395,7 +1395,15 @@ def normalize_persisted_daily_decision_brief_with_digests(
         for key, value in normalized.items()
         if key not in {"generated_at_utc", "data_as_of_utc", "run_id"}
     }
-    current = _digest(payload)
+    # This payload was just normalized, including its nested JSON-safe values.
+    raw = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    current = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     if not any(field in source for field in RETIRED_DAILY_BRIEF_FIELDS):
         return normalized, (current,)
     legacy_payload = dict(payload)
