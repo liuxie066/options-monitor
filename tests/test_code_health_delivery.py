@@ -34,6 +34,7 @@ def test_confirmed_reproduction_is_not_automatic_repair_admission(tmp_path, deci
     record = issues.read_state(tmp_path)["issues"]["1"]
     assert result["reviewed"] == [1] and result["repair_tasks"] == []
     assert record["outcome"] == outcome and record["disposition"] == disposition
+    assert record["review_outcome"] == "confirmed"
     assert not list((tmp_path / "repairs").glob("*/task.json"))
 
 
@@ -248,7 +249,9 @@ def comment_transport(tmp_path):
             return json.dumps({"login": "owner"})
         if argv[1:3] == ["issue", "comment"]:
             body = Path(argv[argv.index("--body-file") + 1]).read_text()
-            comments.append({"id": 101, "body": body, "user": {"login": "owner"}, "html_url": "https://example.invalid/comment/101"})
+            comment_id = 101 + len(comments)
+            comments.append({"id": comment_id, "body": body, "user": {"login": "owner"},
+                             "html_url": f"https://example.invalid/comment/{comment_id}"})
             if fail["after_post"]:
                 raise TimeoutError("response lost after GitHub accepted the reply")
             return comments[-1]["html_url"]
@@ -291,6 +294,178 @@ def test_comments_cannot_target_an_unhandled_issue_or_pr(tmp_path):
         with pytest.raises(ValueError, match="only locally handled"):
             delivery.comment(tmp_path, {"repository": "fixture/repo"}, tmp_path, time.monotonic() + 30,
                              lambda *a, **k: pytest.fail("no GitHub access"), kind=kind, number=3, body="unhandled")
+
+
+@pytest.fixture
+def issue_closure_transport(comment_transport):
+    root, config, comments, calls, fail, transport, _ = comment_transport
+    config["release_enabled"] = False
+    row = {"number": 7, "outcome": "not_worthwhile", "review_outcome": "not_worthwhile",
+           "disposition": "reply", "reviewed_at": "2026-11-14",
+           "triage": {"decision": "not_worthwhile", "third_party_service": False,
+                      "reason": "The short duplicate logic is consistent; extraction costs exceed its benefit."}}
+    delivery.save_json(root / "issue-state.json", {"issues": {"7": row}})
+    issue_run = root / "issues"
+    issue_run.mkdir()
+    summary = issues.summarize(issue_run, {"target": A, "issues": [{"number": 7}]}, {7: row}, {})
+    receipt = {"issues": {"reviewed": [7], "run_dir": str(issue_run), "summary": summary}}
+    remote = {"state": "open", "close_failure": None, "comment_failure": False}
+
+    def command(argv, **kwargs):
+        if argv[1:3] == ["issue", "close"]:
+            calls.append(argv)
+            if remote["close_failure"] == "before":
+                raise RuntimeError("closure temporarily unavailable")
+            if remote["close_failure"] != "no_effect":
+                remote["state"] = "closed"
+            if remote["close_failure"] == "after":
+                raise TimeoutError("closure response lost")
+            return "closed"
+        if argv[-1].endswith("/issues/7") and not fail["before_get"]:
+            calls.append(argv)
+            return json.dumps({"number": 7, "state": remote["state"]})
+        if (argv[1:3] == ["issue", "comment"] and remote["comment_failure"]
+                and (remote["comment_failure"] != "explanation" or comments)):
+            calls.append(argv)
+            raise RuntimeError("comment temporarily unavailable")
+        return transport(argv, **kwargs)
+
+    def run(*, reviewed=(7,)):
+        receipt["issues"]["reviewed"] = list(reviewed)
+        return delivery.process_delivery(root, config, root / "delivery", time.monotonic() + 30,
+                                         lambda *args, **kwargs: pytest.fail("unexpected agent call"),
+                                         command=command, receipt=receipt)
+
+    return root, config, comments, calls, fail, remote, receipt, run
+
+
+def test_not_worthwhile_closes_after_comments_and_updates_summary_once(issue_closure_transport):
+    root, _, comments, calls, _, remote, receipt, run = issue_closure_transport
+    result = run()
+    assert result["status"] == "complete" and result["github_closed"] == [7] and not result["errors"]
+    assert remote["state"] == "closed" and len(comments) == 2
+    assert comments[0]["html_url"] in comments[1]["body"] and "按 not_worthwhile 分诊结论关闭" in comments[1]["body"]
+    close_index = next(index for index, argv in enumerate(calls) if argv[1:3] == ["issue", "close"])
+    assert sum(argv[1:3] == ["issue", "comment"] for argv in calls[:close_index]) == 2
+    assert "comments?" in calls[close_index - 1][-1]
+    assert calls[close_index][-2:] == ["--reason", "not planned"]
+    assert receipt["issues"]["summary"]["github_closed"] == [7]
+    for filename in ("summary.json", "close-recommendations.json", "receipt.json"):
+        published = delivery.read_json(root / "issues" / filename, {})
+        assert published.get("summary", published)["github_closed"] == [7]
+    assert "GitHub 已确认关闭：#7" in (root / "issues/report.md").read_text()
+    assert run(reviewed=[])["github_closed"] == []
+    assert sum(argv[1:3] == ["issue", "close"] for argv in calls) == 1 and len(comments) == 2
+
+
+def test_reopened_issue_is_not_reported_or_closed_again_from_an_old_marker(issue_closure_transport):
+    _, _, comments, calls, _, remote, receipt, run = issue_closure_transport
+    assert run()["github_closed"] == [7]
+    remote["state"] = "open"
+    receipt["issues"]["summary"]["github_closed"] = []  # A fresh run's issue summary.
+    before = len(calls)
+    assert run(reviewed=[])["github_closed"] == []
+    assert receipt["issues"]["summary"]["github_closed"] == [] and remote["state"] == "open"
+    assert len(calls) == before and len(comments) == 2
+
+
+def test_externally_closed_issue_is_not_counted_as_a_loop_closure(issue_closure_transport):
+    root, _, comments, calls, _, remote, _, run = issue_closure_transport
+    remote["state"] = "closed"
+    assert run()["github_closed"] == []
+    assert not any(argv[1:3] == ["issue", "close"] for argv in calls) and len(comments) == 1
+    assert delivery.read_json(root / "issues/summary.json", {})["github_closed"] == []
+
+
+@pytest.mark.parametrize("review_outcome", [None, "blocked", "needs_decision"])
+def test_unproven_or_blocked_review_cannot_close_a_not_worthwhile_record(issue_closure_transport, review_outcome):
+    root, _, _, calls, _, remote, _, run = issue_closure_transport
+    state = delivery.read_json(root / "issue-state.json", {})
+    row = state["issues"]["7"]
+    if review_outcome is None:
+        row.pop("review_outcome")
+        row.update(target=A, input_digest="legacy")
+        assert issues.completed_review(row, A, "legacy") is None
+        assert issues.completed_review({"completed_reviews": {issues.review_identity(A, "legacy"): row}}, A, "legacy") is None
+    else:
+        row["review_outcome"] = review_outcome
+    delivery.save_json(root / "issue-state.json", state)
+    assert run()["github_closed"] == [] and remote["state"] == "open"
+    assert not any(argv[1:3] == ["issue", "close"] for argv in calls)
+
+
+@pytest.mark.parametrize("lost_response", [False, True])
+def test_not_worthwhile_comment_failure_does_not_close_and_retries_without_review(issue_closure_transport, lost_response):
+    root, _, comments, calls, fail, remote, _, run = issue_closure_transport
+    fail["after_post"] = lost_response
+    remote["comment_failure"] = not lost_response
+    result = run()
+    assert result["status"] == "partial" and result["github_closed"] == [] and result["errors"]
+    assert remote["state"] == "open" and not any(argv[1:3] == ["issue", "close"] for argv in calls)
+    assert next(iter(delivery.read_json(root / "comment-state.json", {}).values()))["status"] == "pending"
+    fail["after_post"] = remote["comment_failure"] = False
+    assert run(reviewed=[])["github_closed"] == [7]
+    assert len(comments) == 2 and remote["state"] == "closed"
+
+
+def test_failed_closure_explanation_keeps_issue_open_and_retries(issue_closure_transport):
+    root, _, comments, calls, _, remote, _, run = issue_closure_transport
+    remote["comment_failure"] = "explanation"
+    assert run()["errors"] and remote["state"] == "open" and len(comments) == 1
+    assert not any(argv[1:3] == ["issue", "close"] for argv in calls)
+    row = next(iter(delivery.read_json(root / "comment-state.json", {}).values()))
+    assert row["close_status"] == "pending" and row["close_error"] and "close_requested_at" not in row
+    remote["comment_failure"] = False
+    assert run(reviewed=[])["github_closed"] == [7] and len(comments) == 2
+
+
+@pytest.mark.parametrize("failure", ["before", "after", "no_effect"])
+def test_not_worthwhile_close_failure_is_durable_and_reconciled(issue_closure_transport, failure):
+    root, _, comments, calls, _, remote, _, run = issue_closure_transport
+    remote["close_failure"] = failure
+    result = run()
+    assert result["status"] == "partial" and result["github_closed"] == []
+    row = next(iter(delivery.read_json(root / "comment-state.json", {}).values()))
+    assert row["status"] == "posted" and row["close_status"] == "pending" and row["close_error"]
+    remote["close_failure"] = None
+    assert run(reviewed=[])["github_closed"] == [7]
+    row = next(iter(delivery.read_json(root / "comment-state.json", {}).values()))
+    assert row["close_status"] == "closed" and "close_error" not in row and len(comments) == 2
+    assert sum(argv[1:3] == ["issue", "close"] for argv in calls) == (1 if failure == "after" else 2)
+
+
+@pytest.mark.parametrize(("outcome", "disposition", "decision", "service"), [
+    ("needs_decision", "needs_decision", "needs_decision", False),
+    ("needs_decision", "needs_decision", "not_worthwhile", True),
+    ("blocked", "needs_decision", "not_worthwhile", False),
+    ("already_fixed", "close_recommended", "worthwhile", False),
+    ("not_reproduced", "close_recommended", "worthwhile", False),
+])
+def test_other_issue_outcomes_remain_open(issue_closure_transport, outcome, disposition, decision, service):
+    root, _, comments, calls, _, remote, _, run = issue_closure_transport
+    state = delivery.read_json(root / "issue-state.json", {})
+    row = state["issues"]["7"]
+    row.update(outcome=outcome, disposition=disposition)
+    row["triage"].update(decision=decision, third_party_service=service)
+    delivery.save_json(root / "issue-state.json", state)
+    assert run()["github_closed"] == [] and remote["state"] == "open" and len(comments) == 1
+    assert not any(argv[1:3] == ["issue", "close"] for argv in calls)
+
+
+def test_disabled_comments_prevent_not_worthwhile_closure(issue_closure_transport):
+    _, config, comments, calls, _, remote, _, run = issue_closure_transport
+    config["comments_enabled"] = False
+    assert run()["github_closed"] == [] and remote["state"] == "open"
+    assert not comments and not calls
+
+
+@pytest.mark.parametrize("outcome", ["blocked", "needs_decision"])
+def test_not_worthwhile_does_not_override_a_blocked_or_undecided_review(tmp_path, outcome):
+    payload = response(outcome=outcome, triage={"decision": "not_worthwhile", "reason": "Requires a decision.",
+                                              "third_party_service": False})
+    assert process(tmp_path, payload)["reviewed"] == [1]
+    row = issues.read_state(tmp_path)["issues"]["1"]
+    assert row["outcome"] == outcome and row["disposition"] == "needs_decision"
 
 
 def test_own_replies_do_not_invalidate_issue_but_real_feedback_does():
