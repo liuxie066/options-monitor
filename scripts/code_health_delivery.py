@@ -9,8 +9,10 @@ import re
 import time
 
 if __package__:
+    from . import code_health_issues as issue_intake
     from . import code_health_repair as repair
 else:
+    import code_health_issues as issue_intake
     import code_health_repair as repair
 
 
@@ -132,6 +134,42 @@ def comment(root, config, folder, deadline, command, *, kind, number, body):
     ledger[token].update({"status": "posted", "id": existing[0]["id"], "url": existing[0].get("html_url")})
     save_json(ledger_path, ledger)
     return ledger[token]
+
+
+def close_not_worthwhile(root, config, folder, deadline, command, posted, reason):
+    """Close only after the triage reply and closure explanation are read back."""
+    if posted.get("status") != "posted":
+        return False
+    ledger_path = root / "comment-state.json"
+    ledger = read_json(ledger_path, {})
+    token = next(key for key, row in ledger.items() if row.get("marker") == posted["marker"])
+    if ledger[token].get("close_status") == "closed":
+        return True
+    number = posted["number"]
+    ledger[token]["close_status"] = "pending"
+    save_json(ledger_path, ledger)
+    call = lambda *args: execute(config, folder, deadline, command, [config["gh"], *args])
+    try:
+        target = json.loads(call("api", f"repos/{config['repository']}/issues/{number}"))
+        if target.get("number") != number or "pull_request" in target or target.get("state") not in {"open", "closed"}:
+            raise ValueError("closure target does not match the handled issue")
+        if target["state"] == "open":
+            explanation = f"按 not_worthwhile 分诊结论关闭：{reason}\n\n分诊评论：{posted['url']}"
+            comment(root, config, folder, deadline, command, kind="issue", number=number, body=explanation)
+            call("issue", "close", str(number), "--repo", config["repository"], "--reason", "not planned")
+            target = json.loads(call("api", f"repos/{config['repository']}/issues/{number}"))
+            if target.get("number") != number or target.get("state") != "closed":
+                raise ValueError("issue closure was not positively read back")
+        ledger = read_json(ledger_path, {})
+        ledger[token].update({"close_status": "closed", "closed_at": target.get("closed_at") or repair.timestamp()})
+        ledger[token].pop("close_error", None)
+        save_json(ledger_path, ledger)
+        return True
+    except Exception as exc:
+        ledger = read_json(ledger_path, {})
+        ledger[token]["close_error"] = f"{type(exc).__name__}: {exc}"
+        save_json(ledger_path, ledger)
+        raise
 
 
 def merged_sources(root, config, folder, deadline, command):
@@ -471,10 +509,13 @@ def merge_pull_requests(root, config, run_dir, deadline, *, command, receipt):
 
 def process_delivery(root, config, run_dir, deadline, invoke, *, command, receipt):
     run_dir.mkdir(parents=True, exist_ok=True)
-    result = {"status": "complete", "comments": [], "release": {"status": "no_merged_work"}, "errors": []}
-    def reply(kind, number, body):
+    result = {"status": "complete", "comments": [], "github_closed": [], "release": {"status": "no_merged_work"}, "errors": []}
+    def reply(kind, number, body, *, close_reason=None):
         try:
-            result["comments"].append(comment(root, config, run_dir, deadline, command, kind=kind, number=number, body=body))
+            posted = comment(root, config, run_dir, deadline, command, kind=kind, number=number, body=body)
+            result["comments"].append(posted)
+            if close_reason is not None and close_not_worthwhile(root, config, run_dir, deadline, command, posted, close_reason):
+                result["github_closed"].append(number)
         except Exception as exc:
             result["errors"].append(f"{kind} #{number}: {type(exc).__name__}: {exc}")
     # Retry only our own previously queued replies, including after a lost response.
@@ -482,13 +523,25 @@ def process_delivery(root, config, run_dir, deadline, invoke, *, command, receip
         if row.get("status") == "pending":
             reply(row["kind"], row["number"], row["body"])
     issues = read_json(root / "issue-state.json", {}).get("issues", {})
-    for number in receipt.get("issues", {}).get("reviewed", []):
+    closable = {int(number) for number, row in issues.items()
+                if row.get("outcome") == "not_worthwhile" and row.get("disposition") == "reply"
+                and row.get("triage", {}).get("decision") == "not_worthwhile"
+                and row["triage"].get("third_party_service") is False}
+    # A failed delivery must retry even when intake did not re-review the issue this run.
+    for number in sorted(set(receipt.get("issues", {}).get("reviewed", [])) | closable):
         row = issues.get(str(number), {})
         if row.get("triage"):
             body = f"Code-health 分诊：{row['outcome']}。\n\n{row['triage']['reason']}\n\n{row.get('comment_draft', '')}"
             if row.get("disposition") == "repair":
                 body += "\n\n已进入修复队列；尚未完成修复或发版。"
-            reply("issue", number, body)
+            reply("issue", number, body, close_reason=row["triage"]["reason"] if number in closable else None)
+    issue_receipt = receipt.get("issues", {})
+    if issue_receipt.get("run_dir") and issue_receipt.get("summary"):
+        summary = issue_receipt["summary"]
+        summary["github_closed"] = sorted(set(summary.get("github_closed", [])) | set(result["github_closed"]))
+        issue_run = Path(issue_receipt["run_dir"])
+        issue_intake.write_summary(issue_run, summary)
+        save_json(issue_run / "receipt.json", issue_receipt)
     for row in receipt.get("pull_requests", {}).get("results", []):
         if row.get("comment_draft") and row.get("status") != "pending":
             reply("pr", row["number"], row["comment_draft"])

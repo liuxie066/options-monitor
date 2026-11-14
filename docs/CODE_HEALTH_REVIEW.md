@@ -8,7 +8,7 @@
 
 巡检阶段对业务代码和外部系统保持只读；可在隔离临时目录运行无外部副作用的定向测试。用户于 2026-11-03 进一步授权：确认缺陷后，在同次调度接上独立本地修复、回归验证与独立审核。检查前阅读 [Agent Manual](../AGENTS.md)、本次相关合同和经验条目；保留无关工作区的改动。
 
-手动报告保存在 gitignored 的 `docs/reviews/`，定时报告、修复任务和交付回执位于独立状态目录。用户于 2026-11-09 明确授权本 loop：评论实际处理过的 issue/PR；对逐行审查、实际验证与 CI 均通过的精确 PR 修订执行 squash 合并；修复合入 main 后按既有流程准备发布 PR，并在发布证据齐全后回复版本。开关和默认值见下文。新建 issue、修改标题/标签、人工关闭 issue/PR、改权限、封禁贡献者和操作生产仍需单独授权；已合并修复的来源 issue 沿用既有自动关闭路径。疑似敏感或恶意内容仅保留必要脱敏证据，按 [Security](../SECURITY.md) 处理。
+手动报告保存在 gitignored 的 `docs/reviews/`，定时报告、修复任务和交付回执位于独立状态目录。用户于 2026-11-09 明确授权本 loop：评论实际处理过的 issue/PR；对逐行审查、实际验证与 CI 均通过的精确 PR 修订执行 squash 合并；修复合入 main 后按既有流程准备发布 PR，并在发布证据齐全后回复版本。开关和默认值见下文。新建 issue、修改标题/标签、人工关闭 issue/PR、改权限、封禁贡献者和操作生产仍需单独授权；已合并修复的来源 issue 沿用既有自动关闭路径；2026-11-14 新增授权仅允许 `not_worthwhile` 在分诊评论和关闭说明确认投递后自动关闭，具体重试与回读规则见下文。疑似敏感或恶意内容仅保留必要脱敏证据，按 [Security](../SECURITY.md) 处理。
 
 ## 每轮范围与续跑
 
@@ -152,17 +152,17 @@ GitHub issue 是已有问题与使用反馈的统一持久待办。对话或其�
 
 选中的条目在调用模型前再次获取完整评论、timeline 和关联 PR，核对规划期间的 issue/关联 PR 是否变化，再独立调用、验证及落盘。`issues/items/<编号>/` 保存该条 plan、原始结果、报告、证据或 `pending.json`；完成后立即更新状态和累计汇总。单条超时、取数失败或无效结果只使该条待续，不能抹掉其他条目的结果；未完成项不写已完成身份。提供有效阻塞说明的结论归入 `needs_decision`，没有返回有效结论的尝试仍待续。
 
-模型返回 `confirmed`、`already_fixed`、`not_reproduced`、`needs_decision`、`blocked`、`duplicate`、`in_progress` 或 `not_worthwhile`，另必须提供 triage 的 decision、reason 和 third_party_service。先判断是否值得做：项目职责内、收益高于维护成本、没有未决产品/策略选择才是 `worthwhile`；超范围、重复、非本项目职责或收益不足为 `not_worthwhile`，保存理由并走 `reply`，需要用户选择为 `needs_decision`。第三方中转/provider 接入无论同时报告什么技术结论均强制待裁决。只有 `worthwhile`、third_party_service=false 且冻结版本上的实测证据、明确 owner 与文件范围齐备时才入修复队列；已有 assignee、关联开放 PR 或与开放 PR 文件重叠时记录 `in_progress`，不接管。稳定故障 key 在两种来源间复用同一任务；不同 key 的故障分别保留完整发现与验收范围，文件相交不能证明是同一问题。两种来源均在执行时检查本地文件冲突：与更早的待修或待交付工作重叠时暂停后来的任务，保留各自证据和待续资格，交人工解决冲突。issue 来源的待续任务需核对每个仍开放的来源：归属未变、输入指纹未变、先前复核仍为 confirmed、triage=worthwhile 且没有第三方服务接入，且 `latest.repair_task` 仍是当前任务 ID。同一 finding key 的重建或复用产生同一 ID；不同 key 是不同任务，不能因共享 issue 就绕过 ID 守卫。仅验证目标过期时，repair 阶段使用自己的剩余预算单独复核，不占每日 5 条；当前身份已有结论时复用。复核后仍须 confirmed 且验证目标相同才可恢复。尚无工作树、未开始实现的任务可记录重验证并更新基线；已有旧基线工作树一律保留，明确等待人工迁移，不自动 reset/rebase。输入变化时暂停续修，等待正常复核。一个故障关联多条 issue 时，不要求所有来源同日占用日常配额。新反证、已修结论、取数失败或变化尚未复核均保留工作区并暂停。来源不在开放列表时另作 GET 核对，只有明确返回 `closed` 才算已关闭；缺失、错误响应或权限失败都不等于关闭。所有来源均为已关闭 issue 的任务，在本地调度/交付前转为 `source_closed` 终态，保存原状态、关闭来源、时间、finding、attempts、证据及工作树；不占修复名额，不参与文件范围冲突，不删除数据或关闭远端 PR/issue。混合来源仅排除已确认关闭的 issue，其余开放来源仍逐项严格核对；有独立提交巡检来源时不会因 issue 关闭自动终止。报告单列 `source_closed` 数量。后续出现新确认时保留原工作并进入 `needs_triage`，不直接恢复旧实现。来源 issue、验证 SHA 和新增证据另记，不伪称发现来自本轮新增提交。
+模型返回 `confirmed`、`already_fixed`、`not_reproduced`、`needs_decision`、`blocked`、`duplicate`、`in_progress` 或 `not_worthwhile`，另必须提供 triage 的 decision、reason 和 third_party_service。先判断是否值得做：项目职责内、收益高于维护成本、没有未决产品/策略选择才是 `worthwhile`；超范围、重复、非本项目职责或收益不足为 `not_worthwhile`，保存理由并走 `reply`。用户于 2026-11-14 授权仅对 `not_worthwhile` 自动关闭：独立交付阶段先确认分诊评论成功，再投递引用其链接的关闭说明，以 `not planned` 关闭并 GET 回读确认；`github_closed` 记录确认结果。评论失败时保持开放并保存失败原因；关闭失败或响应丢失时，下一轮沿 `comment-state.json` 的 marker 与关闭收据续办，不要求重新复核，也不重复评论或重复关闭。需要用户选择为 `needs_decision`；`needs_decision`、`blocked` 和第三方服务接入保持开放。第三方中转/provider 接入无论同时报告什么技术结论均强制待裁决。只有 `worthwhile`、third_party_service=false 且冻结版本上的实测证据、明确 owner 与文件范围齐备时才入修复队列；已有 assignee、关联开放 PR 或与开放 PR 文件重叠时记录 `in_progress`，不接管。稳定故障 key 在两种来源间复用同一任务；不同 key 的故障分别保留完整发现与验收范围，文件相交不能证明是同一问题。两种来源均在执行时检查本地文件冲突：与更早的待修或待交付工作重叠时暂停后来的任务，保留各自证据和待续资格，交人工解决冲突。issue 来源的待续任务需核对每个仍开放的来源：归属未变、输入指纹未变、先前复核仍为 confirmed、triage=worthwhile 且没有第三方服务接入，且 `latest.repair_task` 仍是当前任务 ID。同一 finding key 的重建或复用产生同一 ID；不同 key 是不同任务，不能因共享 issue 就绕过 ID 守卫。仅验证目标过期时，repair 阶段使用自己的剩余预算单独复核，不占每日 5 条；当前身份已有结论时复用。复核后仍须 confirmed 且验证目标相同才可恢复。尚无工作树、未开始实现的任务可记录重验证并更新基线；已有旧基线工作树一律保留，明确等待人工迁移，不自动 reset/rebase。输入变化时暂停续修，等待正常复核。一个故障关联多条 issue 时，不要求所有来源同日占用日常配额。新反证、已修结论、取数失败或变化尚未复核均保留工作区并暂停。来源不在开放列表时另作 GET 核对，只有明确返回 `closed` 才算已关闭；缺失、错误响应或权限失败都不等于关闭。所有来源均为已关闭 issue 的任务，在本地调度/交付前转为 `source_closed` 终态，保存原状态、关闭来源、时间、finding、attempts、证据及工作树；不占修复名额，不参与文件范围冲突，不删除数据或关闭远端 PR/issue。混合来源仅排除已确认关闭的 issue，其余开放来源仍逐项严格核对；有独立提交巡检来源时不会因 issue 关闭自动终止。报告单列 `source_closed` 数量。后续出现新确认时保留原工作并进入 `needs_triage`，不直接恢复旧实现。来源 issue、验证 SHA 和新增证据另记，不伪称发现来自本轮新增提交。
 
 反馈文字准确区分“已复现”“本地修复完成”“已合并”“已发布”和“运行版本已验证”，绑定对应提交、版本与证据。合并到 `main` 不等于用户运行版本已修复；新建 issue 不代表承诺修改策略或发布。使用反馈的手动验收要求至少有一条真实反馈完成查重、建单或补充、复核与明确下一步；缺少输入时，只确认规则落地及历史 issue 处理结果。
 
 ## 历史 issue 的处置与人工关闭
 
-复核有四种本地出口：值得做的当前实证缺陷转 `repair`，按稳定 key 新建或复用任务；不值得做为 `reply`，写明理由并回复；已修复或失效且证据齐备时为 `close_recommended`；产品待决、无法判定、归属其他工作或关闭证据不足时为 `needs_decision`。模型的 `already_fixed`、`not_reproduced`、`duplicate` 本身不能证明可关闭。阻塞项、未执行的测试和通用测试通过不能推断原问题已消失。
+复核有四种本地出口：值得做的当前实证缺陷转 `repair`，按稳定 key 新建或复用任务；不值得做为 `reply`，写明理由，日常交付确认评论后自动关闭；已修复或失效且证据齐备时为 `close_recommended`；产品待决、无法判定、归属其他工作或关闭证据不足时为 `needs_decision`。模型的 `already_fixed`、`not_reproduced`、`duplicate` 本身不能证明可关闭。阻塞项、未执行的测试和通用测试通过不能推断原问题已消失。
 
 每条关闭建议记录 issue 编号、冻结 SHA、输入指纹、关闭理由、可选的修复提交、实际验证日志及命令与整数退出码。日志必须在本条 work 内、非空，使用 JSON Lines 逐条记录 `command`、整数 `exit_code` 和实际 `output`。每条建议中的命令必须与自身日志记录对应，匹配记录的退出码均为 0；其他命令的成功码不能掩盖它的失败。提供修复提交时还校验完整 SHA 是冻结目标的祖先。结构性检查不替代人工判断日志是否覆盖原缺陷；不合格证据降为 `needs_decision`。
 
-每轮 `issues/summary.json` 和 `issues/report.md` 汇总五类计数与清单：建议关闭、转 repair、reply、needs_decision、超时或其他待续（附具体原因）。`issues/close-recommendations.json` 按最多 10 条一批输出关闭建议，供用户明确整批确认。issue 复核阶段及补扫的 `github_closed` 始终为空：复核不执行 PATCH；日常评论由后续交付阶段独立发送，补扫仍不发布评论。建议关闭不表示 GitHub 已关闭。这些建议仍须由人明确确认并另行关闭；本地入队也不表示已经修复。上文已验证修复合并后的自动关闭独立记录在 repair 交付回执中，不消费或冒用关闭建议。
+每轮 `issues/summary.json` 和 `issues/report.md` 汇总五类计数与清单：建议关闭、转 repair、reply、needs_decision、超时或其他待续（附具体原因）。`issues/close-recommendations.json` 按最多 10 条一批输出关闭建议，供用户明确整批确认。复核阶段及补扫不关闭 issue，日常评论和 `not_worthwhile` 的自动关闭由后续交付阶段独立执行；交付后将确认关闭的编号回写 `github_closed`、issue 回执和上述报告，评论或关闭失败时记录错误并留待重试。补扫仍不发布评论或关闭 issue。建议关闭不表示 GitHub 已关闭。这些建议仍须由人明确确认并另行关闭；本地入队也不表示已经修复。上文已验证修复合并后的自动关闭独立记录在 repair 交付回执中，不消费或冒用关闭建议。
 
 ## 手动全量补扫
 
