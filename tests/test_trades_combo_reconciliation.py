@@ -19,6 +19,16 @@ from src.application.trades.combo_reconciliation import (
 BASE_TIME_MS = 1_785_312_000_000
 
 
+def _mock_exposure_reads(monkeypatch, single_reader):
+    from src.application.trades import combo_reconciliation as module
+
+    def read_batch(*, market_trading_dates, **kwargs):
+        return {day: single_reader(**kwargs, market_trading_date=day)
+                for day in market_trading_dates}
+
+    monkeypatch.setattr(module, "read_combo_candidate_exposures_batch", read_batch)
+
+
 @pytest.mark.parametrize("current_complete", [True, False])
 def test_auto_combo_uses_only_its_own_market_date_completeness(tmp_path, monkeypatch, current_complete):
     from datetime import datetime, timezone
@@ -35,7 +45,7 @@ def test_auto_combo_uses_only_its_own_market_date_completeness(tmp_path, monkeyp
         return {"available": True, "complete": current_complete if current else not current_complete,
                 "delivery_available": True, "exposures": [_exposure()] if current else []}
 
-    monkeypatch.setattr(module, "read_combo_candidate_exposures", read)
+    _mock_exposure_reads(monkeypatch, read)
     result = module.reconcile_account_post_trade_combos(repo=repo, runtime_root=tmp_path, account="lx",
         runtime_environment="opend:127.0.0.1:11111", mode="auto", effective_now_ms=BASE_TIME_MS + 3000)
     assert any(row["complete"] is current_complete for row in result["evidence_reads"]
@@ -127,7 +137,7 @@ def test_first_account_reconcile_never_publishes_expired_proposals_as_ready(
         reads.append(kwargs)
         return {"available": True, "complete": True, "delivery_available": True, "exposures": []}
 
-    monkeypatch.setattr(module, "read_combo_candidate_exposures", read_exposures)
+    _mock_exposure_reads(monkeypatch, read_exposures)
     now = BASE_TIME_MS + 2_000 + COMBO_PROPOSAL_TTL_MS + offset_ms
     result = reconcile_account_post_trade_combos(
         repo=repo, runtime_root=tmp_path, account="lx",
@@ -167,7 +177,7 @@ def test_account_reconciler_reads_frozen_exposure_and_auto_adopts_strict_match(
         reads.append((kwargs["market"], kwargs["market_trading_date"]))
         return {"available": True, "complete": True, "delivery_available": True, "reason": "ok", "exposures": [_exposure()]}
 
-    monkeypatch.setattr(module, "read_combo_candidate_exposures", _read_exposures)
+    _mock_exposure_reads(monkeypatch, _read_exposures)
     result = reconcile_account_post_trade_combos(
         repo=repo,
         runtime_root=tmp_path,
@@ -256,7 +266,7 @@ def test_incomplete_exposure_never_auto_adopts(tmp_path, monkeypatch, evidence):
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     for event in _open_events():
         persist_trade_event_object(repo, event)
-    monkeypatch.setattr(module, "read_combo_candidate_exposures", lambda **kw: {**evidence, "exposures": [_exposure()]})
+    _mock_exposure_reads(monkeypatch, lambda **kw: {**evidence, "exposures": [_exposure()]})
     result = module.reconcile_account_post_trade_combos(
         repo=repo, runtime_root=tmp_path, account="lx", runtime_environment="opend:127.0.0.1:11111",
         mode="auto", effective_now_ms=BASE_TIME_MS + 3_000,
