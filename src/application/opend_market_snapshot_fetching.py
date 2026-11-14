@@ -117,6 +117,16 @@ class MarketSnapshotFetchResult:
         return len(self.unexpected_codes)
 
 
+def _capture_snapshot_provider_response(result, receipts, provider_responses):
+    response = {"batch_receipt_index": len(receipts) - 1, "rows": None, "capture_error": None}
+    provider_responses.append(response)
+    try:
+        response["rows"] = [] if result is None else futu_dataframe_records(result)
+    except Exception as exc:
+        # Capturing extra provider fields must not change the quote owner's result.
+        response["capture_error"] = type(exc).__name__
+
+
 def _record_snapshot_call(
     gateway, codes, receipts, *, stage, batch_start, provider_responses,
     deadline=None, cancelled=None,
@@ -147,13 +157,7 @@ def _record_snapshot_call(
             result = gateway.get_snapshot(codes, **controls)
         receipt["received_at_utc"] = datetime.now(timezone.utc).isoformat()
         receipt["status"] = "empty" if result is None or result.empty else "received"
-        response = {"batch_receipt_index": len(receipts) - 1, "rows": None, "capture_error": None}
-        provider_responses.append(response)
-        try:
-            response["rows"] = [] if result is None else futu_dataframe_records(result)
-        except Exception as exc:
-            # Capturing extra provider fields must not change the quote owner's result.
-            response["capture_error"] = type(exc).__name__
+        _capture_snapshot_provider_response(result, receipts, provider_responses)
         return result
     except BaseException as exc:
         receipt["error_code"] = type(exc).__name__

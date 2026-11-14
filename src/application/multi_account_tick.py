@@ -1044,49 +1044,40 @@ def _validate_scheduled_scan_targets(request: TickNotificationRequest) -> None:
         raise RuntimeError(f"scheduled scan target missing for accounts: {', '.join(missing)}")
 
 
-def _finish_tick_notification(
-    request: TickNotificationRequest, outcome: TickNotificationOutcome,
-    complete_tick_idempotency_fn: Callable[..., None],
+def _finish_delivery_only_notification(
+    request: TickNotificationRequest, outcome: TickNotificationOutcome, *,
+    sent_accounts: list[str], failures: list[Any], error_code: str | None,
 ) -> int:
-    """The Tick owner alone combines scan qualification with delivery facts."""
-    sent_accounts = list(outcome.sent_accounts)
-    failures = list(outcome.notify_failures)
-    scan_failures = failed_scan_accounts(request.tick_metrics)
-    request.tick_metrics["scan_failure_notified_accounts"] = [
-        account for account in outcome.failure_source_confirmed_accounts if account in scan_failures
-    ]
-    request.tick_metrics["would_send_accounts"] = list(outcome.would_send_accounts)
-    common = dict(
-        base=request.base, run_id=request.run_id, runlog=request.runlog,
-        results=request.results, tick_metrics=request.tick_metrics, no_send=request.no_send,
-        state_repo=state_repo, utc_now_fn=utc_now, audit_fn=request.audit_helper.audit,
-        safe_data_fn=_safe_runlog_data, on_success=lambda: None,
+    rc = 2 if error_code and outcome.skip_reason else 1 if failures or error_code else 0
+    request.runlog.safe_event(
+        "run_end", "error" if rc else "skip" if outcome.skip_reason else "ok",
+        error_code=error_code or ("NOTIFY_FAILED" if failures else None),
+        data=_safe_runlog_data({
+            "reason": outcome.skip_reason or "daily_brief_delivery_only",
+            "delivery_only": True, "sent_accounts": sent_accounts,
+            "notify_failures": failures, "notify_summary": outcome.notify_summary,
+        }),
     )
-    error_code = outcome.error_code
-    if request.delivery_only:
-        rc = 2 if error_code and outcome.skip_reason else 1 if failures or error_code else 0
-        request.runlog.safe_event(
-            "run_end", "error" if rc else "skip" if outcome.skip_reason else "ok",
-            error_code=error_code or ("NOTIFY_FAILED" if failures else None),
-            data=_safe_runlog_data({
-                "reason": outcome.skip_reason or "daily_brief_delivery_only",
-                "delivery_only": True, "sent_accounts": sent_accounts,
-                "notify_failures": failures, "notify_summary": outcome.notify_summary,
-            }),
-        )
-    elif outcome.skip_reason or (error_code and not outcome.notify_summary):
-        reason = outcome.skip_reason or str(error_code)
-        rc = finalize_no_account_notification(
-            **{**common, "no_send": request.no_send or reason == "notifications_disabled"},
-            reason=reason, run_end_outcome="error" if error_code else "ok" if reason == "no_daily_brief_delivery" else "skip",
-            error_code=error_code, return_code=2 if error_code else 0,
-        )
-    else:
-        rc = finalize_multi_tick_run(
-            **common, sent_accounts=sent_accounts, notify_failures=failures,
-            notify_summary=outcome.notify_summary, channel=outcome.channel, target=outcome.target,
-            read_json_fn=read_json, shared_state_dir_getter=state_repo.shared_state_dir,
-        )
+    return rc
+
+
+def _finish_skipped_tick_notification(
+    request: TickNotificationRequest, outcome: TickNotificationOutcome,
+    common: dict[str, Any], *, error_code: str | None,
+) -> int:
+    reason = outcome.skip_reason or str(error_code)
+    return finalize_no_account_notification(
+        **{**common, "no_send": request.no_send or reason == "notifications_disabled"},
+        reason=reason, run_end_outcome="error" if error_code else "ok" if reason == "no_daily_brief_delivery" else "skip",
+        error_code=error_code, return_code=2 if error_code else 0,
+    )
+
+
+def _complete_tick_notification(
+    request: TickNotificationRequest, outcome: TickNotificationOutcome, *,
+    rc: int, scan_failures: list[str], error_code: str | None,
+    complete_tick_idempotency_fn: Callable[..., None],
+) -> None:
     if rc:
         error_code = error_code or ("SCAN_FAILED" if scan_failures else "NOTIFY_FAILED")
         request.audit_helper.guard_mark_failure(
@@ -1107,7 +1098,102 @@ def _finish_tick_notification(
         else:
             complete_tick_idempotency_fn()
         request.audit_helper.guard_mark_success()
+
+
+def _finish_tick_notification(
+    request: TickNotificationRequest, outcome: TickNotificationOutcome,
+    complete_tick_idempotency_fn: Callable[..., None],
+) -> int:
+    """The Tick owner alone combines scan qualification with delivery facts."""
+    sent_accounts = list(outcome.sent_accounts)
+    failures = list(outcome.notify_failures)
+    scan_failures = failed_scan_accounts(request.tick_metrics)
+    request.tick_metrics["scan_failure_notified_accounts"] = [
+        account for account in outcome.failure_source_confirmed_accounts if account in scan_failures
+    ]
+    request.tick_metrics["would_send_accounts"] = list(outcome.would_send_accounts)
+    common = dict(
+        base=request.base, run_id=request.run_id, runlog=request.runlog,
+        results=request.results, tick_metrics=request.tick_metrics, no_send=request.no_send,
+        state_repo=state_repo, utc_now_fn=utc_now, audit_fn=request.audit_helper.audit,
+        safe_data_fn=_safe_runlog_data, on_success=lambda: None,
+    )
+    error_code = outcome.error_code
+    if request.delivery_only:
+        rc = _finish_delivery_only_notification(
+            request, outcome, sent_accounts=sent_accounts, failures=failures, error_code=error_code,
+        )
+    elif outcome.skip_reason or (error_code and not outcome.notify_summary):
+        rc = _finish_skipped_tick_notification(request, outcome, common, error_code=error_code)
+    else:
+        rc = finalize_multi_tick_run(
+            **common, sent_accounts=sent_accounts, notify_failures=failures,
+            notify_summary=outcome.notify_summary, channel=outcome.channel, target=outcome.target,
+            read_json_fn=read_json, shared_state_dir_getter=state_repo.shared_state_dir,
+        )
+    _complete_tick_notification(
+        request, outcome, rc=rc, scan_failures=scan_failures, error_code=error_code,
+        complete_tick_idempotency_fn=complete_tick_idempotency_fn,
+    )
     return rc
+
+
+def _prepare_tick_notification_sources(
+    request: TickNotificationRequest, prepared_outcomes: dict[str, bool],
+) -> TickBriefPreparation:
+    if request.delivery_only:
+        markets = tuple(dict.fromkeys(str(value).strip().upper() for value in
+            (request.markets_to_run or request.scheduler_markets) if str(value).strip()))
+        briefs = TickBriefPreparation(markets=markets)
+    else:
+        briefs = prepare_tick_briefs(
+            base=request.base, run_id=request.run_id, config=request.base_cfg,
+            markets=request.markets_to_run or request.scheduler_markets,
+            results=request.results, ran_pipeline_accounts=request.ran_pipeline_accounts,
+            scheduled_scan_targets_by_account=request.scheduled_scan_targets_by_account,
+            scheduler_decisions_by_account=request.scheduler_decisions_by_account,
+            scheduler_decision=request.scheduler_decision, runlog=request.runlog,
+            recovery_intent_factory=partial(_daily_brief_recovery_intent_for_preparation, request),
+            deadline=request.deadline, cancelled=request.cancelled,
+            on_account_prepared=prepared_outcomes.__setitem__,
+        )
+    return briefs
+
+
+def _commit_prepared_tick_scan_targets(
+    request: TickNotificationRequest, briefs: TickBriefPreparation,
+    commit_scan_targets_fn: Callable[[dict[str, str | None]], None] | None,
+) -> None:
+    if not request.delivery_only and request.trigger_kind == "scheduled":
+        for (account, _market), source in briefs.sources.items():
+            if not source["pipeline_reliable"]:
+                continue
+            target = (request.scheduled_scan_targets_by_account or {}).get(account)
+            if not target:
+                continue
+            if commit_scan_targets_fn is None:
+                raise RuntimeError("scheduled scan target commit callback is required")
+            targets = {account: target}
+            commit_started = monotonic()
+            try:
+                commit_scan_targets_fn(targets)
+            except Exception as exc:
+                request.audit_helper.audit(
+                    "scheduler", "scan_target_commit_failed", run_id=request.run_id,
+                    status="error", message=str(exc), extra={"targets": targets},
+                )
+                raise
+            finally:
+                record_tick_latency(
+                    runlog=request.runlog, stage="scheduler_target_commit", started=commit_started,
+                    data={"account": account},
+                )
+            request.audit_helper.audit(
+                "scheduler", "scan_target_committed", run_id=request.run_id,
+                account=account, status="ok", extra={
+                    "target": target, "brief_digest": source["persisted"]["current_brief_digest"],
+                },
+            )
 
 
 @daily_brief_delivery_validation_scope()
@@ -1127,22 +1213,7 @@ def _run_notification_with_post_delivery_fallback(
         request.runlog.safe_event("daily_brief_prepare", "start")
         prepare_outcome = "error"
         try:
-            if request.delivery_only:
-                markets = tuple(dict.fromkeys(str(value).strip().upper() for value in
-                    (request.markets_to_run or request.scheduler_markets) if str(value).strip()))
-                briefs = TickBriefPreparation(markets=markets)
-            else:
-                briefs = prepare_tick_briefs(
-                    base=request.base, run_id=request.run_id, config=request.base_cfg,
-                    markets=request.markets_to_run or request.scheduler_markets,
-                    results=request.results, ran_pipeline_accounts=request.ran_pipeline_accounts,
-                    scheduled_scan_targets_by_account=request.scheduled_scan_targets_by_account,
-                    scheduler_decisions_by_account=request.scheduler_decisions_by_account,
-                    scheduler_decision=request.scheduler_decision, runlog=request.runlog,
-                    recovery_intent_factory=partial(_daily_brief_recovery_intent_for_preparation, request),
-                    deadline=request.deadline, cancelled=request.cancelled,
-                    on_account_prepared=prepared_outcomes.__setitem__,
-                )
+            briefs = _prepare_tick_notification_sources(request, prepared_outcomes)
             merge_scan_outcomes(request.tick_metrics, briefs.scan_outcomes_by_account)
             stage = "prepare_notification"
             preparation = _prepare_daily_brief_notification(request, brief_preparation=briefs)
@@ -1159,36 +1230,7 @@ def _run_notification_with_post_delivery_fallback(
         # History, recovery intent (including its frozen absence), and every
         # selected envelope/fanout are durable before the scheduler target moves.
         stage = "commit_scan_targets"
-        if not request.delivery_only and request.trigger_kind == "scheduled":
-            for (account, _market), source in briefs.sources.items():
-                if not source["pipeline_reliable"]:
-                    continue
-                target = (request.scheduled_scan_targets_by_account or {}).get(account)
-                if not target:
-                    continue
-                if commit_scan_targets_fn is None:
-                    raise RuntimeError("scheduled scan target commit callback is required")
-                targets = {account: target}
-                commit_started = monotonic()
-                try:
-                    commit_scan_targets_fn(targets)
-                except Exception as exc:
-                    request.audit_helper.audit(
-                        "scheduler", "scan_target_commit_failed", run_id=request.run_id,
-                        status="error", message=str(exc), extra={"targets": targets},
-                    )
-                    raise
-                finally:
-                    record_tick_latency(
-                        runlog=request.runlog, stage="scheduler_target_commit", started=commit_started,
-                        data={"account": account},
-                    )
-                request.audit_helper.audit(
-                    "scheduler", "scan_target_committed", run_id=request.run_id,
-                    account=account, status="ok", extra={
-                        "target": target, "brief_digest": source["persisted"]["current_brief_digest"],
-                    },
-                )
+        _commit_prepared_tick_scan_targets(request, briefs, commit_scan_targets_fn)
         stage = "notify"
         outcome = run_tick_notification_flow(replace(request, preparation=preparation))
     except BaseException as exc:

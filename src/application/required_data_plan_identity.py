@@ -615,6 +615,28 @@ def required_data_planned_empty_reason(fetch_plan: Mapping[str, Any]) -> str | N
     return "no_feasible_strikes"
 
 
+def _validate_failed_discovery_authority(
+    fetch_plan: Mapping[str, Any], discovery: Mapping[str, Any],
+) -> None:
+    outcome = discovery.get("outcome")
+    error = discovery.get("error")
+    if (outcome not in {"provider_error", "parse_error"}
+            or fetch_plan.get("expiration_discovery_complete") is not False
+            or not isinstance(error, str) or not error.strip()
+            or fetch_plan.get("expiration_discovery_error") != error
+            or not isinstance(discovery.get("reason_code"), str)
+            or discovery.get("reason_code") in {"request_identity_invalid", "expiration_discovery_cache_ambiguous", "expiration_discovery_cache_identity_mismatch"}):
+        raise ValueError("failed required-data discovery authority is invalid")
+
+
+def _validate_failed_planning_scope(scope: Any, discovery: Mapping[str, Any]) -> None:
+    if (not isinstance(scope, Mapping)
+            or any(scope.get(key) != discovery.get(key) for key in ("outcome", "reason_code", "error", "request_identity"))
+            or not isinstance(scope.get("source_fields"), list) or not scope["source_fields"]
+            or any(not isinstance(item, str) or not item.strip() for item in scope["source_fields"])):
+        raise ValueError("failed required-data planning scope contradicts discovery")
+
+
 def validate_required_data_failed_planning_scopes(
     fetch_plan: Mapping[str, Any], *, symbol: str, binding: Mapping[str, Any],
 ) -> date:
@@ -630,46 +652,24 @@ def validate_required_data_failed_planning_scopes(
     discovery = fetch_plan.get("expiration_discovery")
     if not isinstance(discovery, Mapping):
         raise ValueError("failed required-data discovery is missing")
-    outcome = discovery.get("outcome")
-    error = discovery.get("error")
-    if (outcome not in {"provider_error", "parse_error"}
-            or fetch_plan.get("expiration_discovery_complete") is not False
-            or not isinstance(error, str) or not error.strip()
-            or fetch_plan.get("expiration_discovery_error") != error
-            or not isinstance(discovery.get("reason_code"), str)
-            or discovery.get("reason_code") in {"request_identity_invalid", "expiration_discovery_cache_ambiguous", "expiration_discovery_cache_identity_mismatch"}):
-        raise ValueError("failed required-data discovery authority is invalid")
+    _validate_failed_discovery_authority(fetch_plan, discovery)
     scopes = fetch_plan.get("failed_planning_scopes")
     if not isinstance(scopes, list) or not scopes:
         raise ValueError("failed required-data planning scopes are missing")
     for scope in scopes:
-        if (not isinstance(scope, Mapping)
-                or any(scope.get(key) != discovery.get(key) for key in ("outcome", "reason_code", "error", "request_identity"))
-                or not isinstance(scope.get("source_fields"), list) or not scope["source_fields"]
-                or any(not isinstance(item, str) or not item.strip() for item in scope["source_fields"])):
-            raise ValueError("failed required-data planning scope contradicts discovery")
+        _validate_failed_planning_scope(scope, discovery)
     return _validate_discovery_identity(discovery=discovery, symbol=symbol, binding=canonical_binding, failed=True)
 
 
-def _validate_discovery_identity(
-    *, discovery: Mapping[str, Any], symbol: str, binding: Mapping[str, Any], failed: bool = False,
-) -> date:
-    identity = discovery.get("request_identity")
-    if not isinstance(identity, Mapping):
-        raise ValueError("required-data expiration discovery identity is missing")
-    identity_binding = {
+def _discovery_identity_binding(identity: Mapping[str, Any]) -> dict[str, Any]:
+    return {
         "source": _normalize_source(identity.get("source")),
         "host": str(identity.get("host") or "").strip(),
         "port": _validated_port(identity.get("port"), error="required-data expiration discovery identity is invalid"),
     }
-    expected_binding = {key: binding.get(key) for key in ("source", "host", "port")}
-    trading_date = _validated_iso_date(identity.get("trading_date"), field="required-data expiration discovery trading date")
-    symbol_identity = resolve_symbol_identity(symbol)
-    if (symbol_identity is None or symbol_identity.canonical != symbol
-            or str(identity.get("symbol") or "").strip().upper() != symbol
-            or identity_binding != expected_binding
-            or str(identity.get("underlier") or "").strip() != symbol_identity.futu_code):
-        raise ValueError("required-data expiration discovery identity mismatch")
+
+
+def _validate_discovery_timestamps(discovery: Mapping[str, Any], *, failed: bool) -> None:
     try:
         completed = _parse_timestamp(discovery.get("completed_at_utc"))
         observed = (_parse_timestamp(discovery.get("observed_at_utc"))
@@ -678,6 +678,24 @@ def _validate_discovery_identity(
         raise ValueError("required-data expiration discovery timestamps are invalid") from exc
     if completed < observed:
         raise ValueError("required-data expiration discovery completion precedes observation")
+
+
+def _validate_discovery_identity(
+    *, discovery: Mapping[str, Any], symbol: str, binding: Mapping[str, Any], failed: bool = False,
+) -> date:
+    identity = discovery.get("request_identity")
+    if not isinstance(identity, Mapping):
+        raise ValueError("required-data expiration discovery identity is missing")
+    identity_binding = _discovery_identity_binding(identity)
+    expected_binding = {key: binding.get(key) for key in ("source", "host", "port")}
+    trading_date = _validated_iso_date(identity.get("trading_date"), field="required-data expiration discovery trading date")
+    symbol_identity = resolve_symbol_identity(symbol)
+    if (symbol_identity is None or symbol_identity.canonical != symbol
+            or str(identity.get("symbol") or "").strip().upper() != symbol
+            or identity_binding != expected_binding
+            or str(identity.get("underlier") or "").strip() != symbol_identity.futu_code):
+        raise ValueError("required-data expiration discovery identity mismatch")
+    _validate_discovery_timestamps(discovery, failed=failed)
     return trading_date
 
 

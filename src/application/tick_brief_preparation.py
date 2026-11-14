@@ -58,6 +58,70 @@ def write_daily_brief_failure_source(
     return path.resolve().relative_to(base.resolve()).as_posix(), hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _normalized_tick_brief_markets(markets: Sequence[str]) -> tuple[str, ...]:
+    markets = tuple(dict.fromkeys(str(value).strip().upper() for value in markets if str(value).strip()))
+    if not markets:
+        raise ValueError("daily brief requires at least one scheduler market")
+    return markets
+
+
+def _tick_brief_scan_targets(
+    scheduled_scan_targets_by_account: Mapping[str, str | None] | None,
+) -> dict[str, str]:
+    return {str(account).strip().lower(): target for account, target in
+            (scheduled_scan_targets_by_account or {}).items() if target and str(target).strip()}
+
+
+def _prepare_tick_brief_account(
+    *, base: Path, run_id: str, config: dict[str, Any], account: str, result: Any,
+    markets: tuple[str, ...], pipelines: set[str],
+    scheduler_decisions_by_account: Mapping[str, dict[str, Any]] | None,
+    scheduler_decision: Mapping[str, Any] | None, runlog: Any,
+    recovery_intent_factory: Callable[[str, str, dict[str, Any], dict[str, Any]], dict[str, Any] | None] | None,
+    deadline: float | None, cancelled: Callable[[], bool] | None,
+    on_account_prepared: Callable[[str, bool], None] | None,
+    sources: dict[tuple[str, str], dict[str, Any]], outcomes: dict[str, bool],
+) -> None:
+    raw_scheduler = (scheduler_decisions_by_account or {}).get(account)
+    scheduler = dict(raw_scheduler if isinstance(raw_scheduler, dict) else (scheduler_decision or {}))
+    with daily_brief_timing_scope(runlog=runlog, account=account, market=markets[0]):
+        briefs = assemble_daily_decision_briefs(
+            base=base, run_id=run_id, account=account, markets_to_run=list(markets),
+            scheduler_decision=scheduler, account_result=result,
+            pipeline_succeeded=account in pipelines, config=config,
+        )
+        check_fetch_control(deadline, cancelled)
+        for market in markets:
+            brief = briefs.get(market)
+            if brief is None:
+                raise ValueError(f"daily brief assembler did not return market {market} for {account}")
+            reliable = daily_brief_scan_is_reliable(brief=brief, pipeline_succeeded=account in pipelines)
+            persisted = None
+            failure_source = None
+            if reliable:
+                factory = (lambda: recovery_intent_factory(account, market, scheduler, brief)) if recovery_intent_factory else None
+                persisted = persist_daily_decision_brief_success(
+                    base=base, brief=brief, recovery_intent_factory=factory,
+                )
+            else:
+                brief = persist_daily_decision_brief_failure(base=base, brief=brief)
+                failure_source = write_daily_brief_failure_source(
+                    base=base, run_id=run_id, account=account, market=market, brief=brief, result=result,
+                )
+            # Necessary history and failure evidence above stay durable if a
+            # cancellation is observed before notification obligations begin.
+            sources[(account, market)] = {
+                "brief": brief, "pipeline_reliable": reliable,
+                "persisted": persisted, "failure_source": failure_source,
+            }
+            outcomes[account] = outcomes.get(account, True) and reliable
+            # Publish only the qualification whose necessary source is durable;
+            # a later account or cancellation must not erase that fact.
+            if on_account_prepared is not None:
+                on_account_prepared(account, outcomes[account])
+            check_fetch_control(deadline, cancelled)
+
+
 def prepare_tick_briefs(
     *, base: Path, run_id: str, config: dict[str, Any], markets: Sequence[str],
     results: Sequence[Any], ran_pipeline_accounts: Sequence[str],
@@ -74,14 +138,11 @@ def prepare_tick_briefs(
     it in the successful-history transaction and freezes absence on same-run replay.
     """
     check_fetch_control(deadline, cancelled)
-    markets = tuple(dict.fromkeys(str(value).strip().upper() for value in markets if str(value).strip()))
-    if not markets:
-        raise ValueError("daily brief requires at least one scheduler market")
+    markets = _normalized_tick_brief_markets(markets)
     if len(markets) != 1:
         return TickBriefPreparation(markets=markets)
     pipelines = {str(value).strip().lower() for value in ran_pipeline_accounts}
-    targets = {str(account).strip().lower(): target for account, target in
-               (scheduled_scan_targets_by_account or {}).items() if target and str(target).strip()}
+    targets = _tick_brief_scan_targets(scheduled_scan_targets_by_account)
     sources = {}
     outcomes = {}
     observed_accounts = set()
@@ -96,42 +157,13 @@ def prepare_tick_briefs(
             observed_accounts.add(account)
             if not (account in targets or account in pipelines or _daily_brief_result_value(result, "ran_scan") is True):
                 continue
-            raw_scheduler = (scheduler_decisions_by_account or {}).get(account)
-            scheduler = dict(raw_scheduler if isinstance(raw_scheduler, dict) else (scheduler_decision or {}))
-            with daily_brief_timing_scope(runlog=runlog, account=account, market=markets[0]):
-                briefs = assemble_daily_decision_briefs(
-                    base=base, run_id=run_id, account=account, markets_to_run=list(markets),
-                    scheduler_decision=scheduler, account_result=result,
-                    pipeline_succeeded=account in pipelines, config=config,
-                )
-                check_fetch_control(deadline, cancelled)
-                for market in markets:
-                    brief = briefs.get(market)
-                    if brief is None:
-                        raise ValueError(f"daily brief assembler did not return market {market} for {account}")
-                    reliable = daily_brief_scan_is_reliable(brief=brief, pipeline_succeeded=account in pipelines)
-                    persisted = None
-                    failure_source = None
-                    if reliable:
-                        factory = (lambda: recovery_intent_factory(account, market, scheduler, brief)) if recovery_intent_factory else None
-                        persisted = persist_daily_decision_brief_success(
-                            base=base, brief=brief, recovery_intent_factory=factory,
-                        )
-                    else:
-                        brief = persist_daily_decision_brief_failure(base=base, brief=brief)
-                        failure_source = write_daily_brief_failure_source(
-                            base=base, run_id=run_id, account=account, market=market, brief=brief, result=result,
-                        )
-                    # Necessary history and failure evidence above stay durable if a
-                    # cancellation is observed before notification obligations begin.
-                    sources[(account, market)] = {
-                        "brief": brief, "pipeline_reliable": reliable,
-                        "persisted": persisted, "failure_source": failure_source,
-                    }
-                    outcomes[account] = outcomes.get(account, True) and reliable
-                    # Publish only the qualification whose necessary source is durable;
-                    # a later account or cancellation must not erase that fact.
-                    if on_account_prepared is not None:
-                        on_account_prepared(account, outcomes[account])
-                    check_fetch_control(deadline, cancelled)
+            _prepare_tick_brief_account(
+                base=base, run_id=run_id, config=config, account=account, result=result,
+                markets=markets, pipelines=pipelines,
+                scheduler_decisions_by_account=scheduler_decisions_by_account,
+                scheduler_decision=scheduler_decision, runlog=runlog,
+                recovery_intent_factory=recovery_intent_factory,
+                deadline=deadline, cancelled=cancelled, on_account_prepared=on_account_prepared,
+                sources=sources, outcomes=outcomes,
+            )
     return TickBriefPreparation(markets=markets, sources=sources, scan_outcomes_by_account=outcomes)

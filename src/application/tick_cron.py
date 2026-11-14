@@ -544,6 +544,20 @@ def _install_tick_hang_diagnostics() -> None:
     atexit.register(cleanup)
 
 
+def _diagnose_tick_process_timeout(
+    proc: subprocess.Popen[Any], exc: BaseException, env: dict[str, str],
+) -> None:
+    if isinstance(exc, subprocess.TimeoutExpired):
+        trace_path = env.get("OM_TICK_HANG_TRACEBACK_PATH")
+        if trace_path and Path(trace_path).exists():
+            try:
+                # Signal only the registered Python child, not its subprocesses.
+                os.kill(proc.pid, signal.SIGUSR1)
+                proc.wait(timeout=2.0)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                pass
+
+
 def _run_tick_process_group(
     *,
     command: list[str],
@@ -570,15 +584,7 @@ def _run_tick_process_group(
         phases["business_wait_seconds"] = time.monotonic() - started
         diagnostic_started = time.monotonic()
         try:
-            if isinstance(exc, subprocess.TimeoutExpired):
-                trace_path = env.get("OM_TICK_HANG_TRACEBACK_PATH")
-                if trace_path and Path(trace_path).exists():
-                    try:
-                        # Signal only the registered Python child, not its subprocesses.
-                        os.kill(proc.pid, signal.SIGUSR1)
-                        proc.wait(timeout=2.0)
-                    except (ProcessLookupError, subprocess.TimeoutExpired):
-                        pass
+            _diagnose_tick_process_timeout(proc, exc, env)
         finally:
             phases["diagnostic_seconds"] = time.monotonic() - diagnostic_started
             cleanup_started = time.monotonic()

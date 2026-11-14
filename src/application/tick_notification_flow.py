@@ -606,6 +606,11 @@ def _continue_legacy_daily_brief_deliveries(request, deliveries):
     return result
 
 
+def _daily_brief_fanout_outside_run_window(request, spec) -> bool:
+    return (request.delivery_only and spec["metadata"].get("delivery_kind") != "fixed_recovery_report"
+            and _daily_brief_scheduler_decision(request, spec["metadata"]["account"]).get("in_run_window") is not True)
+
+
 def _deliver_daily_brief_fanouts(request, preparation) -> TickNotificationOutcome:
     from src.application.channels.plugins import channel_plugin_installed
     from src.application.notification_delivery_route import notification_delivery_route_is_current
@@ -620,8 +625,7 @@ def _deliver_daily_brief_fanouts(request, preparation) -> TickNotificationOutcom
         if request.no_send:
             return False
         recipient = spec["recipient"]
-        if (request.delivery_only and spec["metadata"].get("delivery_kind") != "fixed_recovery_report"
-                and _daily_brief_scheduler_decision(request, spec["metadata"]["account"]).get("in_run_window") is not True):
+        if _daily_brief_fanout_outside_run_window(request, spec):
             return False
         if not channel_plugin_installed(recipient["provider"]):
             blocked.append({"account": spec["metadata"]["account"],
@@ -1183,6 +1187,25 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> TickNotifica
     )
 
 
+def _report_notification_delivery_meta(
+    request: TickNotificationRequest, *, market: str, account: str,
+    code: str, degraded: bool, detail: str,
+) -> str:
+    try:
+        outcome = report_system_meta_signal(
+            base=request.base, unit=f"options-monitor-tick-{market}.service",
+            market=market, account=account, failure_code=code, stage="delivery",
+            run_id=request.run_id, degraded=degraded, reason=detail,
+            config=request.base_cfg, external=True,
+            **({"deadline": request.deadline, "cancelled": request.cancelled}
+               if request.deadline is not None or request.cancelled is not None else {}),
+        )
+    except Exception:
+        outcome = "infra_failed"
+        print("<3>NOTIFICATION_META_ALERT_INFRA_FAILED", file=sys.stderr)
+    return outcome
+
+
 def _record_notification_meta(
     request: TickNotificationRequest, *, account_messages: dict[str, str],
     markets: tuple[str, ...], confirmed_accounts: list[str] | tuple[str, ...],
@@ -1194,18 +1217,9 @@ def _record_notification_meta(
         degraded = account not in confirmed
         code = "NOTIFICATION_DELIVERY_UNCONFIRMED"
         detail = (reason_by_account or {}).get(account, reason)
-        try:
-            outcome = report_system_meta_signal(
-                base=request.base, unit=f"options-monitor-tick-{market}.service",
-                market=market, account=account, failure_code=code, stage="delivery",
-                run_id=request.run_id, degraded=degraded, reason=detail,
-                config=request.base_cfg, external=True,
-                **({"deadline": request.deadline, "cancelled": request.cancelled}
-                   if request.deadline is not None or request.cancelled is not None else {}),
-            )
-        except Exception:
-            outcome = "infra_failed"
-            print("<3>NOTIFICATION_META_ALERT_INFRA_FAILED", file=sys.stderr)
+        outcome = _report_notification_delivery_meta(
+            request, market=market, account=account, code=code, degraded=degraded, detail=detail,
+        )
         if degraded or outcome in {"recovered", "infra_failed"}:
             request.runlog.safe_event("notify", "error" if degraded else "ok",
                                       error_code=code if degraded else None,

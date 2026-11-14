@@ -82,19 +82,9 @@ def _quote_rights_receipt(
     return rights
 
 
-def _market_state_receipt(
-    provider: Any, gateway: Any, *, symbol: str, received: datetime,
-    deadline: float | None = None, cancelled: Callable[[], bool] | None = None,
+def _market_state_receipt_from_rows(
+    rows: Any, *, code: str, received: datetime,
 ) -> dict[str, Any] | None:
-    check_fetch_control(deadline, cancelled)
-    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
-    try:
-        code = normalize_underlier(symbol).code
-        rows = provider.get_market_state(gateway, [code], **controls)
-    except Exception:
-        check_fetch_control(deadline, cancelled)
-        return None
-    check_fetch_control(deadline, cancelled)
     matching = [
         row
         for row in rows or []
@@ -109,6 +99,22 @@ def _market_state_receipt(
         "market_state_after_snapshot": state,
         "market_state_received_at_utc": received.isoformat(),
     }
+
+
+def _market_state_receipt(
+    provider: Any, gateway: Any, *, symbol: str, received: datetime,
+    deadline: float | None = None, cancelled: Callable[[], bool] | None = None,
+) -> dict[str, Any] | None:
+    check_fetch_control(deadline, cancelled)
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
+    try:
+        code = normalize_underlier(symbol).code
+        rows = provider.get_market_state(gateway, [code], **controls)
+    except Exception:
+        check_fetch_control(deadline, cancelled)
+        return None
+    check_fetch_control(deadline, cancelled)
+    return _market_state_receipt_from_rows(rows, code=code, received=received)
 
 
 def refresh_roll_quote_evidence(

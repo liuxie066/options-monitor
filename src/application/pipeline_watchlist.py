@@ -95,6 +95,21 @@ LIQUIDITY_COMMON_FIELDS = (
 _COMBO_CAPTURE_VARIANTS = frozenset({"sp_lc", "cc_lp"})
 
 
+def _symbol_timeout_seconds(
+    *, symbol: str, timeout_sec: int | float | None, started: float,
+    deadline: float | None, cancelled: Callable[[], bool] | None,
+) -> float:
+    timeout = float(timeout_sec or 0)
+    if cancelled is not None and cancelled():
+        raise SymbolProcessingTimeout(f"{symbol} symbol processing cancelled")
+    if deadline is not None:
+        remaining = deadline - started
+        if remaining <= 0:
+            raise SymbolProcessingTimeout(f"{symbol} symbol processing exceeded Tick deadline")
+        timeout = min(timeout, remaining) if timeout > 0 else remaining
+    return timeout
+
+
 @contextmanager
 def _enforce_symbol_timeout(
     *,
@@ -104,14 +119,10 @@ def _enforce_symbol_timeout(
     cancelled: Callable[[], bool] | None = None,
 ):
     started = time.monotonic()
-    timeout = float(timeout_sec or 0)
-    if cancelled is not None and cancelled():
-        raise SymbolProcessingTimeout(f"{symbol} symbol processing cancelled")
-    if deadline is not None:
-        remaining = deadline - started
-        if remaining <= 0:
-            raise SymbolProcessingTimeout(f"{symbol} symbol processing exceeded Tick deadline")
-        timeout = min(timeout, remaining) if timeout > 0 else remaining
+    timeout = _symbol_timeout_seconds(
+        symbol=symbol, timeout_sec=timeout_sec, started=started,
+        deadline=deadline, cancelled=cancelled,
+    )
     if timeout <= 0:
         yield None
         return
