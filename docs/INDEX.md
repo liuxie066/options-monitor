@@ -99,6 +99,8 @@
 
 ## 运维、修复与发布
 
+- [临时owner对象诊断](TRADE_INTAKE_OWNER_DIAGNOSTIC.md)：默认关闭的一次性聚合、软预算、隔离实测及待批准的生产回退流程。
+
 - [Guardrails](https://github.com/liuxie066/options-monitor/blob/main/docs/GUARDRAILS.md)：本地 hook 与 CI 门禁。
 - [Report Center](REPORT_CENTER.md)：报告注册表、`om report` 入口、周度配置三态与 A/B 口径、本机调度和投递回执。
 - [Weekly Config Review Design](WEEKLY_CONFIG_REVIEW_COMPLETION_DESIGN.md)：周报目标、同值边界样本门槛、未知与真零、只读预取及安装验收边界。
