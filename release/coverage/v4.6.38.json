@@ -1,0 +1,89 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.38",
+  "base": {
+    "tag": "v4.6.37",
+    "commit": "2fa7d6b050872cbd79a3aacfe05054d9ab8d09de"
+  },
+  "reviewed_head": "3790820685e59e78202981a3fd754128291bf2df",
+  "commits": [
+    {
+      "sha": "13c5279b24090c7b9e07f14757155ed9664300d4",
+      "subject": "fix(code-health): close not-worthwhile issues after confirmed replies (#1187)"
+    },
+    {
+      "sha": "07c3a1c48c6c5d6974cdee59324c0d0dedd180b4",
+      "subject": "perf(trades): batch combo reconciliation history reads"
+    },
+    {
+      "sha": "9f8e15dde66911582ce995ab66ea18222c1f3941",
+      "subject": "Merge pull request #1189 from liuxie066/perf/trade-intake-combo-batch-20261114"
+    },
+    {
+      "sha": "907d2b17011feb55dcb9c7d88edac0c59098661e",
+      "subject": "feat(trades): add bounded opt-in owner memory diagnostics"
+    },
+    {
+      "sha": "3790820685e59e78202981a3fd754128291bf2df",
+      "subject": "Merge pull request #1191 from liuxie066/diag/trade-intake-owner-top-20261115"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "提供默认关闭的一次性常驻对象聚合诊断，在自然运行时点输出有界、脱敏的简报缓存与单个成交来源对象摘要，辅助定位内存占用。（#1191）",
+      "commits": [
+        "907d2b17011feb55dcb9c7d88edac0c59098661e",
+        "3790820685e59e78202981a3fd754128291bf2df"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "组合成交归因复用同批历史读取范围，减少多个日期对账时的重复读取和校验，保持结果与缺失、损坏处理一致。（#1189）",
+      "commits": [
+        "07c3a1c48c6c5d6974cdee59324c0d0dedd180b4",
+        "9f8e15dde66911582ce995ab66ea18222c1f3941"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "代码健康巡检在确认不值得处理的 issue 回复及关闭说明后，以 not planned 关闭并回读结果，支持中断恢复和重复运行。（#1187）",
+      "commits": [
+        "13c5279b24090c7b9e07f14757155ed9664300d4"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "13c5279b24090c7b9e07f14757155ed9664300d4",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1187"
+      ]
+    },
+    {
+      "commit": "07c3a1c48c6c5d6974cdee59324c0d0dedd180b4",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1189"
+      ]
+    },
+    {
+      "commit": "9f8e15dde66911582ce995ab66ea18222c1f3941",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1189"
+      ]
+    },
+    {
+      "commit": "907d2b17011feb55dcb9c7d88edac0c59098661e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1191"
+      ]
+    },
+    {
+      "commit": "3790820685e59e78202981a3fd754128291bf2df",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1191"
+      ]
+    }
+  ]
+}
