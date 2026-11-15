@@ -244,6 +244,8 @@ def test_real_git_daily_scope_weekly_cursor_isolation_and_failed_retry(tmp_path,
     origin.mkdir()
     git(origin, "init", "-b", "main")
     put(origin, "src/steady.py", "if False:\n    old = 1\n")
+    put(origin, "AGENTS.md", "First frozen instructions\n")
+    put(origin, ".gitattributes", "AGENTS.md export-ignore\n/src/* export-ignore\n")
     git(origin, "add", ".")
     git(origin, "commit", "-m", "fixture initial")
     first = git(origin, "rev-parse", "HEAD")
@@ -260,7 +262,16 @@ def test_real_git_daily_scope_weekly_cursor_isolation_and_failed_retry(tmp_path,
         return scratch
 
     monkeypatch.setattr(review, "space_free_temporary_directory", record_scratch)
-    monkeypatch.setattr(review, "tool_runs", lambda source, selected, execute: ({"builtin": {"available": True}}, [], {}))
+    snapshots = []
+
+    def tools(source, selected, execute):
+        sha = git(source, "rev-parse", "HEAD")
+        assert (source / "AGENTS.md").read_text().strip() == git(origin, "show", f"{sha}:AGENTS.md")
+        assert (source / "src/steady.py").is_file()
+        snapshots.append((source.name, sha))
+        return {"builtin": {"available": True}}, [], {}
+
+    monkeypatch.setattr(review, "tool_runs", tools)
     with review.run_lock(state):
         initial = review.run_scan(state, "daily", timeout_seconds=30)
     assert initial["status"] == "complete" and initial["initialized_daily_cursor"]
@@ -268,6 +279,7 @@ def test_real_git_daily_scope_weekly_cursor_isolation_and_failed_retry(tmp_path,
     assert review.read_json(state / "daily-cursor.json")["sha"] == first
     put(origin, "src/new.py", "if False:\n    new = 2\n")
     put(origin, "docs/new.md", "not production Python")
+    put(origin, "AGENTS.md", "Second frozen instructions\n")
     git(origin, "add", ".")
     git(origin, "commit", "-m", "fixture add production and docs")
     second = git(origin, "rev-parse", "HEAD")
@@ -276,6 +288,7 @@ def test_real_git_daily_scope_weekly_cursor_isolation_and_failed_retry(tmp_path,
     assert daily["status"] == "complete", daily["gaps"]
     assert daily["selected_files"] == ["src/new.py"]
     assert daily["metrics"]["files"] == 1 and daily["metrics"]["unreachable_branches"] == 1
+    assert ("current", second) in snapshots and ("previous", first) in snapshots
     rows = review.read_json(state / "runs" / daily["run_id"] / "candidates.json")
     assert rows and {row["path"] for row in rows} == {"src/new.py"}
     cursor = (state / "daily-cursor.json").read_bytes()
@@ -300,6 +313,7 @@ def test_real_git_daily_scope_weekly_cursor_isolation_and_failed_retry(tmp_path,
     assert (state / "daily-cursor.json").read_bytes() == cursor
     assert len((state / "scorecards.jsonl").read_text().splitlines()) == 5
     assert scratches and not any(path.exists() for path in scratches)
+    assert git(state / "mirror.git", "worktree", "list", "--porcelain").count("worktree ") == 1
 
 
 def test_coverage_manifest_binds_source_workload_and_file_digest(tmp_path):
@@ -909,17 +923,55 @@ def test_weekly_self_coverage_uses_space_free_scratch_mirror_and_sha(tmp_path, m
     origin.mkdir()
     git(origin, "init", "-b", "main")
     put(origin, "src/example.py", "def run(flag):\n    if flag:\n        return 1\n    return 2\n")
+    expected = {
+        "AGENTS.md": "Frozen project instructions\n",
+        "LESSONS.md": "Frozen project lessons\n",
+        "docs/CODE_ENTROPY_BASELINE.md": "版本：2\nFrozen baseline\n",
+        "requirements/dev.txt": "pytest\ncoverage\n",
+        "constraints/dev.txt": "pytest==8.0.0\n",
+        "tests/test_example.py": "def test_example():\n    assert True\n",
+        "scripts/maintenance.py": "if False:\n    unused = 1\n",
+    }
+    for name, content in expected.items():
+        put(origin, name, content)
+    put(origin, ".gitattributes", "".join(f"/{name} export-ignore\n" for name in expected))
     git(origin, "add", ".")
     git(origin, "commit", "-m", "fixture self coverage")
     state = tmp_path / "space dir" / "code-entropy-review"
     state.mkdir(parents=True)
-    baseline = put(tmp_path, "policy.md", "fixture baseline version 1")
+    baseline = put(tmp_path, "policy.md", expected["docs/CODE_ENTROPY_BASELINE.md"])
     review.initialize(state, "fixture/repo", str(origin), baseline)
+    put(origin, "AGENTS.md", "Uncommitted instructions must not be scanned\n")
     calls = []
+    workload_commands, guideline_packets = [], []
+    real_self_coverage = review.self_coverage
 
     def fake_self_coverage(source, output, execute, *, scratch, time_left, repository=None, sha=None):
+        for name, content in expected.items():
+            assert (source / name).read_text() == content
+        assert git(source, "rev-parse", "HEAD") == sha
         calls.append({"source": source, "scratch": Path(scratch), "repository": repository, "sha": sha})
-        return None, {"source": "self-run", "status": "failed", "reason": "fixture workload"}
+        from scripts import code_entropy_assessment as assessment
+
+        def judge(packet, schema):
+            guideline_packets.append(packet)
+            return {"reviews": [{"key": item["candidate"]["key"],
+                                  "evidence_digest": item["candidate"]["evidence_digest"],
+                                  "decision": "reject", "reason": "Fixture only", "proposal": ""}
+                                 for item in packet["candidates"]]}
+
+        candidates = scan.scan(source, ["scripts/maintenance.py"])[1]
+        assessment.assess(source, candidates, {}, {}, {}, {}, judge, sha=sha)
+
+        def workload(argv, **kwargs):
+            if argv[0] == "git":
+                return execute(argv, **kwargs)
+            workload_commands.append(argv)
+            # Exercise the real coverage path; no environment install or pytest subprocess.
+            return {"exit_code": 1 if "pytest" in argv else 0, "text": "fixture workload"}
+
+        return real_self_coverage(source, output, workload, scratch=scratch,
+                                  time_left=lambda: 1000, repository=repository, sha=sha)
 
     monkeypatch.setattr(review, "self_coverage", fake_self_coverage)
     monkeypatch.setattr(review, "tool_runs",
@@ -927,11 +979,22 @@ def test_weekly_self_coverage_uses_space_free_scratch_mirror_and_sha(tmp_path, m
     with review.run_lock(state):
         result = review.run_scan(state, "weekly", timeout_seconds=60)
     assert result["status"] == "complete"
+    assert result["baseline_version"] == 2
+    assert result["baseline_source"] == "main:docs/CODE_ENTROPY_BASELINE.md"
+    assert "scripts/maintenance.py" in result["selected_files"]
     assert len(calls) == 1
+    assert any("pytest" in argv for argv in workload_commands)
+    assert result["coverage_workload"]["status"] == "failed"
+    assert any("coverage" in gap.lower() for gap in result["gaps"])
+    assert len(guideline_packets) == 1
+    assert guideline_packets[0]["guidelines"] == {
+        name: expected[name] for name in ("AGENTS.md", "docs/CODE_ENTROPY_BASELINE.md")}
     call = calls[0]
     assert " " not in str(call["scratch"]) and not call["scratch"].exists()
     assert call["repository"] == state / "mirror.git"
     assert call["sha"] == result["main_sha"]
+    assert git(state / "mirror.git", "worktree", "list", "--porcelain").count("worktree ") == 1
+    assert (origin / "AGENTS.md").read_text() == "Uncommitted instructions must not be scanned\n"
 
 
 def test_weekly_scan_fills_coverage_metrics_from_external_manifest(tmp_path):

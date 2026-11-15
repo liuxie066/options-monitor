@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 import fcntl
 import hashlib
@@ -16,7 +16,6 @@ import signal
 import subprocess
 import sys
 import sysconfig
-import tarfile
 import tempfile
 import time
 import uuid
@@ -436,9 +435,9 @@ def self_coverage(source, output, execute, *, scratch, time_left, repository=Non
 
     The ambient interpreter is not trusted to match the snapshot's dependency
     declaration, so a disposable virtual environment is built from the snapshot
-    itself.  The workload runs in a git worktree of ``repository`` at ``sha``:
-    the archive snapshot has no history, and repository tests legitimately read
-    earlier commits.  Any workload failure degrades to an explicit record; only
+    itself.  The workload runs in its own git worktree of ``repository`` at ``sha``
+    so tests can read history and their build artifacts do not alter the static
+    scan's snapshot.  Any workload failure degrades to an explicit record; only
     the outer budget alarm (TimeoutError) may abort the scan.
     """
     started = time.monotonic()
@@ -605,15 +604,13 @@ def run_scan(state, mode, *, publish=False, coverage_manifest=None, timeout_seco
     git = ["git", "-C", str(mirror)]
 
     def snapshot(sha, name, scratch):
-        archive = Path(scratch) / f"{name}.tar"
-        checked([*git, "archive", "--format=tar", sha, "--output", str(archive)])
         destination = Path(scratch) / name
-        destination.mkdir()
-        with tarfile.open(archive) as bundle:
-            bundle.extractall(destination, filter="data")
+        # Release archives omit tests and review policy via export-ignore.
+        snapshots.callback(remove_worktree, mirror, destination)
+        checked([*git, "worktree", "add", "--detach", str(destination), sha])
         return destination
     try:
-        with deadline(budget), space_free_temporary_directory() as scratch:
+        with deadline(budget), space_free_temporary_directory() as scratch, ExitStack() as snapshots:
             if not mirror.exists():
                 checked(["git", "clone", "--bare", "--no-hardlinks", "--single-branch", "--branch", "main",
                          "--filter=blob:none", "--no-tags", config["remote"], str(mirror)])

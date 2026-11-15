@@ -19,7 +19,7 @@
 
 ## 输入、增量与工具
 
-每轮使用自己的bare mirror fetch远端main，冻结完整SHA，通过Git archive导出tracked源码。工作区未提交文件、其他分支、历史worktree和运行目录不进入输入。指标范围为src、domain、om_strategy_core、scripts、plugins子树的Python文件；仓库根目录tests和其他tracked文本用于引用排除。插件子树按文件清单完整纳入。评分卡保留实际文件列表，不能把范围内LOC冒充仓库所有文件的总行数。
+每轮使用自己的bare mirror fetch远端main，冻结完整SHA，在临时detached worktree中读取完整tracked源码，包括测试、开发依赖、项目指令和实践基线；不使用会应用export-ignore的发布归档。临时worktree在成功或失败退出时清理。工作区未提交文件、其他分支、历史worktree和运行目录不进入输入。指标范围为src、domain、om_strategy_core、scripts、plugins子树的Python文件；仓库根目录tests和其他tracked文本用于引用排除。插件子树按文件清单完整纳入。评分卡保留实际文件列表，不能把范围内LOC冒充仓库所有文件的总行数。
 
 周扫遍历整个指标范围。日扫只对独立日游标之后新增/改动文件生成指标和发现；全仓索引用于引用排除与重复片段对照。首次日扫只建立游标，明确未回溯。周扫不推进日游标。失败、超时、Git历史不连续、基线变化不推进日游标。修改文件中原有的相同key不再列为新增；复杂度继续恶化可重新列为候选，issue仍按稳定key去重。
 
