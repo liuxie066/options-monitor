@@ -10,11 +10,28 @@ import time
 import pytest
 
 from scripts import code_health_review as review
-from scripts.code_health_review import agent_command, restore_review_instructions, run_lock, select_commits, validate_result
+from scripts.code_health_review import agent_command, run_lock, select_commits, validate_result
 
 
 A, B, C, D = [letter * 40 for letter in "abcd"]
 BACKFILL_REPORT = "原报告、完整讨论、冻结目标、真实入口及上下游、验证命令、退出码和证据缺口均已核对，结论与下一步单独记录。" * 8
+FROZEN_FILES = {
+    "LESSONS.md": "Frozen lessons\n",
+    "tests/test_snapshot.py": "def test_snapshot():\n    assert True\n",
+    "requirements/dev.txt": "pytest\n",
+    "constraints/dev.txt": "pytest==8.0.0\n",
+    "docs/CODE_ENTROPY_BASELINE.md": "版本：2\n",
+    "scripts/maintenance.py": "print('frozen')\n",
+}
+
+
+def frozen_materials(source):
+    for name, content in FROZEN_FILES.items():
+        path = source / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    (source / ".gitattributes").write_text(
+        "AGENTS.md export-ignore\n" + "".join(f"/{name} export-ignore\n" for name in FROZEN_FILES))
 
 
 @pytest.mark.parametrize(("total", "intake", "expected"), [
@@ -176,6 +193,7 @@ def backfill_environment(tmp_path, monkeypatch):
 
     git("init", "-q", "-b", "main")
     (source / "AGENTS.md").write_text("Read-only review fixture")
+    frozen_materials(source)
     (source / "example.py").write_text("value = 0\n")
     git("add", ".")
     git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base")
@@ -274,6 +292,8 @@ def test_backfill_scans_64_checkpoints_batches_and_resumes_only_pending(backfill
     invoked = []
 
     def invoke(config, run, prompt, **kwargs):
+        for name, content in FROZEN_FILES.items():
+            assert (run.parents[2] / "source" / name).read_text() == content
         number = json.loads((run / "plan.json").read_text())["issues"][0]["number"]
         invoked.append(number)
         assert config["timeout_seconds"] <= 600
@@ -301,6 +321,9 @@ def test_backfill_scans_64_checkpoints_batches_and_resumes_only_pending(backfill
         assert (root / name).read_bytes() == original
     before = len(calls)
     original_plan = json.loads((run / "plan.json").read_text())
+    frozen_source = Path(original_plan["source_dir"])
+    assert not (frozen_source / ".git").exists()
+    assert not list(run.glob(".source-index-*"))
     original_input = next(row["input_digest"] for row in original_plan["issues"] if row["number"] == 2)
     inventory[1].update({"updated_at": "2026-11-08", "body": "Original trigger plus clarification"})
     resumed = []
@@ -318,6 +341,10 @@ def test_backfill_scans_64_checkpoints_batches_and_resumes_only_pending(backfill
     complete = review.run_issue_backfill(root, resume_run=run)
     assert complete["status"] == "complete"
     assert resumed == [2]
+    resumed_plan = json.loads((Path(complete["run_dir"]) / "plan.json").read_text())
+    assert resumed_plan["source_dir"] == str(frozen_source)
+    for name, content in FROZEN_FILES.items():
+        assert (frozen_source / name).read_text() == content
     assert complete["issues"]["summary"]["counts"] == {
         "close_recommended": 16, "repair": 16, "reply": 0, "needs_decision": 32, "pending": 0}
     assert not any("fetch" in argv for argv in calls[before:])
@@ -855,21 +882,53 @@ def test_concurrent_runs_cannot_share_cursor_lock(tmp_path):
                 pytest.fail("lock admitted a concurrent writer")
 
 
-def test_archive_export_ignore_does_not_remove_frozen_review_instructions(tmp_path):
-    calls = []
+@pytest.mark.parametrize("failure", [None, "read-tree", "checkout-index"])
+def test_full_frozen_source_preserves_files_and_cleans_temporary_index(backfill_environment, failure):
+    root, config, _, _, origin_git = backfill_environment
+    original = Path(config["repository_url"])
+    (original / "binary.dat").write_bytes(bytes(range(256)))
+    (original / "link").symlink_to("LESSONS.md")
+    executable = original / "scripts/maintenance.py"
+    executable.chmod(0o755)
+    origin_git("add", ".")
+    origin_git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "file modes")
+    target = origin_git("rev-parse", "HEAD")
+    (original / "LESSONS.md").write_text("new committed lessons")
+    origin_git("add", ".")
+    origin_git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "later source")
+    (original / "LESSONS.md").write_text("uncommitted local lessons")
+    before = origin_git("status", "--porcelain")
+    mirror = root / "repository.git"
+    review.command(["git", "clone", "--bare", str(original), str(mirror)])
+    registrations = review.command(["git", "--git-dir", str(mirror), "worktree", "list", "--porcelain"])
+    source = root / "source"
+    indexes = []
 
-    def git(*args):
-        calls.append(args)
-        if args == ("ls-tree", "-r", "--name-only", D):
-            return "AGENTS.md\nCLAUDE.md\nsrc/AGENTS.md\nsrc/code.py"
-        assert args[0] == "show" and args[1].startswith(D + ":")
-        return "frozen development instructions"
+    def git(*args, **kwargs):
+        indexes.append(Path(kwargs["env"]["GIT_INDEX_FILE"]))
+        value = review.command(["git", "--git-dir", str(mirror), *args], timeout=10, **kwargs)
+        if args[0] == failure:
+            raise subprocess.TimeoutExpired("git", 10)
+        return value
 
-    restore_review_instructions(git, D, tmp_path)
-    assert (tmp_path / "AGENTS.md").read_text() == "frozen development instructions\n"
-    assert (tmp_path / "src/AGENTS.md").is_file()
-    assert not (tmp_path / "src/code.py").exists()
-    assert len(calls) == 4
+    if failure:
+        with pytest.raises(subprocess.TimeoutExpired):
+            review.export_frozen_source(git, target, source)
+        assert not source.exists()
+    else:
+        review.export_frozen_source(git, target, source)
+        for name, content in FROZEN_FILES.items():
+            assert (source / name).read_text() == content
+        assert (source / "AGENTS.md").read_text() == "Read-only review fixture"
+        assert (source / "binary.dat").read_bytes() == bytes(range(256))
+        assert (source / "link").is_symlink()
+        assert (source / "scripts/maintenance.py").stat().st_mode & 0o111
+        assert not (source / ".git").exists()
+    assert indexes and all(not index.parent.exists() for index in indexes)
+    assert not (mirror / "index").exists()
+    assert review.command(["git", "--git-dir", str(mirror), "worktree", "list", "--porcelain"]) == registrations
+    assert origin_git("status", "--porcelain") == before
+    assert (original / "LESSONS.md").read_text() == "uncommitted local lessons"
 
 
 @pytest.mark.parametrize("installed", [False, True])
@@ -934,7 +993,7 @@ def test_daily_entry_persists_findings_before_cursor_with_real_git(tmp_path, mon
 
     git("init", "-q", "-b", "main")
     (source / "AGENTS.md").write_text("Frozen fixture instructions\n")
-    (source / ".gitattributes").write_text("AGENTS.md export-ignore\n")
+    frozen_materials(source)
     (source / "example.py").write_text("value = 1\n")
     git("add", ".")
     git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture base")
@@ -943,6 +1002,8 @@ def test_daily_entry_persists_findings_before_cursor_with_real_git(tmp_path, mon
     git("add", "example.py")
     git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture change")
     target = git("rev-parse", "HEAD")
+    (source / "LESSONS.md").write_text("Uncommitted local lessons\n")
+    dirty_before = git("status", "--porcelain")
 
     root = tmp_path / "state"
     root.mkdir()
@@ -974,6 +1035,8 @@ def test_daily_entry_persists_findings_before_cursor_with_real_git(tmp_path, mon
         "plan = json.loads((work.parent / 'plan.json').read_text())\n"
         f"assert plan['cursor'] == {base!r} and plan['target'] == {target!r}\n"
         "assert (work.parents[3] / 'source/AGENTS.md').read_text() == 'Frozen fixture instructions\\n'\n"
+        f"for name, content in {FROZEN_FILES!r}.items():\n"
+        "    assert (work.parents[3] / 'source' / name).read_text() == content\n"
         "prompt = sys.stdin.read()\n"
         "assert '禁止修业务代码' in prompt\n"
         f"assert '按序最多{max_units}个主线单元' in prompt\n"
@@ -1037,7 +1100,8 @@ def test_daily_entry_persists_findings_before_cursor_with_real_git(tmp_path, mon
     assert len(list((root / "repairs").glob("*/task.json"))) == (1 if missing_evidence else 2)
     assert [call for call in calls if call[0] == "github-client"] == list(responses)
     assert forbidden == []
-    assert git("status", "--porcelain") == ""
+    assert git("status", "--porcelain") == dirty_before
+    assert (source / "LESSONS.md").read_text() == "Uncommitted local lessons\n"
 
 
 def test_model_execution_timeout_remains_resumable(tmp_path, monkeypatch):

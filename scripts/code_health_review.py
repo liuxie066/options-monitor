@@ -10,10 +10,11 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import subprocess
 import sys
-import tarfile
+import tempfile
 import time
 
 if __package__:
@@ -76,8 +77,8 @@ def write_json(path: Path, value: dict) -> None:
     write_text(path, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
 
 
-def command(argv: list[str], *, cwd: Path | None = None, timeout: float = 180) -> str:
-    result = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+def command(argv: list[str], *, cwd: Path | None = None, timeout: float = 180, env: dict | None = None) -> str:
+    result = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=timeout, env=env)
     if result.returncode:
         raise RuntimeError(f"{argv[0]} exited {result.returncode}: {result.stderr.strip()[:1500]}")
     return result.stdout.strip()
@@ -284,14 +285,19 @@ def invoke_agent(
     return json.loads(output.read_text(encoding="utf-8"))
 
 
-def restore_review_instructions(git, target: str, source: Path) -> None:
-    # Product archives omit these files, but source review still needs frozen instructions.
-    for name in git("ls-tree", "-r", "--name-only", target).splitlines():
-        if Path(name).name not in {"AGENTS.md", "CLAUDE.md"}:
-            continue
-        destination = source / name
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(git("show", f"{target}:{name}") + "\n", encoding="utf-8")
+def export_frozen_source(git, target: str, source: Path) -> None:
+    # Export the full tree, not the release archive's export-ignore subset.
+    # Keep source for backfill resume without retaining a worktree registration.
+    with tempfile.TemporaryDirectory(prefix=".source-index-", dir=source.parent) as temporary:
+        environment = {**os.environ, "GIT_INDEX_FILE": str(Path(temporary) / "index"),
+                       "GIT_WORK_TREE": str(source.resolve())}
+        git("read-tree", target, env=environment)
+        source.mkdir()
+        try:
+            git("checkout-index", "--all", "--prefix=" + str(source.resolve()) + os.sep, env=environment)
+        except BaseException:
+            shutil.rmtree(source)
+            raise
 
 
 def review_prompt(
@@ -922,8 +928,8 @@ def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False,
             if not mirror.exists():
                 bounded_command([config["git"], "init", "--bare", str(mirror)])
                 bounded_command([config["git"], "--git-dir", str(mirror), "remote", "add", "origin", config["repository_url"]])
-            def git(*args):
-                return bounded_command([config["git"], "--git-dir", str(mirror), *args])
+            def git(*args, **kwargs):
+                return bounded_command([config["git"], "--git-dir", str(mirror), *args], **kwargs)
             git("fetch", "--tags", "origin", "+refs/heads/main:refs/heads/main")
             target = git("rev-parse", "refs/heads/main")
             commits = select_commits(git, state["cursor"], target, config["max_units"])
@@ -946,12 +952,7 @@ def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False,
             source = run / "source"
             review_start = time.monotonic()
             if not dry_run and (commits or smoke or config.get("issues_enabled")):
-                archive = run / "source.tar"
-                git("archive", "--output=" + str(archive), target)
-                source.mkdir()
-                with tarfile.open(archive) as bundle:
-                    bundle.extractall(source, filter="data")
-                restore_review_instructions(git, target, source)
+                export_frozen_source(git, target, source)
             deadline = review_deadline
             changes = run / "changes"
             changes.mkdir()
@@ -1121,19 +1122,14 @@ def run_issue_backfill(root: Path, *, resume_run: Path | None = None) -> dict:
                 if not mirror.exists():
                     bounded([config["git"], "init", "--bare", str(mirror)])
                     bounded([config["git"], "--git-dir", str(mirror), "remote", "add", "origin", config["repository_url"]])
-                def git(*args):
-                    return bounded([config["git"], "--git-dir", str(mirror), *args])
+                def git(*args, **kwargs):
+                    return bounded([config["git"], "--git-dir", str(mirror), *args], **kwargs)
                 git("fetch", "origin", "+refs/heads/main:refs/heads/main")
                 target = git("rev-parse", "refs/heads/main")
                 plan = issues.plan_issues(root, config, target, command, deadline=setup_deadline,
                                           full_scan=True, hydrate=False)
                 source = run / "source"
-                archive = run / "source.tar"
-                git("archive", "--output=" + str(archive), target)
-                source.mkdir()
-                with tarfile.open(archive) as bundle:
-                    bundle.extractall(source, filter="data")
-                restore_review_instructions(git, target, source)
+                export_frozen_source(git, target, source)
                 plan["source_dir"] = str(source)
             write_json(run / "plan.json", plan)
             # Manual backfills are bounded per issue, independently of the daily 12000-second ceiling.
