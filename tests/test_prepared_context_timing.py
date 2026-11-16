@@ -103,3 +103,52 @@ def test_real_run_logger_binds_run_and_omits_unknown_duration(monkeypatch, tmp_p
     assert {row["run_id"] for row in rows} == {"isolated-timing"}
     assert all(row["ts"] and "duration_ms" not in row for row in rows)
     assert rows[2]["data"] == {"phase": "current_projection", "account": "lx", "outcome": "ok"}
+
+
+def test_explicit_phase_cpu_is_opt_in_and_does_not_bind_context(monkeypatch):
+    monkeypatch.setattr(audit, "monotonic", Mock(side_effect=[10, 12, 20, 21]))
+    cpu = Mock(side_effect=[4, 4.25])
+    monkeypatch.setattr(audit, "process_time", cpu)
+    log = SimpleNamespace(safe_event=Mock())
+    with audit.prepared_context_phase("required_data_fetch", runlog=log, measure_cpu=True):
+        with audit.prepared_context_phase("unbound"):
+            pass
+    terminal = log.safe_event.call_args
+    assert terminal.kwargs["duration_ms"] == 2000
+    assert terminal.kwargs["data"]["process_cpu_ms"] == 250
+    assert "process_cpu_ms" not in log.safe_event.call_args_list[0].kwargs["data"]
+    with audit.prepared_context_phase("legacy", runlog=log):
+        pass
+    assert "process_cpu_ms" not in log.safe_event.call_args.kwargs["data"]
+    assert cpu.call_count == 2
+    assert log.safe_event.call_count == 4
+
+
+@pytest.mark.parametrize("failure", ["cpu_start", "cpu_end", "wall_start", "wall_end", "logger"])
+@pytest.mark.parametrize("error_type", [None, ValueError, KeyboardInterrupt])
+def test_explicit_cpu_phase_measurement_failures_preserve_business(monkeypatch, failure, error_type):
+    wall_values = [OSError("clock"), 2] if failure == "wall_start" else [0, OSError("clock")] if failure == "wall_end" else [0, 2]
+    cpu_values = [OSError("cpu"), 2] if failure == "cpu_start" else [0, OSError("cpu")] if failure == "cpu_end" else [0, 1]
+    monkeypatch.setattr(audit, "monotonic", Mock(side_effect=wall_values))
+    monkeypatch.setattr(audit, "process_time", Mock(side_effect=cpu_values))
+    log = SimpleNamespace(safe_event=Mock(side_effect=OSError("disk") if failure == "logger" else None))
+    error = error_type("private detail") if error_type else None
+
+    def operation():
+        with audit.prepared_context_phase("required_data_seal", runlog=log, measure_cpu=True):
+            if error is not None:
+                raise error
+            return 7
+
+    if error is None:
+        assert operation() == 7
+    else:
+        with pytest.raises(error_type) as caught:
+            operation()
+        assert caught.value is error
+    assert log.safe_event.call_count == 2
+    terminal = log.safe_event.call_args
+    assert terminal.args[1] == ("error" if error else "ok")
+    assert terminal.kwargs["duration_ms"] == (None if failure.startswith("wall") else 2000)
+    assert terminal.kwargs["data"]["process_cpu_ms"] == (None if failure.startswith("cpu") else 1000)
+    assert "private detail" not in str(log.safe_event.call_args_list)

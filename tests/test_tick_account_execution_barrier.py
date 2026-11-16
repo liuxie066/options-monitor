@@ -554,7 +554,9 @@ def test_barrier_prefetches_once_and_seals_before_account_submission(
     outcome = mod.run_tick_account_execution(request)
     phases = [e for e in request.runlog.events if e.get("step") == "prepared_context_phase"]
     completed = [e for e in phases if e["status"] == "ok"]
-    assert phases[0]["data"]["phase"] == phases[-1]["data"]["phase"] == "post_portfolio_prepare"
+    original_phases = [e for e in phases if not e["data"]["phase"].startswith("required_data_")]
+    assert original_phases[0]["data"]["phase"] == original_phases[-1]["data"]["phase"] == "post_portfolio_prepare"
+    assert all("process_cpu_ms" not in e["data"] for e in original_phases)
     assert len([e for e in completed if e["data"]["phase"] == "ledger_read_a"]) == 1
     assert "outside_scope" not in {e["data"]["phase"] for e in phases}
     for phase in ("portfolio_authority", "portfolio_config", "portfolio_context", "prepared_option_authority"):
@@ -2131,6 +2133,88 @@ def test_real_holdings_fallback_shadow_publishes_replays_and_audits_each_account
     assert [event["status"] for event in audit.events] == ["error", "ok", "error", "ok"]
     assert all("error_type" not in event["extra"] for event in audit.events)
     assert [event["status"] for event in runlog.events if event["step"] == "runtime_portfolio_snapshot"] == ["degraded", "ok", "degraded", "ok"]
+
+
+@pytest.mark.parametrize("calendar_mode,failed_phase,cancelled", [
+    ("skip", None, False),
+    ("ok", None, False),
+    ("degraded", None, False),
+    *[("ok", phase, cancelled) for phase in (
+        "required_data_fetch", "required_data_calendar",
+        "required_data_seal", "required_data_publish_cleanup",
+    ) for cancelled in (False, True)],
+])
+def test_fetch_phase_boundaries_preserve_barrier_and_failure_semantics(
+    monkeypatch, tmp_path, calendar_mode, failed_phase, cancelled,
+):
+    from src.application import tick_account_execution as mod
+
+    request = _lx_request(tmp_path)
+    error = KeyboardInterrupt("private failure") if cancelled else OSError("private failure")
+    order = []
+    phases = ["required_data_fetch", "required_data_calendar", "required_data_seal", "required_data_publish_cleanup"]
+
+    def enter(phase):
+        timing = [e for e in request.runlog.events if e["step"] == "prepared_context_phase"]
+        assert timing[-1]["status"] == "start"
+        assert timing[-1]["data"]["phase"] == phase
+        assert any(e["data"]["phase"] == "post_portfolio_prepare" and e["status"] == "ok" for e in timing)
+        order.append(phase)
+        if phase == failed_phase:
+            raise error
+
+    def fetch(**_kwargs):
+        enter("required_data_fetch")
+        return {"global_required_data_plan": {"plan_id": "a" * 64, "symbols": []}}
+
+    def calendar(**_kwargs):
+        enter("required_data_calendar")
+        return "calendar_enrichment_timeout" if calendar_mode == "degraded" else None
+
+    seal = _seal_stub()
+
+    def timed_seal(**kwargs):
+        enter("required_data_seal")
+        return seal(**kwargs)
+
+    def publish(**_kwargs):
+        enter("required_data_publish_cleanup")
+
+    monkeypatch.setattr(mod, "seal_run_fx_snapshot", lambda **_kw: ({"pairs": {}}, "f" * 64))
+    monkeypatch.setattr(mod, "prepare_portfolio_contexts", _fake_prepare)
+    monkeypatch.setattr(mod, "_build_close_advice_barrier_plan", lambda **kw: (
+        kw["candidate_config"], None if calendar_mode == "skip" else tmp_path / "isolated-plan.json",
+    ))
+    monkeypatch.setattr(mod, "prefetch_required_data", fetch)
+    monkeypatch.setattr(mod, "enrich_close_advice_required_data_plan_bounded", calendar)
+    monkeypatch.setattr(mod, "seal_required_data_snapshot", timed_seal)
+    monkeypatch.setattr(mod, "_publish_prefetch_summary_to_accounts", publish)
+    cleanup = Mock()
+    monkeypatch.setattr(mod, "_retire_required_data_shadows_after_manifest", cleanup)
+    submit = Mock(side_effect=lambda *, request, **_kw: _outcome(request.acct))
+    monkeypatch.setattr(mod, "run_one_account", submit)
+    if failed_phase and cancelled:
+        with pytest.raises(KeyboardInterrupt) as caught:
+            mod.run_tick_account_execution(request)
+        assert caught.value is error
+    else:
+        outcome = mod.run_tick_account_execution(request)
+        assert outcome.snapshot_status == ("unavailable" if failed_phase else "complete")
+        assert outcome.ran_pipeline_accounts == ([] if failed_phase else ["lx"])
+    expected = [p for p in phases if not (p == "required_data_calendar" and calendar_mode == "skip")]
+    if failed_phase:
+        expected = expected[:expected.index(failed_phase) + 1]
+    assert order == expected
+    timing = [e for e in request.runlog.events if e["step"] == "prepared_context_phase" and e["data"]["phase"] in phases]
+    assert [(e["data"]["phase"], e["status"]) for e in timing] == [
+        (p, status) for p in expected for status in ("start", "error" if p == failed_phase else "ok")
+    ]
+    assert all(isinstance(e["data"]["process_cpu_ms"], int) for e in timing if e["status"] != "start")
+    assert "private failure" not in str(timing)
+    assert submit.call_count == (0 if failed_phase else 1)
+    assert cleanup.call_count == (0 if failed_phase else 1)
+    if calendar_mode == "degraded":
+        assert any(e["step"] == "close_advice_calendar" and e["status"] == "degraded" for e in request.runlog.events)
 
 
 def test_scheduler_skip_does_not_emit_preparation_timings(monkeypatch, tmp_path):
