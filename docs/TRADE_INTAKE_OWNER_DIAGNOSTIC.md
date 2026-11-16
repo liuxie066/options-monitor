@@ -4,9 +4,9 @@
 
 ## 范围和默认关闭
 
-`OwnerDiagnostic.from_environment()`只在Linux且显式设置`OM_OWNER_DIAGNOSTIC_SOCKET`为固定`/run/om-owner-diagnostics-<effective_uid>/om-owner-top-*/owner.sock`规范绝对路径（拒`..`和额外层级）时创建一次性客户端；未设置时返回None，不做诊断文件/socket操作、不读取业务对象。没有新线程/服务/持久化诊断日志。未来源发布以`python -B -m src.application.trades.owner_diagnostic --socket ... --pid ... --start-ticks ...`从受控release目录显式运行接收入口；`scripts/receive_owner_diagnostic.py`只是本地开发薄wrapper，被既有export-ignore排除，不依赖它出现在安装包中，不扩大发布白名单。环境项只包含临时诊断端点路径，不存凭据；不改变systemd-creds合同。不能把开发授权当成设置生产环境项的许可。
+`OwnerDiagnostic.from_environment()`只在Linux且显式设置`OM_OWNER_DIAGNOSTIC_SOCKET`为固定`/run/om-owner-diagnostics-<effective_uid>/om-owner-top-*/owner.sock`规范绝对路径（拒`..`和额外层级）时创建一次性客户端；未设置时返回None，不做诊断文件/socket操作、不读取业务对象。没有新线程/服务/持久化诊断日志。来源发布以`python -B -m src.application.trades.owner_diagnostic --socket ... --pid ... --start-ticks ...`从受控release目录显式运行接收入口；`scripts/receive_owner_diagnostic.py`只是本地开发薄wrapper，被既有export-ignore排除，不依赖它出现在安装包中，不扩大发布白名单。环境项只包含临时诊断端点路径，不存凭据；不改变systemd-creds合同。不能把开发授权当成设置生产环境项的许可。
 
-服务在已有自然heartbeat完成、`inbox_wakeup.wait(1)`前检查一次。多source共用一个短claim门闩，门闩释放后才取快照/遍历；不持业务RLock/SQLite事务。只允许**一个source**赢得一次连接尝试，之后成功或失败均done、不重连。启用但端点未出现时只借既有heartbeat检查，首个自然检查起120秒后停止；不是新轮询线程，也不人为触发业务。
+服务在已有自然heartbeat完成、`inbox_wakeup.wait(1)`前检查一次。多source共用一个短claim门闩，门闩释放后才取快照/遍历；不持业务RLock/SQLite事务。只允许**一个source**赢得一次连接尝试，之后成功或失败均done、不重连。启用但端点未出现时只借既有heartbeat检查，直到显式receiver出现、取消或进程退出；不再从启动后首个检查计120秒自动关闭。已启用实例因此持续承担每个自然heartbeat的一次路径检查，不新增线程或提频，也不人为触发业务。120秒仅是操作者显式启动receiver后的最长接收等待，不是遍历或业务端到端硬限时。
 
 `/run/om-owner-diagnostics-<service_uid>/om-owner-top-<唯一任务标识>/owner.sock`必须由接收器创建，目录同uid/0700、socket同uid/0600，拒绝路径任一层symlink。Linux `SO_PEERCRED`验证同uid，接收器还验证对端PID；请求固定schema/PID/start_ticks/随机request_id，生产端比较自身`/proc`启动身份。无任意代码、取根表达式、任意路径读写或自定义budget请求。
 
@@ -28,15 +28,27 @@
 
 未带tracemalloc的默认请求每shape3次，本地完整流程约0.1–100.4ms；近5万但未到节点上限时可能需遍历共享根第二遍，100ms先截止。1ms背景线程最大观测间隔约9ms，只是本地GIL/调度关联探针，不是生产writer等待或绝对暂停上限。样本少，不能报稳定p95。完整逐样本数据、扩容点、RSS/释放和方法见本任务`docs/gateflow/trade-intake-owner-top-20261115/`中的实测报告与原始JSONL；过程产物按仓库规则不跟踪。
 
+## 当前局部回归补强（本地候选，未发布）
+
+遍历迭代检测到mutation时，保留正在访问root的类型/字节部分统计并标`complete=false`；后续未访问root不补造记录。`entries`仍是该root外层条目数，不是已完成数，不能按steps或entries计算覆盖率。schema1、三根范围、单次状态与所有预算不变。本次未改写遍历器，也未启用任何生产诊断。
+
+本地回归补充极小图的精确builtin字节与alias去重、真实mutation保留partial、深度64/65及默认预算、自然heartbeat→真实本地Unix socket→严格接收器整链。Mac上的peer/proc仍显式shim，不称Linux生产通过；tracemalloc默认时限截断样本的峰值不能当50k节点最坏开销。生产启用/窗口状态、代表性预热、额外RSS上界仍需另作决定。
+
 ## 未来启用与回退runbook（仅文档，所有生产步骤待另批）
 
 1. **绑定可恢复基线**：执行前重新核主机、active symlink、已发布VERSION/source hash、业务PID/start_ticks、service用户/健康/激活状态、timer/auto-upgrade状态、runtime root和service profile。记录authoring config、生成runtime config和systemd-creds的路径/引用及非秘密校验依据；不复制秘密、真实账本或业务正文到研究目录。核已保留的原release/venv与插件完整可运行，`om update rollback`默认preview能够选择它。旧4.6.37只是历史目标，不能在执行时盲用。
 2. **确认启用前关闭**：无诊断环境项、无接收器端点，默认函数返回None；源版本无临时诊断或禁用时不产生连接。仅本地开发版不能覆盖生产4.6.37目录或借其VERSION冒充同一release；未来发布/部署需要独立明确授权及受控、可回退版本身份。先预览实际apply/restart/rollback操作与服务影响，不能将本地审核pass当部署票。
 3. **一次自然窗口**：普通service uid不能直接在root:0755的`/run`建目录；不能改用root接收器，因为peer/目录uid必须与service一致。未来先单独明确授权管理员bootstrap唯一固定base `/run/om-owner-diagnostics-<service_uid>`：仅不存在且`/run`已核tmpfs/non-symlink时，按核定uid/gid创建exact目录、chown为service用户、mode0700；已有base只能核对dir/non-symlink/uid/0700，不自动chown或覆盖不匹配目录。此为额外生产目录操作，本轮未执行。接收器以service用户在该base内独占创建本次`om-owner-top-<id>`子目录（已有child拒绝），创建socket；代码在mkdir child之前验证base，env/CLI只接受当前effective_uid固定layout。接收器在SSH前台运行，stdout流回本地0600文件，不走journal/审计/源根盘日志；只向本机Unix socket通信。绑定目标PID/start，生产设置环境项和所需受控重启须明确批准；重启会丢当前堆，需自然预热后新PID的可比窗口，不能追溯原609MiB。未连接、peer/身份错误或读取超时只消耗本次请求，业务照常，不触发回填/对账/通知。
-4. **停止新请求/取消**：接收器正常返回、Python异常展开或Ctrl-C会在finally尝试清端点；SIGTERM/SIGHUP、SSH进程硬中断或崩溃不保证finally，直接按下一条遗留端点核验分支处理；尚未连接的客户端继续自然检查到120秒窗口届满，不能重新创建相同端点当隐式重试。已经连接但接收器退出时，生产客户端有界recv/send错误后done。已经开始遍历时，断开接收器不保证即时中断遍历；已有stop_event取消在每步检查，但不能为诊断取消而停止整个业务服务。最迟合作式deadline后退出遍历，原生调用/调度/释放延迟不保证上界；不得发送SIGKILL/SIGUSR或强制GC。
+4. **停止新请求/取消**：接收器正常返回、Python异常展开或Ctrl-C会在finally尝试清端点；SIGTERM/SIGHUP、SSH进程硬中断或崩溃不保证finally，直接按下一条遗留端点核验分支处理；尚未claim的客户端仍会持续借自然heartbeat检查，直至取消或进程退出；不能把接收器120秒超时视作客户端自动停用，不能重新创建相同端点当隐式重试。已经连接但接收器退出时，生产客户端有界recv/send错误后done。已经开始遍历时，断开接收器不保证即时中断遍历；已有stop_event取消在每步检查，但不能为诊断取消而停止整个业务服务。最迟合作式deadline后退出遍历，原生调用/调度/释放延迟不保证上界；不得发送SIGKILL/SIGUSR或强制GC。
 5. **精确临时资源归属**：接收器只删除它创建且inode仍匹配的socket和仍匹配的本次空child目录；固定bootstrap base不是本次资源，默认不删除。若以后确认无active owner/child且另获清理授权，才可单独移除精确空base；不删替换对象或非空目录，不动业务数据。若进程崩溃留下目录，后续人工核对任务ID、owner、dev/inode、无活动接收器和连接后，另获清理授权才删精确端点；不可`rm -rf /run/...`广泛清理。生产客户端不写临时脚本/heap/log，不创建source文件。
 6. **撤除代码不是done标志**：done仅阻止当前进程再次采集。未来恢复必须去除本次诊断环境覆盖（只移除本项/本次drop-in，不动secret或其他配置），用项目支持的`om update rollback --repo-root <current-symlink> --runtime-root <bound-runtime> --to-version <verified-published-baseline>`先preview，核planned operations和影响，再凭明确授权加`--confirm`执行受控回退/重启。需要保留原timer激活状态时按已有`--preserve-activation-state`合同，不自行关闭auto-upgrade timer。不能无版本原地热改代码/手动拨symlink来“卸载”。
 7. **恢复验证**：独立readback active symlink/VERSION/hash、解释器/插件、service健康/新PID-start、诊断开关关闭、无本次端点/连接，以及现有update verify/恢复状态。原ledger、幂等水位、outbox/pending/inflight只走原恢复合同，不清队列/改SQLite或手工推进通知。观察自然恢复摘要，发现积压/通知不明状态按原runbook处理，不用诊断重放业务。
 8. **失败分支**：部分安装或安装失败不等于已切换，先读实际active/profile与原回执，再走受控补偿；接收失败/超时/预算截断仅得到unknown/下界，无自动重试或预算提高；auto-upgrade若在窗口改变active版本/PID则停止本次归因、保留已得结果为旧版本，不能自动关闭timer或强行回退。回退preview不安全、原release不可用或需要新权限时停止报告，不能跳过保护。
 
 本轮没有发布、生产安装/重启/附着/注入、生产socket、生产对象Top采集、提交或推送。下一步是用户审阅实测与回退，再决定是否授权指定版本/环境的交付和取证；不是自动进入cache改造。
+
+## 自然预热后显式请求（本地候选，未发布）
+
+receiver必须使用该进程启动时绑定的同一个固定端点；不动态修改进程环境或自动发现路径。进程首次见到端点即消耗共享done，过期socket、权限/身份/连接失败也不重试。若receiver等待超时且已精确清理、source从未claim，不算消费客户端机会；操作者本次操作仍应停止，不自动再开receiver。业务忙而未heartbeat时只会超时，不强制唤醒/延长窗口。
+
+旧启动120秒窗口约束已移除，receiver的120秒截止、原通信超时、schema1和三根/100ms/50k/8MiB/depth64均不变；没有新的arm文件、控制服务或配置键。此变化需新版本生效，重启后新堆不能还原历史607MiB；晚请求也不保证生产缓存有代表性或在预算内完整。仅本地适配，不授权发布、启用、重启或生产采集。
