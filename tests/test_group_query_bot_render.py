@@ -290,10 +290,10 @@ def test_close_and_roll_convert_quote_times_to_the_market_zone():
     assert zone_text in roll
 
 
-def test_clarification_note_is_appended_exactly_once():
+def test_clarification_finalization_removes_legacy_note_without_appending():
     text = finalize_clarification(f"请补充张数。\n\n{CLARIFICATION_NOTE}")
-    assert text == f"请补充张数。\n\n{CLARIFICATION_NOTE}"
-    assert text.count(CLARIFICATION_NOTE) == 1
+    assert text == "请补充张数。"
+    assert CLARIFICATION_NOTE not in text
 
 
 def test_strip_clarification_note_removes_variants_and_trailing_blanks():
@@ -439,3 +439,10 @@ def test_nflx_us_afternoon_keeps_identity_times_raw_state_and_guard():
     assert check_result_reply("NFLX 最新价85，美股交易时段。", method="query_quotes",
                               data=data, fact_card_text=card, user_text="NFLX行情",
                               now=datetime(2026, 11, 13, 15, 6, tzinfo=timezone.utc)).ok
+
+
+def test_clarification_cleanup_preserves_specific_failure_and_data_notices():
+    text = "行情服务当前不可用（请稍后重试）。报价为最近已知，不是当前实时价。"
+    assert finalize_clarification(text) == text
+    assert finalize_clarification(CLARIFICATION_NOTE) == ""
+    assert finalize_clarification(None) == ""

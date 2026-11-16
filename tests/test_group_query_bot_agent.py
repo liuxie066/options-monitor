@@ -221,7 +221,7 @@ def test_pure_clarification_is_admitted_and_rate_limited(tmp_path):
 
     assert first.status == "clarification"
     assert first.text.startswith("请告诉我标的。")
-    assert "未执行实时查询" in first.text
+    assert "未执行实时查询" not in first.text
     assert second.status == "rate_limited"
     assert second.reason_codes == ("rate_limited",)
     assert "请求过于频繁" in second.text
@@ -411,7 +411,7 @@ def test_only_the_five_fixed_tools_exist_and_unknown_calls_are_refused(tmp_path)
     reply = agent.handle_event(_event(), "查一下账户")
 
     assert api.calls == []
-    assert "未执行实时查询" in reply.text
+    assert "未执行实时查询" not in reply.text
 
 
 def test_general_answer_uses_host_tool_and_skips_the_clarification_note(tmp_path):
@@ -557,7 +557,7 @@ def test_invalid_general_answer_falls_back_to_a_clarification(tmp_path):
     reply = agent.handle_event(_event(), "随便问问")
 
     assert reply.status == "clarification"
-    assert "未执行实时查询" in reply.text
+    assert "未执行实时查询" not in reply.text
     assert api.calls == []
 
 
@@ -591,7 +591,7 @@ def test_host_request_identity_is_not_model_supplied(tmp_path):
     reply = agent.handle_event(_event(), "NVDA 现价")
 
     assert api.calls == []
-    assert "未执行实时查询" in reply.text
+    assert "未执行实时查询" not in reply.text
 
 
 def test_invented_number_is_rejected_and_the_model_rewrites(tmp_path):
@@ -891,7 +891,7 @@ def test_clarification_note_is_not_accumulated_across_turns(tmp_path):
 
     reply = agent.handle_event(_event(), "NVDA 180 put 2 张")
 
-    assert reply.text.count(CLARIFICATION_NOTE) == 1
+    assert CLARIFICATION_NOTE not in reply.text
     assert reply.text.startswith("请补充张数。")
     # The replayed history must not carry the note into the next prompt.
     replayed = [item for item in model.calls[0]["messages"]
@@ -991,3 +991,29 @@ def test_optional_tool_parameters_declare_defaults():
     assert len(limit_defaults) == 3
     assert all(field.get("default") == 10 for field in limit_defaults)
     assert all("可选" in text for text in optional_descriptions)
+
+
+@pytest.mark.parametrize("responses,expected", [
+    ([_text_response("请确认标的。\n（未执行实时查询，以上为澄清或说明，不含实时数据。）")],
+     "请确认标的。"),
+    ([_tool_response("ask_user_question", {
+        "question": "你想查行情还是找候选？（未执行实时查询，以上为澄清或说明，不含实时数据。）",
+        "options": ["行情", "卖出Put"],
+    })], "你想查行情还是找候选？"),
+    ([_tool_response("query_candidates", {"symbol": "NFLX"}), _text_response("")], "卖出 Put"),
+    ([_tool_response("answer_general", {
+        "answer": "可先确认查询范围。\n（未执行实时查询，以上为澄清或说明，不含实时数据。）",
+    })], "可先确认查询范围。"),
+    ([_text_response("（未执行实时查询，以上为澄清或说明，不含实时数据。）")], "你想查行情"),
+])
+def test_clarifications_fallbacks_and_explanations_have_no_fixed_note(tmp_path, responses, expected):
+    agent, conversations = _agent(tmp_path, model=_ScriptedModel(responses))
+    reply = agent.handle_event(_event(), "帮我确认一下")
+    assert expected in reply.text
+    assert "未执行实时查询" not in reply.text
+    assert "不含实时数据" not in reply.text
+    assert agent.api_client.calls == []
+    turns = conversations.context_turns(_event().scope_sha256("gq"), NOW,
+                                        max_turns=10, max_tokens=10000, estimate=_estimate)
+    assert all("未执行实时查询" not in item["content"]
+               for turn in turns for item in turn["messages"] if item["role"] == "assistant")

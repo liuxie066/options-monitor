@@ -11,6 +11,7 @@ import re
 from typing import Any
 from zoneinfo import ZoneInfo
 
+# Legacy text retained only for cleaning model/history output and reply guards.
 CLARIFICATION_NOTE = "（未执行实时查询，以上为澄清或说明，不含实时数据。）"
 
 ROLL_METHODS = frozenset({"evaluate_roll_down", "evaluate_roll_up"})
@@ -250,7 +251,7 @@ def _strip_disclaimer_variants(text: str) -> str:
 
     Only parenthetical or whole-line disclaimer copies are removed, so a
     genuine clarification sentence such as “我还没有执行实时查询，先确认……” keeps
-    its meaning.  The host appends exactly one note afterwards.
+    its meaning. The host no longer appends a replacement note.
     """
     cleaned = str(text)
     while CLARIFICATION_NOTE in cleaned:
@@ -281,11 +282,8 @@ def strip_clarification_note(text: str | None) -> str:
 
 
 def finalize_clarification(text: str | None) -> str:
-    """Append exactly one disclaimer to a clarification reply."""
-    prose = strip_clarification_note(text)
-    if not prose:
-        return CLARIFICATION_NOTE
-    return f"{prose}\n\n{CLARIFICATION_NOTE}"
+    """Clean a clarification reply without appending a generic disclaimer."""
+    return strip_clarification_note(text)
 
 
 def _number(value: Any, digits: int = 2) -> str:
