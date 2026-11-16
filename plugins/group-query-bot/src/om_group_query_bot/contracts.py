@@ -65,7 +65,8 @@ _MAX_CONTRACTS = 100_000
 class ContractError(ValueError):
     """A controlled transport or business-input rejection."""
 
-    def __init__(self, code: str, message: str, *, retry_after_seconds: int | None = None):
+    def __init__(self, code: str, message: str, *, retry_after_seconds: int | None = None,
+                 fields: tuple[str, ...] = (), category: str = "invalid"):
         if code not in ERROR_STATUS:
             raise ValueError(f"unknown group-query error code {code!r}")
         super().__init__(message)
@@ -73,6 +74,8 @@ class ContractError(ValueError):
         self.message = message
         self.status = ERROR_STATUS[code]
         self.retry_after_seconds = retry_after_seconds
+        self.fields = fields
+        self.category = category
 
 
 @dataclass(frozen=True)
@@ -142,29 +145,32 @@ class NormalizedRequest:
         return identity.market if identity is not None else ""
 
 
-def _reject(message: str) -> ContractError:
-    return ContractError("INPUT_ERROR", message)
+def _reject(message: str, *, fields: tuple[str, ...] = (),
+            category: str = "invalid") -> ContractError:
+    return ContractError("INPUT_ERROR", message, fields=fields, category=category)
 
 
 def _object(value: Any, keys: set[str], name: str) -> dict[str, Any]:
     if not isinstance(value, dict):
-        raise _reject(f"{name} must be an object")
+        raise _reject(f"{name} must be an object", fields=(name,))
     unknown = sorted(set(value) - keys)
     missing = sorted(key for key in keys if key not in value)
     if unknown:
-        raise _reject(f"{name} contains unsupported fields: {', '.join(unknown)}")
+        raise _reject(f"{name} contains unsupported fields: {', '.join(unknown)}", fields=(name,))
     if missing:
-        raise _reject(f"{name} is missing fields: {', '.join(missing)}")
+        raise _reject(f"{name} is missing fields: {', '.join(missing)}",
+                      fields=tuple(key if name == "parameters" else f"{name}.{key}"
+                                   for key in missing), category="missing")
     return dict(value)
 
 
 def _text(value: Any, name: str) -> str:
     if not isinstance(value, str):
-        raise _reject(f"{name} must be a string")
+        raise _reject(f"{name} must be a string", fields=(name,))
     if not value or value != value.strip():
-        raise _reject(f"{name} must be a nonempty string without surrounding whitespace")
+        raise _reject(f"{name} must be a nonempty string without surrounding whitespace", fields=(name,))
     if len(value) > _MAX_TEXT:
-        raise _reject(f"{name} is too long")
+        raise _reject(f"{name} is too long", fields=(name,))
     return value
 
 
@@ -186,49 +192,49 @@ def _optional_text(value: Any, name: str) -> str | None:
 
 def _finite(value: Any, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise _reject(f"{name} must be a finite number")
+        raise _reject(f"{name} must be a finite number", fields=(name,))
     parsed = float(value)
     if not math.isfinite(parsed):
-        raise _reject(f"{name} must be a finite number")
+        raise _reject(f"{name} must be a finite number", fields=(name,))
     return parsed
 
 
 def _positive(value: Any, name: str) -> float:
     parsed = _finite(value, name)
     if parsed <= 0:
-        raise _reject(f"{name} must be positive")
+        raise _reject(f"{name} must be positive", fields=(name,))
     return parsed
 
 
 def _integer(value: Any, name: str, *, minimum: int, maximum: int) -> int:
     if isinstance(value, bool) or type(value) is not int:
-        raise _reject(f"{name} must be an integer")
+        raise _reject(f"{name} must be an integer", fields=(name,))
     if not minimum <= value <= maximum:
-        raise _reject(f"{name} must be between {minimum} and {maximum}")
+        raise _reject(f"{name} must be between {minimum} and {maximum}", fields=(name,))
     return value
 
 
 def _iso_date(value: Any, name: str) -> str:
     if not isinstance(value, str):
-        raise _reject(f"{name} must use YYYY-MM-DD")
+        raise _reject(f"{name} must use YYYY-MM-DD", fields=(name,))
     try:
         parsed = date.fromisoformat(value)
     except ValueError as exc:
-        raise _reject(f"{name} must use YYYY-MM-DD") from exc
+        raise _reject(f"{name} must use YYYY-MM-DD", fields=(name,)) from exc
     if parsed.isoformat() != value:
-        raise _reject(f"{name} must use YYYY-MM-DD")
+        raise _reject(f"{name} must use YYYY-MM-DD", fields=(name,))
     return value
 
 
 def utc_datetime(value: Any, name: str) -> datetime:
     if not isinstance(value, str):
-        raise _reject(f"{name} must be an ISO-8601 timestamp with an offset")
+        raise _reject(f"{name} must be an ISO-8601 timestamp with an offset", fields=(name,))
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError as exc:
-        raise _reject(f"{name} must be an ISO-8601 timestamp with an offset") from exc
+        raise _reject(f"{name} must be an ISO-8601 timestamp with an offset", fields=(name,)) from exc
     if parsed.tzinfo is None:
-        raise _reject(f"{name} must be an ISO-8601 timestamp with an offset")
+        raise _reject(f"{name} must be an ISO-8601 timestamp with an offset", fields=(name,))
     return parsed.astimezone(timezone.utc)
 
 
@@ -241,18 +247,18 @@ def canonical_market_symbol(value: Any) -> str:
     """
     raw = _text(value, "symbol")
     if looks_like_option_contract_label(raw):
-        raise _reject("symbol must be the underlier; put the option contract in contract")
+        raise _reject("symbol must be the underlier; put the option contract in contract", fields=("symbol",))
     identity = resolve_symbol_identity(raw)
     if identity is None or identity.market not in ALL_MARKETS:
-        raise _reject(f"symbol is not a recognized US or HK security: {raw}")
+        raise _reject(f"symbol is not a recognized US or HK security: {raw}", fields=("symbol",))
     return identity.canonical
 
 
 def _option_contract(value: Any) -> dict[str, Any]:
     body = _object(value, {"option_type", "expiration", "strike"}, "contract")
     option_type = body["option_type"]
-    if option_type not in {"put", "call"}:
-        raise _reject("contract.option_type must be put or call")
+    if not isinstance(option_type, str) or option_type not in {"put", "call"}:
+        raise _reject("contract.option_type must be put or call", fields=("contract.option_type",))
     return {
         "option_type": str(option_type),
         "expiration": _iso_date(body["expiration"], "contract.expiration"),
@@ -260,13 +266,13 @@ def _option_contract(value: Any) -> dict[str, Any]:
     }
 
 
-def _scenario_position(value: Any, *, option_type: str) -> dict[str, Any]:
+def _scenario_position(value: Any, *, option_type: str | None = None) -> dict[str, Any]:
     body = _object(value, {"symbol", "contract", "side", "contracts"}, "position")
     if body["side"] != "short":
-        raise _reject("position.side must be short")
+        raise _reject("position.side must be short", fields=("position.side",))
     contract = _option_contract(body["contract"])
-    if contract["option_type"] != option_type:
-        raise _reject(f"position.contract.option_type must be {option_type}")
+    if option_type is not None and contract["option_type"] != option_type:
+        raise _reject(f"position.contract.option_type must be {option_type}", fields=("position.contract.option_type",))
     return {
         "symbol": canonical_market_symbol(body["symbol"]),
         "contract": contract,
@@ -279,11 +285,11 @@ def _scenario_position(value: Any, *, option_type: str) -> dict[str, Any]:
 def _opening_premium(value: Any) -> dict[str, Any]:
     body = _object(value, {"amount", "unit", "currency"}, "opening_premium")
     unit = body["unit"]
-    if unit not in {"per_share", "per_contract", "total"}:
-        raise _reject("opening_premium.unit must be per_share, per_contract or total")
+    if not isinstance(unit, str) or unit not in {"per_share", "per_contract", "total"}:
+        raise _reject("opening_premium.unit must be per_share, per_contract or total", fields=("opening_premium.unit",))
     currency = body["currency"]
-    if currency not in {"USD", "HKD"}:
-        raise _reject("opening_premium.currency must be USD or HKD")
+    if not isinstance(currency, str) or currency not in {"USD", "HKD"}:
+        raise _reject("opening_premium.currency must be USD or HKD", fields=("opening_premium.currency",))
     return {
         "amount": _positive(body["amount"], "opening_premium.amount"),
         "unit": str(unit),
@@ -293,21 +299,21 @@ def _opening_premium(value: Any) -> dict[str, Any]:
 
 def _dte_range(value: Any) -> list[int]:
     if not isinstance(value, list) or len(value) != 2:
-        raise _reject("dte must be a two-element [min_dte, max_dte] array")
+        raise _reject("dte must be a two-element [min_dte, max_dte] array", fields=("dte",))
     minimum = _integer(value[0], "dte[0]", minimum=1, maximum=365)
     maximum = _integer(value[1], "dte[1]", minimum=1, maximum=365)
     if minimum > maximum:
-        raise _reject("dte must satisfy min_dte <= max_dte")
+        raise _reject("dte must satisfy min_dte <= max_dte", fields=("dte",))
     return [minimum, maximum]
 
 
 def _delta_range(value: Any) -> list[float]:
     if not isinstance(value, list) or len(value) != 2:
-        raise _reject("abs_delta_range must be a two-element [min, max] array")
+        raise _reject("abs_delta_range must be a two-element [min, max] array", fields=("abs_delta_range",))
     minimum = _finite(value[0], "abs_delta_range[0]")
     maximum = _finite(value[1], "abs_delta_range[1]")
     if not 0 <= minimum <= maximum <= 1:
-        raise _reject("abs_delta_range must satisfy 0 <= min <= max <= 1")
+        raise _reject("abs_delta_range must satisfy 0 <= min <= max <= 1", fields=("abs_delta_range",))
     return [minimum, maximum]
 
 
@@ -318,7 +324,8 @@ def _search_bounds(value: Any, *, strike_key: str) -> dict[str, Any]:
     if unknown:
         raise _reject(f"search_bounds contains unsupported fields: {', '.join(unknown)}")
     if "max_new_expiration" not in value:
-        raise _reject("search_bounds is missing fields: max_new_expiration")
+        raise _reject("search_bounds is missing fields: max_new_expiration",
+                      fields=("search_bounds.max_new_expiration",), category="missing")
     result: dict[str, Any] = {
         "max_new_expiration": _iso_date(value["max_new_expiration"],
                                         "search_bounds.max_new_expiration"),
@@ -348,22 +355,23 @@ def _parameters(method: str, value: Any) -> dict[str, Any]:
         required = {"symbol", "strategy"}
         missing = sorted(required - set(body))
         if missing:
-            raise _reject(f"parameters is missing fields: {', '.join(missing)}")
+            raise _reject(f"parameters is missing fields: {', '.join(missing)}",
+                          fields=tuple(missing), category="missing")
         strategy = body["strategy"]
-        if strategy not in {"short_put", "short_call"}:
-            raise _reject("strategy must be short_put or short_call")
+        if not isinstance(strategy, str) or strategy not in {"short_put", "short_call"}:
+            raise _reject("strategy must be short_put or short_call", fields=("strategy",))
         result = {"symbol": canonical_market_symbol(body["symbol"]),
                   "strategy": str(strategy)}
         if "dte" in body:
             result["dte"] = _dte_range(body["dte"])
         if "strike" in body and ("min_strike" in body or "max_strike" in body):
-            raise _reject("strike cannot be combined with min_strike or max_strike")
+            raise _reject("strike cannot be combined with min_strike or max_strike", fields=("strike",))
         for name in ("strike", "min_strike", "max_strike"):
             if name in body:
                 result[name] = _positive(body[name], name)
         if ("min_strike" in result and "max_strike" in result
                 and result["min_strike"] > result["max_strike"]):
-            raise _reject("min_strike must not exceed max_strike")
+            raise _reject("min_strike must not exceed max_strike", fields=("min_strike",))
         if "abs_delta_range" in body:
             result["abs_delta_range"] = _delta_range(body["abs_delta_range"])
         result["limit"] = _integer(body.get("limit", 10), "limit", minimum=1, maximum=50)
@@ -375,16 +383,10 @@ def _parameters(method: str, value: Any) -> dict[str, Any]:
             raise _reject(f"parameters contains unsupported fields: {', '.join(unknown)}")
         missing = sorted({"position", "opening_premium"} - set(value))
         if missing:
-            raise _reject(f"parameters is missing fields: {', '.join(missing)}")
-        position_body = value["position"]
-        if not isinstance(position_body, dict):
-            raise _reject("position must be an object")
-        contract = position_body.get("contract")
-        if not isinstance(contract, dict) or contract.get("option_type") not in {"put", "call"}:
-            raise _reject("position.contract.option_type must be put or call")
+            raise _reject(f"parameters is missing fields: {', '.join(missing)}",
+                          fields=tuple(missing), category="missing")
         result = {
-            "position": _scenario_position(position_body,
-                                           option_type=str(contract["option_type"])),
+            "position": _scenario_position(value["position"]),
             "opening_premium": _opening_premium(value["opening_premium"]),
         }
         if "opened_at" in value:
@@ -397,7 +399,8 @@ def _parameters(method: str, value: Any) -> dict[str, Any]:
             raise _reject(f"parameters contains unsupported fields: {', '.join(unknown)}")
         missing = sorted({"position", "search_bounds"} - set(value))
         if missing:
-            raise _reject(f"parameters is missing fields: {', '.join(missing)}")
+            raise _reject(f"parameters is missing fields: {', '.join(missing)}",
+                          fields=tuple(missing), category="missing")
         option_type = "put" if method == "evaluate_roll_down" else "call"
         strike_key = "min_new_strike" if option_type == "put" else "max_new_strike"
         position = _scenario_position(value["position"], option_type=option_type)
@@ -406,9 +409,9 @@ def _parameters(method: str, value: Any) -> dict[str, Any]:
         old_strike = float(position["contract"]["strike"])
         if boundary is not None:
             if option_type == "put" and boundary >= old_strike:
-                raise _reject("search_bounds.min_new_strike must be below the original strike")
+                raise _reject("search_bounds.min_new_strike must be below the original strike", fields=("search_bounds.min_new_strike",))
             if option_type == "call" and boundary <= old_strike:
-                raise _reject("search_bounds.max_new_strike must be above the original strike")
+                raise _reject("search_bounds.max_new_strike must be above the original strike", fields=("search_bounds.max_new_strike",))
         return {
             "position": position,
             "search_bounds": bounds,

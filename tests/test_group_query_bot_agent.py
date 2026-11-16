@@ -130,6 +130,10 @@ def _text_response(text, tokens=10):
 
 
 def _tool_response(name, arguments, call_id="call_1"):
+    if name in TOOL_NAMES and isinstance(arguments, dict):
+        # Existing scripted followups explicitly model contextual extraction.
+        # Fresh-source tests opt in to current_message and exercise reconstruction.
+        arguments = {"source_scope": "conversation", **arguments}
     return {"message": {
         "content": "",
         "tool_calls": [{"id": call_id, "type": "function",
@@ -215,7 +219,7 @@ def test_pure_clarification_is_admitted_and_rate_limited(tmp_path):
     first = agent.handle_event(_event(message_id="om_1"), "哪个好？")
     second = agent.handle_event(_event(message_id="om_2"), "哪个好？")
 
-    assert first.status == "ok"
+    assert first.status == "clarification"
     assert first.text.startswith("请告诉我标的。")
     assert "未执行实时查询" in first.text
     assert second.status == "rate_limited"
@@ -403,7 +407,7 @@ def test_only_the_five_fixed_tools_exist_and_unknown_calls_are_refused(tmp_path)
     assert TOOL_NAMES == {"query_quotes", "query_candidates", "evaluate_close",
                           "evaluate_roll_down", "evaluate_roll_up"}
     assert {tool["name"] for tool in TOOLS} == TOOL_NAMES
-    assert {tool["name"] for tool in MODEL_TOOLS} == TOOL_NAMES | {"answer_general"}
+    assert {tool["name"] for tool in MODEL_TOOLS} == TOOL_NAMES | {"answer_general", "ask_user_question"}
     reply = agent.handle_event(_event(), "查一下账户")
 
     assert api.calls == []
@@ -474,14 +478,15 @@ def test_general_answer_prompt_has_live_time_and_dst_offsets(
 
 
 def test_prompt_time_refreshes_on_each_turn_in_the_same_conversation(tmp_path):
-    instants = iter([NOW, NOW + timedelta(days=1)])
+    moment = [NOW]
     model = _ScriptedModel([
         _tool_response("answer_general", {"answer": "请以交易所官方说明为准。"}),
         _tool_response("answer_general", {"answer": "请以交易所官方说明为准。"}),
     ])
-    agent, _ = _agent(tmp_path, model=model, now=lambda: next(instants))
+    agent, _ = _agent(tmp_path, model=model, now=lambda: moment[0])
 
     first = agent.handle_event(_event(message_id="om_1"), "今天几点开盘？")
+    moment[0] += timedelta(days=1)
     second = agent.handle_event(_event(message_id="om_2"), "今天呢？")
 
     assert first.status == second.status == "ok"
@@ -515,7 +520,7 @@ def test_real_model_adapter_sends_time_context_and_general_answer_tool(tmp_path,
     assert reply.reason_codes == ("general_answer",)
     assert len(calls) == 1
     assert "当前时间：2026-11-10 14:00:00" in calls[0]["messages"][0]["content"]
-    assert {tool["function"]["name"] for tool in calls[0]["tools"]} == TOOL_NAMES | {"answer_general"}
+    assert {tool["function"]["name"] for tool in calls[0]["tools"]} == TOOL_NAMES | {"answer_general", "ask_user_question"}
     assert api.calls == []
 
 
@@ -551,7 +556,7 @@ def test_invalid_general_answer_falls_back_to_a_clarification(tmp_path):
 
     reply = agent.handle_event(_event(), "随便问问")
 
-    assert reply.status == "ok"
+    assert reply.status == "clarification"
     assert "未执行实时查询" in reply.text
     assert api.calls == []
 
