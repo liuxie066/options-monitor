@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import sys
 import threading
 import time
 import tempfile
@@ -41,6 +42,66 @@ def test_shared_per_root_union_cycles_and_no_values():
     assert d.aggregate(roots(cycle), limits=generous())["complete"]
 
 
+def test_exact_small_graph_bytes_and_aliases():
+    leaf = b"synthetic-only"
+    shared = [leaf]
+    first = {"first": shared, "alias": shared}
+    second = {"second": shared}
+    third = {}
+    graph = dict(zip(d.ROOT_NAMES, [first, second, third]))
+
+    # An explicit finite object inventory, not a second traversal implementation.
+    def expected(objects):
+        result = {}
+        for value in {id(value): value for value in objects}.values():
+            name = type(value).__name__
+            row = result.setdefault(name, {"type": name, "count": 0, "bytes": 0})
+            row["count"] += 1
+            row["bytes"] += sys.getsizeof(value)
+        return result
+
+    objects = [[first, *first.keys(), shared, leaf],
+               [second, *second.keys(), shared, leaf], [third]]
+    result = d.aggregate(graph, limits=generous())
+    assert result["complete"]
+    for row, inventory in zip(result["roots"], objects):
+        assert {t["type"]: t for t in row["types"]} == expected(inventory)
+    assert {t["type"]: t for t in result["types"]} == expected(sum(objects, []))
+
+
+def test_mutation_keeps_current_partial_root():
+    graph = roots([1])
+    calls = 0
+
+    def mutate():
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            graph["brief_cache"]["added"] = "synthetic"
+        return False
+
+    report = d.aggregate(graph, limits=generous(), cancelled=mutate)
+    assert report["complete"] is False and report["stop_reason"] == "mutation"
+    assert len(report["roots"]) == 1
+    row = report["roots"][0]
+    assert row["name"] == "brief_cache" and row["complete"] is False
+    assert any(t["type"] == "dict" for t in row["types"])
+    assert d._safe_response({"schema": 1, "pid": 1, "start_ticks": 1,
+                             "request_id": "a" * 32, "report": report})
+
+
+def test_default_limits_and_depth_boundary():
+    assert d.Limits() == d.Limits(nodes=50000, depth=64, seconds=.1,
+                                  metadata_bytes=8 * 1024 * 1024)
+    for lists, complete in [(63, True), (64, False)]:
+        value = None
+        for _ in range(lists):
+            value = [value]
+        report = d.aggregate(roots(value), limits=generous())
+        assert report["complete"] is complete
+        assert report["stop_reason"] == (None if complete else "depth")
+
+
 @pytest.mark.parametrize("limit,reason", [({"nodes": 1}, "nodes"), ({"depth": 0}, "depth"),
                                         ({"seconds": 0}, "time"), ({"metadata_bytes": 1}, "metadata")])
 def test_limits_are_explicit_partial(limit, reason):
@@ -76,13 +137,13 @@ def test_default_off_has_no_socket_or_path_read(monkeypatch):
     assert d.OwnerDiagnostic.from_environment() is None
 
 
-def test_enabled_window_cancel_and_no_retry(tmp_path):
+def test_waiting_for_receiver_cancel_and_no_retry(tmp_path):
     p = d.OwnerDiagnostic(tmp_path/"om-owner-top-missing"/"owner.sock")
     p.poll(lambda: pytest.fail("missing receiver traversed"), cancelled=lambda: False)
     assert not p.done
-    p._first_poll = time.monotonic()-121
-    p.poll(lambda: pytest.fail("expired window traversed"), cancelled=lambda: False)
+    p.poll(lambda: pytest.fail("cancelled probe traversed"), cancelled=lambda: True)
     assert p.done
+    p.poll(lambda: pytest.fail("cancelled probe retried"), cancelled=lambda: False)
 
 
 @pytest.fixture
@@ -97,6 +158,64 @@ def wait_socket(path):
     while not path.exists() and time.monotonic() < end:
         time.sleep(.001)
     assert path.exists()
+
+
+def test_receiver_can_arrive_long_after_first_heartbeat(tmp_path, local_protocol, monkeypatch):
+    path = tmp_path / "om-owner-top-late" / "owner.sock"
+    probe = d.OwnerDiagnostic(path)
+    clock = time.monotonic
+    offset = [0]
+    monkeypatch.setattr(d.time, "monotonic", lambda: clock() + offset[0])
+    probe.poll(lambda: pytest.fail("no receiver"), cancelled=lambda: False)
+    offset[0] = 3600  # no real sleep, and no alteration of the traversal budget
+    responses, errors = [], []
+    def receive():
+        try:
+            responses.append(d.receive(path, pid=os.getpid(), start_ticks=12345, seconds=.3))
+        except Exception as error:
+            errors.append(type(error).__name__)
+    thread = threading.Thread(target=receive)
+    thread.start(); wait_socket(path)
+    probe.poll(lambda: roots([1, 2]), cancelled=lambda: False)
+    thread.join(1)
+    assert not thread.is_alive() and not errors and len(responses) == 1
+    assert responses[0]["report"]["complete"] and probe.done
+    probe.poll(lambda: pytest.fail("successful request retried"), cancelled=lambda: False)
+    assert not path.exists() and not path.parent.exists()
+
+
+def test_unclaimed_receiver_timeout_does_not_consume_client(tmp_path, local_protocol):
+    path = tmp_path / "om-owner-top-unclaimed" / "owner.sock"
+    probe = d.OwnerDiagnostic(path)
+    with pytest.raises(TimeoutError):
+        d.receive(path, pid=os.getpid(), start_ticks=12345, seconds=.01)
+    assert not path.exists() and not path.parent.exists() and not probe.done
+    probe.poll(lambda: pytest.fail("expired receiver traversed"), cancelled=lambda: False)
+    assert not probe.done
+
+
+def test_stale_endpoint_consumes_only_attempt(tmp_path, local_protocol):
+    path = tmp_path / "om-owner-top-stale" / "owner.sock"
+    path.parent.mkdir(mode=0o700)
+    stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    stale.bind(str(path)); path.chmod(0o600); stale.close()
+    probe = d.OwnerDiagnostic(path)
+    probe.poll(lambda: pytest.fail("stale endpoint traversed"), cancelled=lambda: False)
+    assert probe.done
+    path.unlink(); path.parent.rmdir()
+    # Even a later valid receiver cannot reset the claimed opportunity.
+    errors = []
+    def receive():
+        try:
+            d.receive(path, pid=os.getpid(), start_ticks=12345, seconds=.05)
+        except TimeoutError:
+            errors.append("timeout")
+    thread = threading.Thread(target=receive)
+    thread.start(); wait_socket(path)
+    probe.poll(lambda: pytest.fail("stale request retried"), cancelled=lambda: False)
+    thread.join(1)
+    assert not thread.is_alive() and errors == ["timeout"]
+    assert not path.exists() and not path.parent.exists()
 
 
 def test_real_protocol_single_request_cleanup_and_release(tmp_path, local_protocol):
@@ -208,12 +327,26 @@ def test_receiver_filters_unexpected_strings_and_huge_numbers():
     assert not d._safe_response(value)
 
 
-def test_real_listener_heartbeat_uses_diagnostic_only_after_status(tmp_path, monkeypatch):
+@pytest.mark.parametrize("real_receiver", [False, True])
+def test_real_listener_heartbeat_uses_diagnostic_only_after_status(
+        tmp_path, monkeypatch, local_protocol, real_receiver):
     from types import SimpleNamespace
     from src.application.trades import auto_intake as a
     from test_trades_auto_intake_restart_policy import _source
     order = []
     stop = threading.Event()
+    responses, errors = [], []
+    path = tmp_path / "om-owner-top-heartbeat" / "owner.sock"
+    consumer = None
+    if real_receiver:
+        def receive():
+            try:
+                responses.append(d.receive(path, pid=os.getpid(), start_ticks=12345, seconds=2))
+            except Exception as error:
+                errors.append(error)
+        consumer = threading.Thread(target=receive)
+        consumer.start()
+        wait_socket(path)
     class Client:
         def __init__(self, **kw): pass
         def start(self, **kw): pass
@@ -222,10 +355,18 @@ def test_real_listener_heartbeat_uses_diagnostic_only_after_status(tmp_path, mon
     class Probe:
         def poll(self, factory, *, cancelled):
             assert not cancelled() and order[-1] == "heartbeat"
-            snapshot = factory()
-            assert set(snapshot) == set(d.ROOT_NAMES)
-            assert snapshot["inbox_cache"]["entry"]["summary"] == {"counts":{}}
-            assert snapshot["lifecycle_cache"]["entry"]["snapshot"] == {"pending_cases":[]}
+            def checked_factory():
+                snapshot = factory()
+                assert set(snapshot) == set(d.ROOT_NAMES)
+                assert snapshot["inbox_cache"]["entry"]["summary"] == {"counts":{}}
+                assert snapshot["lifecycle_cache"]["entry"]["snapshot"] == {"pending_cases":[]}
+                return snapshot
+            if real_receiver:
+                client = d.OwnerDiagnostic(path)
+                client.poll(checked_factory, cancelled=cancelled)
+                assert client.done
+            else:
+                checked_factory()
             order.append("probe"); stop.set()
     def inbox(path, *, cache):
         cache["entry"] = {"summary":{"counts":{}}}
@@ -245,6 +386,13 @@ def test_real_listener_heartbeat_uses_diagnostic_only_after_status(tmp_path, mon
         apply_changes=False, receipt_callback=lambda c:{}, process_lock=threading.RLock(),
         stop_event=stop, owner_diagnostic=Probe())
     assert code == 0 and order.count("probe") == 1 and order[-1] == "stop_event"
+    if consumer is not None:
+        consumer.join(3)
+        assert not consumer.is_alive() and not errors and len(responses) == 1
+        report = responses[0]["report"]
+        assert report["complete"] and report["stop_reason"] is None
+        assert len(report["roots"]) == 3
+        assert not path.exists() and not path.parent.exists()
 
 
 def test_snapshot_refuses_dict_subclass_without_copy_hook():

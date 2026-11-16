@@ -112,6 +112,8 @@ def aggregate(roots: dict[str, dict], *, limits: Limits = Limits(),
                 break
     except RuntimeError:
         reason = "mutation"
+        per_root.append({"name": name, "entries": len(root), "snapshot_shallow_bytes": sys.getsizeof(root),
+                         "complete": False, "types": _rows(counts)})
     finally:
         stack.clear()
         seen.clear()
@@ -187,12 +189,11 @@ def _endpoint(path: Path) -> bool:
 
 
 class OwnerDiagnostic:
-    """One attempted request in a bounded natural window, shared by source threads."""
+    """One explicit receiver attempt on a natural heartbeat, shared by sources."""
 
     def __init__(self, path: Path):
         self.path = path
         self._lock = threading.Lock()
-        self._first_poll: float | None = None
         self.done = False
 
     @classmethod
@@ -210,16 +211,15 @@ class OwnerDiagnostic:
         try:
             if self.done:
                 return
-            now = time.monotonic()
-            if self._first_poll is None:
-                self._first_poll = now
-            if cancelled() or now - self._first_poll >= 120:
+            if cancelled():
                 self.done = True
                 return
             try:
                 exists = self.path.lstat()
             except FileNotFoundError:
-                return  # only checked on existing heartbeat; no connection/retry loop
+                # Wait for the explicit receiver on existing heartbeats, even
+                # after startup warmup. Its accept window remains bounded.
+                return
             self.done = True  # consume even permission/identity/transport failures
         except (OSError, ValueError):
             self.done = True
