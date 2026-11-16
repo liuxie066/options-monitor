@@ -43,7 +43,7 @@ MARKET_STATE_LABELS = {
     "AFTER_HOURS_BEGIN": "盘后",
     "AFTER_HOURS_END": "盘后结束",
     "CLOSED": "休市",
-    "REST": "休市或午间",
+    "REST": "午间休市或休市",
     "WAITING_OPEN": "待开盘",
     "HK_CAS": "收市竞价",
     "CLOSE_AUCTION": "收市竞价",
@@ -227,12 +227,21 @@ def _price_time(value: Any, zone: Any, zone_label: str | None) -> str | None:
     return f"{parsed.astimezone(zone).strftime('%Y-%m-%d %H:%M:%S')}（{zone_label}）"
 
 
-def _market_state_text(value: Any) -> str | None:
+def _market_state_text(value: Any, market: Any) -> str | None:
     if value in (None, ""):
         return None
     text = str(value).strip()
     if text.upper() in {"N/A", "NA", "NAN", "UNKNOWN", "NULL", "-"}:
-        return None
+        return "未知"
+    if market not in MARKET_TEXT:
+        return "未知（市场无法识别）"
+    if market == "US":
+        if text in {"MORNING", "AFTERNOON"}:
+            return "美股交易时段"
+        if text == "AFTERNOON_END":
+            return "日间交易已结束"
+        if text == "REST":
+            return "休市"
     return MARKET_STATE_LABELS.get(text, "未知")
 
 
@@ -346,7 +355,7 @@ def _primary_quote(quote: dict[str, Any] | None, market: Any = None) -> str:
             bits.append(f"{label} {_number(quote[key], 4)}")
     if _is_number(quote.get("delta")):
         bits.append(f"Delta {_number(quote['delta'], 3)}")
-    state = _market_state_text(quote.get("market_state"))
+    state = _market_state_text(quote.get("market_state"), market)
     if state:
         bits.append(f"市场状态 {state}")
     observed = _receipt_time(
@@ -500,7 +509,7 @@ def _quality_lines(data: dict[str, Any]) -> list[str]:
             else "说明：休市参考，用的是最近一个完成交易日的数据，不是实时可成交报价。")
         if quality.get("reference_date"):
             lines.append(f"参考交易日：{quality['reference_date']}")
-    state = _market_state_text(quality.get("market_state"))
+    state = _market_state_text(quality.get("market_state"), data.get("market"))
     if state:
         lines.append(f"现在市场状态：{state}")
     zone, zone_label = _zone_for_market(data.get("market"))
@@ -826,6 +835,16 @@ def render_budget_exhausted(reason: str) -> str:
     return f"本次查询在限制内未能完成（{reason}），请缩小范围或稍后重试。"
 
 
+def render_query_failure(code: str) -> str:
+    return {
+        "UNAUTHORIZED": "查询服务认证不可用，请联系管理员检查配置。",
+        "PERMISSION_DENIED": "查询权限不足，当前无法访问所请求的市场或能力。",
+        "DEPENDENCY_UNAVAILABLE": "行情或查询服务当前不可用，请稍后重试。",
+        "UPSTREAM_TIMEOUT": "查询服务响应超时，请稍后重试。",
+        "RATE_LIMITED": "查询服务请求过于频繁，请稍后重试。",
+    }.get(code, "查询服务当前无法完成请求，请稍后重试。")
+
+
 __all__ = [
     "CLARIFICATION_NOTE",
     "REASON_KEYWORDS",
@@ -838,6 +857,7 @@ __all__ = [
     "render_candidates",
     "render_close",
     "render_quotes",
+    "render_query_failure",
     "render_result",
     "render_roll",
     "result_contract_error",

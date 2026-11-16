@@ -243,24 +243,51 @@ class ConversationStore:
         with self.connect() as db:
             rows = db.execute(
                 """SELECT * FROM messages WHERE scope_sha256 = ? AND expires_at_utc > ?
+                   AND source_expires_at_utc > ?
                    ORDER BY created_at_utc, turn_id, seq""",
-                (scope_sha256, utc_text(now))).fetchall()
+                (scope_sha256, utc_text(now), utc_text(now))).fetchall()
+            # A standalone conversation store need not have a delivery writer.
+            # Missing evidence is deliberately different from acknowledged.
+            has_deliveries = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'deliveries'"
+            ).fetchone() is not None
+            delivered = set()
+            if has_deliveries:
+                delivered = {row["message_id"] for row in db.execute(
+                    """SELECT message_id FROM deliveries WHERE scope_sha256 = ?
+                       AND state = 'acknowledged' AND expires_at_utc > ?""",
+                    (scope_sha256, utc_text(now)))}
+            audits = db.execute(
+                """SELECT turn_id, status, reason_codes FROM audit WHERE scope_sha256 = ?
+                   AND expires_at_utc > ?""", (scope_sha256, utc_text(now))).fetchall()
+            clarifications = {row["turn_id"] for row in audits if row["status"] == "clarification"}
+            fresh_sources = {row["turn_id"] for row in audits
+                             if "current_message_source" in json.loads(row["reason_codes"])}
         turns: list[dict] = []
         by_id: dict[str, dict] = {}
         for row in rows:
             turn = by_id.get(row["turn_id"])
             if turn is None:
-                turn = {"turn_id": row["turn_id"], "messages": []}
+                turn = {"turn_id": row["turn_id"], "messages": [],
+                        "current_message_source": row["turn_id"] in fresh_sources}
                 by_id[row["turn_id"]] = turn
                 turns.append(turn)
-            turn["messages"].append({"role": row["role"], "content": row["content"]})
+            turn["messages"].append({
+                "role": row["role"], "content": row["content"],
+                "source_id": row["source_id"],
+                "source_expires_at_utc": row["source_expires_at_utc"],
+                "expires_at_utc": row["expires_at_utc"],
+                "acknowledged": row["source_id"] in delivered,
+                "clarification": row["turn_id"] in clarifications,
+            })
         complete = [turn for turn in turns
                     if turn["messages"][0]["role"] == "user"
                     and any(item["role"] == "assistant" for item in turn["messages"])]
         selected: list[dict] = []
         used = 0
         for turn in reversed(complete):
-            size = estimate(turn["messages"])
+            size = estimate([{"role": item["role"], "content": item["content"]}
+                             for item in turn["messages"]])
             if selected and (len(selected) >= max_turns or used + size > max_tokens):
                 break
             if not selected and size > max_tokens:
@@ -283,10 +310,10 @@ class ConversationStore:
 
     def save_pending_input(self, *, scope_sha256: str, operation: str,
                            parameters: dict, now: datetime, source_id: str,
-                           source_expiry: datetime) -> str:
+                           source_expiry: datetime, inherit_prior: bool = True) -> str:
         pending_id = "pending-" + uuid.uuid4().hex
         payload = json.dumps(parameters, sort_keys=True, separators=(",", ":"))
-        prior = self.live_input_expiry(
+        prior = None if not inherit_prior else self.live_input_expiry(
             scope_sha256=scope_sha256, operation=operation, now=now)
         expires = derived_expiry(now, source_expiry, prior)
         with self.connect() as db:
@@ -302,30 +329,47 @@ class ConversationStore:
     def pending_inputs(self, scope_sha256: str, now: datetime) -> list[dict]:
         with self.connect() as db:
             rows = db.execute(
-                """SELECT operation, parameters_json FROM scenario_inputs
+                """SELECT operation, parameters_json, source_id,
+                          source_expires_at_utc, expires_at_utc FROM scenario_inputs
                    WHERE scope_sha256 = ? AND status = 'pending' AND expires_at_utc > ?
+                     AND source_expires_at_utc > ?
                    ORDER BY created_at_utc DESC""",
-                (scope_sha256, utc_text(now))).fetchall()
+                (scope_sha256, utc_text(now), utc_text(now))).fetchall()
         return [{"operation": row["operation"],
-                 "parameters": json.loads(row["parameters_json"])} for row in rows]
+                 "parameters": json.loads(row["parameters_json"]),
+                 "source_id": row["source_id"],
+                 "source_expires_at_utc": row["source_expires_at_utc"],
+                 "expires_at_utc": row["expires_at_utc"]} for row in rows]
+
+    def discard_pending_inputs(self, scope_sha256: str) -> None:
+        """An explicit task switch/cancellation retires earlier pending facts.
+
+        User messages remain under their original retention contract. Clearing
+        only the pending projection prevents a cropped boundary from reviving it.
+        """
+        with self.connect() as db:
+            db.execute("DELETE FROM scenario_inputs WHERE scope_sha256 = ? AND status = 'pending'",
+                       (scope_sha256,))
 
     def resolve_confirmed_input(self, *, scope_sha256: str, operation: str,
-                                input_sha256: str, now: datetime) -> str | None:
+                                input_sha256: str, now: datetime,
+                                source_ids: frozenset[str] | None = None) -> str | None:
         with self.connect() as db:
-            row = db.execute(
-                """SELECT input_id FROM scenario_inputs
+            rows = db.execute(
+                """SELECT input_id, source_id FROM scenario_inputs
                    WHERE scope_sha256 = ? AND operation = ? AND input_sha256 = ?
                      AND status = 'confirmed' AND expires_at_utc > ?
-                   ORDER BY created_at_utc DESC LIMIT 1""",
-                (scope_sha256, operation, input_sha256, utc_text(now))).fetchone()
-            return str(row["input_id"]) if row is not None else None
+                   ORDER BY created_at_utc DESC""",
+                (scope_sha256, operation, input_sha256, utc_text(now))).fetchall()
+            return next((str(row["input_id"]) for row in rows
+                         if source_ids is None or row["source_id"] in source_ids), None)
 
     def save_confirmed_input(self, *, scope_sha256: str, input_id: str,
                              input_sha256: str, operation: str, parameters: dict,
                              now: datetime, source_id: str,
-                             source_expiry: datetime) -> str:
+                             source_expiry: datetime, inherit_prior: bool = True) -> str:
         payload = json.dumps(parameters, sort_keys=True, separators=(",", ":"))
-        prior = self.live_input_expiry(
+        prior = None if not inherit_prior else self.live_input_expiry(
             scope_sha256=scope_sha256, operation=operation, now=now)
         expires = derived_expiry(now, source_expiry, prior)
         with self.connect() as db:

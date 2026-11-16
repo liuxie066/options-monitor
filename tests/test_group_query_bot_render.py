@@ -143,7 +143,7 @@ def test_quote_render_labels_non_continuous_market_states():
 
     assert "市场状态 未开盘/无交易" in text_for("NONE")
     assert "市场状态 按最新价交易" in text_for("TRADE_AT_LAST")
-    assert "市场状态 午盘结束" in text_for("AFTERNOON_END")
+    assert "市场状态 日间交易已结束" in text_for("AFTERNOON_END")
     assert "市场状态 交易竞价" in text_for("TRADE_AUCTION")
 
 
@@ -398,3 +398,44 @@ def test_fact_card_and_fallback_agree_on_close_facts():
         assert needle in card
         assert needle in fallback
     assert "不是账户实际扣费" in card and "不是账户实际扣费" in fallback
+
+
+@pytest.mark.parametrize("market,state,expected", [
+    ("US", "MORNING", "美股交易时段"), ("US", "AFTERNOON", "美股交易时段"),
+    ("US", "AFTERNOON_END", "日间交易已结束"),
+    ("US", "REST", "休市"), ("US", "UNKNOWN", "未知"),
+    ("US", "AFTER_HOURS_BEGIN", "盘后"), ("US", "AFTER_HOURS_END", "盘后结束"),
+    ("HK", "MORNING", "早盘"), ("HK", "REST", "午间休市或休市"),
+    ("HK", "AFTERNOON", "午盘"), (None, "AFTERNOON", "未知（市场无法识别）"),
+    ("XX", "AFTERNOON", "未知（市场无法识别）"), ("US", "BOGUS", "未知"),
+])
+def test_market_state_uses_trusted_market_across_shared_paths(market, state, expected):
+    from om_group_query_bot.render import _primary_quote, _quality_lines
+    quote = {"market_state": state, "last_price": 85.0,
+             "last_price_update_time": "2026-11-13 10:06:00",
+             "observed_at_utc": "2026-11-13T15:06:00+00:00"}
+    assert f"市场状态 {expected}" in _primary_quote(quote, market=market)
+    assert f"现在市场状态：{expected}" in _quality_lines({
+        "market": market, "data_quality": {"market_state": state}})
+    if market == "US":
+        assert "午盘" not in _primary_quote(quote, market=market)
+
+
+def test_nflx_us_afternoon_keeps_identity_times_raw_state_and_guard():
+    from om_group_query_bot.guard import check_result_reply
+    from datetime import datetime, timezone
+    data = {"symbol": "NFLX", "market": "US", "quote_status": "current",
+            "effective_parameters": {"contract_requested": False},
+            "underlier": {"contract_symbol": "NFLX", "last_price": 85.0,
+                          "market_state": "AFTERNOON",
+                          "last_price_update_time": "2026-11-13 10:06:00",
+                          "observed_at_utc": "2026-11-13T15:06:00+00:00"},
+            "missing_requirements": []}
+    text = render_quotes(data)
+    card = fact_card("query_quotes", data)
+    assert "美股交易时段" in text and "午盘" not in text
+    assert "10:06:00（纽约时间）" in text and "NFLX" in text
+    assert data["underlier"]["market_state"] == "AFTERNOON"
+    assert check_result_reply("NFLX 最新价85，美股交易时段。", method="query_quotes",
+                              data=data, fact_card_text=card, user_text="NFLX行情",
+                              now=datetime(2026, 11, 13, 15, 6, tzinfo=timezone.utc)).ok
