@@ -1,0 +1,108 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.39",
+  "base": {
+    "tag": "v4.6.38",
+    "commit": "83bad4d449c22dbf0bfb8f53f50de1fc2689e621"
+  },
+  "reviewed_head": "b862ec0c05aeb23da4931a739d0dc717628148e9",
+  "commits": [
+    {
+      "sha": "5295e73f61aca30cc02c0fbb060dd8c8d8c6462c",
+      "subject": "feat(group-query-bot): persist chat and sender identity in delivery records"
+    },
+    {
+      "sha": "3dd75c3b62af8dd2ebcce485ea5286739f753ddb",
+      "subject": "Merge pull request #1193 from liuxie066/cindy/amazing-hopper"
+    },
+    {
+      "sha": "8fc8c24db297edc834b1372574a07a9f428ab447",
+      "subject": "feat(group-query-bot): add structured clarification and market-aware state labels"
+    },
+    {
+      "sha": "ed0e2998401230b1df75dd8aa9c35baf67a65208",
+      "subject": "Merge pull request #1194 from liuxie066/cindy/amazing-hopper"
+    },
+    {
+      "sha": "71a86df34c382700dbbc00030e987266df13662e",
+      "subject": "perf(brief): reuse validated payload hashes within history observations"
+    },
+    {
+      "sha": "b862ec0c05aeb23da4931a739d0dc717628148e9",
+      "subject": "Merge pull request #1195 from liuxie066/cindy/warm-panini"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "群查询 bot 在输入不足时提供文字反问和编号选项，支持自由回答及多轮接续，并保留事实来源的有效期边界。（#1194）",
+      "commits": [
+        "8fc8c24db297edc834b1372574a07a9f428ab447",
+        "ed0e2998401230b1df75dd8aa9c35baf67a65208"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "群查询投递记录保存群与发送者身份，支持按已知身份追溯；历史记录的未知身份保持为空，不延长正文或投递元数据保留期。（#1193）",
+      "commits": [
+        "5295e73f61aca30cc02c0fbb060dd8c8d8c6462c",
+        "3dd75c3b62af8dd2ebcce485ea5286739f753ddb"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "每日简报在同一次历史观察内复用已校验的来源摘要，减少重复计算，保留独立读取及完整性校验。（#1195）",
+      "commits": [
+        "71a86df34c382700dbbc00030e987266df13662e",
+        "b862ec0c05aeb23da4931a739d0dc717628148e9"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "群查询 bot 按可信市场显示交易状态，修正美股状态被误写为“午盘”的文案。（#1194）",
+      "commits": [
+        "8fc8c24db297edc834b1372574a07a9f428ab447",
+        "ed0e2998401230b1df75dd8aa9c35baf67a65208"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "5295e73f61aca30cc02c0fbb060dd8c8d8c6462c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1193"
+      ]
+    },
+    {
+      "commit": "3dd75c3b62af8dd2ebcce485ea5286739f753ddb",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1193"
+      ]
+    },
+    {
+      "commit": "8fc8c24db297edc834b1372574a07a9f428ab447",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1194"
+      ]
+    },
+    {
+      "commit": "ed0e2998401230b1df75dd8aa9c35baf67a65208",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1194"
+      ]
+    },
+    {
+      "commit": "71a86df34c382700dbbc00030e987266df13662e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1195"
+      ]
+    },
+    {
+      "commit": "b862ec0c05aeb23da4931a739d0dc717628148e9",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1195"
+      ]
+    }
+  ]
+}
