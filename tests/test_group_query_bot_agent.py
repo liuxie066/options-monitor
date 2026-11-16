@@ -821,6 +821,9 @@ def test_bot_service_delivers_once_and_survives_restart(tmp_path):
                              "delivery_state": "acknowledged"}
     assert restarted_replies.calls == []
     assert restarted_model.calls == []
+    with restarted.deliveries.connect() as db:
+        rows = db.execute("SELECT chat_id, sender_open_id FROM deliveries").fetchall()
+    assert [tuple(row) for row in rows] == [("oc_group", "ou_alice")]
 
 
 def test_reply_failure_before_send_is_terminal_failed(tmp_path):
@@ -837,6 +840,9 @@ def test_reply_failure_before_send_is_terminal_failed(tmp_path):
 
     assert result["status"] == "failed"
     assert service.deliveries.counts(NOW) == {"failed": 1}
+    with service.deliveries.connect() as db:
+        row = db.execute("SELECT chat_id, sender_open_id FROM deliveries").fetchone()
+    assert tuple(row) == ("oc_group", "ou_alice")
 
 
 def test_reply_failure_after_send_is_outcome_unknown(tmp_path):
@@ -855,6 +861,9 @@ def test_reply_failure_after_send_is_outcome_unknown(tmp_path):
 
     assert result["status"] == "outcome_unknown"
     assert service.deliveries.counts(NOW) == {"outcome_unknown": 1}
+    with service.deliveries.connect() as db:
+        row = db.execute("SELECT chat_id, sender_open_id FROM deliveries").fetchone()
+    assert tuple(row) == ("oc_group", "ou_alice")
 
 
 def test_clarification_note_is_not_accumulated_across_turns(tmp_path):
