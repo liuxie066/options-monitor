@@ -1,0 +1,108 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.40",
+  "base": {
+    "tag": "v4.6.39",
+    "commit": "1d30900c476e6da08907794109f7ff55562e9414"
+  },
+  "reviewed_head": "3a36c82640b6a9b2f1ad087eb82b2dca2620438c",
+  "commits": [
+    {
+      "sha": "737e933779dfcd56a6883621933ce3d8f2850613",
+      "subject": "fix(group-query-bot): remove fixed clarification disclaimer"
+    },
+    {
+      "sha": "fac7db50a605359addfd50b9b68145d34684292e",
+      "subject": "Merge pull request #1197 from liuxie066/fix/group-bot-remove-clarification-note"
+    },
+    {
+      "sha": "c4a0211c19d5aea0dbe3d6077d7d107d77b8261b",
+      "subject": "feat(tick): add required-data phase timing"
+    },
+    {
+      "sha": "2a135a8bc75e8a2a4ae9b965f283752cede0bfb0",
+      "subject": "Merge pull request #1198 from liuxie066/cindy/warm-panini"
+    },
+    {
+      "sha": "1bba9278f3dce4448b566c44038927ad31c08663",
+      "subject": "fix(diagnostics): allow one explicit request after warmup"
+    },
+    {
+      "sha": "3a36c82640b6a9b2f1ad087eb82b2dca2620438c",
+      "subject": "Merge pull request #1199 from liuxie066/feature/memory-owner-local-20261116"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "一次性对象诊断可持续等待显式请求，由自然心跳领取一次；默认关闭，保留身份校验、取消与有界计量。（#1199）",
+      "commits": [
+        "1bba9278f3dce4448b566c44038927ad31c08663",
+        "3a36c82640b6a9b2f1ad087eb82b2dca2620438c"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Tick 增加 required-data 预取、条件日历、封存和发布清理四段耗时与进程 CPU 计时，便于定位慢段，保留业务与取消语义。（#1198）",
+      "commits": [
+        "c4a0211c19d5aea0dbe3d6077d7d107d77b8261b",
+        "2a135a8bc75e8a2a4ae9b965f283752cede0bfb0"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "群查询 bot 的澄清和说明回复不再追加固定的未查询免责声明，保留有效追问与具体数据限制。（#1197）",
+      "commits": [
+        "737e933779dfcd56a6883621933ce3d8f2850613",
+        "fac7db50a605359addfd50b9b68145d34684292e"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "对象诊断检测到遍历中数据变化时，保留当前 root 已取得的部分统计并标明不完整。（#1199）",
+      "commits": [
+        "1bba9278f3dce4448b566c44038927ad31c08663",
+        "3a36c82640b6a9b2f1ad087eb82b2dca2620438c"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "737e933779dfcd56a6883621933ce3d8f2850613",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1197"
+      ]
+    },
+    {
+      "commit": "fac7db50a605359addfd50b9b68145d34684292e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1197"
+      ]
+    },
+    {
+      "commit": "c4a0211c19d5aea0dbe3d6077d7d107d77b8261b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1198"
+      ]
+    },
+    {
+      "commit": "2a135a8bc75e8a2a4ae9b965f283752cede0bfb0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1198"
+      ]
+    },
+    {
+      "commit": "1bba9278f3dce4448b566c44038927ad31c08663",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1199"
+      ]
+    },
+    {
+      "commit": "3a36c82640b6a9b2f1ad087eb82b2dca2620438c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1199"
+      ]
+    }
+  ]
+}
