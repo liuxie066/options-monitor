@@ -144,7 +144,7 @@ class _DeliveryValidation:
                             base=base, account=account, market=market,
                             market_date=source_date, revision=revision,
                         )
-                        observed_sources[key] = content_hash(source) if isinstance(source, Mapping) else None
+                        observed_sources[key] = _observed_source_content_hash(source) if isinstance(source, Mapping) else None
                     if observed_sources[key] != digest:
                         reusable = False
             if reusable:
@@ -158,7 +158,7 @@ class _DeliveryValidation:
                 successful_sources=sources,
             )
             for market_date, day in normalized["days"].items():
-                dependencies = {key: content_hash(source[1]) for key, source in sources.items()
+                dependencies = {key: _observed_source_content_hash(source[1]) for key, source in sources.items()
                                 if key[3] == market_date}
                 current[market_date] = (content_hash(raw_days[market_date]), deepcopy(day), dependencies)
         self._states[identity] = current
@@ -208,6 +208,7 @@ class _BriefHistoryObservation(DailyBriefReadScope):
         self._stack = stack
         self._connection = None
         self._payloads: dict[tuple, Any] = {}
+        self._payload_hashes: dict[int, tuple[Any, str]] = {}
         self._revisions: dict[str, list[int]] = {}
         self._delivery: dict[str, Any] | None = None
 
@@ -226,6 +227,9 @@ class _BriefHistoryObservation(DailyBriefReadScope):
                                   market_date=market_date, revision=revision, successful=successful,
                                   conn=self.connection())
             self._payloads[key] = row["payload"] if row else None
+            if row is not None:
+                # decode already verified this hash; the private raw payload stays read-only.
+                self._payload_hashes[id(row["payload"])] = (row["payload"], row["payload_hash"])
         raw = self._payloads[key]
         # These source objects stay private to one observation; normalizers
         # construct the consumer results. Recopying every source adds no isolation.
@@ -249,6 +253,15 @@ class _BriefHistoryObservation(DailyBriefReadScope):
 
 
 _BRIEF_HISTORY_OBSERVATION: ContextVar[_BriefHistoryObservation | None] = ContextVar("brief_history_observation", default=None)
+
+
+def _observed_source_content_hash(raw: Any) -> str:
+    observation = _BRIEF_HISTORY_OBSERVATION.get()
+    if observation is not None:
+        observed = observation._payload_hashes.get(id(raw))
+        if observed is not None and observed[0] is raw:
+            return observed[1]
+    return content_hash(raw)
 
 
 @contextmanager
@@ -2708,7 +2721,7 @@ def _read_validated_successful_revision_source(
         raise DailyDecisionBriefStateError(f"daily brief delivery references a missing revision: {revision_path}")
     if not isinstance(raw, Mapping):
         raise DailyDecisionBriefStateError(f"daily brief state is not an object: {revision_path}")
-    observation_digest = content_hash(raw)
+    observation_digest = _observed_source_content_hash(raw)
     cache_key = (*key, observation_digest)
     cached = _VALIDATED_BRIEF_CACHE.get(cache_key)
     if cached is not None:

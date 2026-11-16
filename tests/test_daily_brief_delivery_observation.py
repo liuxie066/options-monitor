@@ -34,6 +34,63 @@ def test_unchanged_day_reuses_validation_but_observes_sources_every_time(tmp_pat
             assert normalized.call_count == 2
 
 
+def test_delivery_observation_reuses_decoded_payload_hash_but_decodes_again(tmp_path, monkeypatch):
+    from src.infrastructure.decision_history_sqlite import DecisionHistoryStore
+
+    _confirmed_repeated_source(tmp_path)
+    original_hash = repo.content_hash
+    repeated_payloads = []
+
+    def counted(value):
+        if isinstance(value, dict) and {"run_id", "candidates", "revision"} <= value.keys():
+            repeated_payloads.append(value)
+        return original_hash(value)
+
+    monkeypatch.setattr(repo, "content_hash", counted)
+    with patch.object(DecisionHistoryStore, "decode", wraps=DecisionHistoryStore.decode) as decoded:
+        with repo.daily_brief_delivery_validation_scope():
+            first = _read_state(tmp_path)
+            assert first["available"]
+            assert _read_state(tmp_path) == first
+        assert decoded.call_count == 2
+    assert repeated_payloads == []
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_unregistered_source_copy_cannot_borrow_observed_payload_hash(tmp_path, monkeypatch, changed):
+    _confirmed_repeated_source(tmp_path)
+    original = repo._history_raw
+
+    def copied(**kwargs):
+        value = deepcopy(original(**kwargs))
+        if changed:
+            value["strategy_summary"] = "different source content"
+        return value
+
+    monkeypatch.setattr(repo, "_history_raw", copied)
+    result = _read_state(tmp_path)
+    assert result["available"] is not changed
+    if changed:
+        assert result["reason"] == "state_invalid"
+
+
+@pytest.mark.parametrize("column,value", [("payload_hash", "tampered"), ("payload_json", "{}")])
+def test_next_observation_still_rejects_storage_hash_corruption(tmp_path, column, value):
+    import sqlite3
+
+    from src.infrastructure.decision_history_sqlite import history_path
+
+    _confirmed_repeated_source(tmp_path)
+    with repo.daily_brief_delivery_validation_scope():
+        assert _read_state(tmp_path)["available"]
+        with sqlite3.connect(history_path(tmp_path)) as connection:
+            connection.execute("DROP TRIGGER decisions_no_update")
+            connection.execute(f"UPDATE decisions SET {column}=?", (value,))
+        result = _read_state(tmp_path)
+        assert result["available"] is False
+        assert result["reason"] == "state_invalid"
+
+
 def test_external_process_write_is_visible_inside_read_scope(tmp_path):
     _, prepared = _confirmed_repeated_source(tmp_path)
     path = prepared
