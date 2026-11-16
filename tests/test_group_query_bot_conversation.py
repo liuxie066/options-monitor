@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 import sqlite3
 
 import pytest
@@ -38,6 +39,55 @@ def _turn(store, scope, turn_id, index, *, now=NOW, source_expiry=None):
 
 def _estimate(turn):
     return sum(len(item["content"]) for item in turn)
+
+
+def test_delivery_identity_is_queryable_without_merging_conversations(tmp_path):
+    store = DeliveryStore(tmp_path, db_name=CONVERSATION_DB_NAME)
+    events = [_event(), replace(_event("om_2"), sender_open_id="ou_bob"),
+              replace(_event("om_3"), chat_id="oc_other")]
+    for event in events:
+        row, claimed = store.claim(event, "gq", NOW)
+        assert claimed
+        assert (row["chat_id"], row["sender_open_id"]) == (
+            event.chat_id, event.sender_open_id)
+        store.finish(row["message_key"], "failed")
+    restarted = DeliveryStore(tmp_path, db_name=CONVERSATION_DB_NAME)
+    duplicate, claimed = restarted.claim(events[0], "gq", NOW + timedelta(hours=1))
+    assert not claimed
+    assert duplicate["state"] == "failed"
+    assert duplicate["chat_id"] == "oc_group"
+    assert duplicate["sender_open_id"] == "ou_alice"
+    assert duplicate["expires_at_utc"] == (NOW + timedelta(days=7)).isoformat(timespec="microseconds")
+    with restarted.connect() as db:
+        rows = db.execute(
+            "SELECT message_id, sender_open_id FROM deliveries WHERE chat_id = ? ORDER BY message_id",
+            ("oc_group",)).fetchall()
+    assert [tuple(row) for row in rows] == [("om_1", "ou_alice"), ("om_2", "ou_bob")]
+    restarted.cleanup(NOW + timedelta(days=7))
+    with restarted.connect() as db:
+        assert db.execute("SELECT count(*) FROM deliveries").fetchone()[0] == 0
+
+
+def test_legacy_delivery_migration_preserves_unknown_identity_and_state(tmp_path):
+    path = tmp_path / CONVERSATION_DB_NAME
+    with sqlite3.connect(path) as db:
+        db.execute("""CREATE TABLE deliveries (
+            message_key TEXT PRIMARY KEY, message_id TEXT NOT NULL, event_id TEXT,
+            scope_sha256 TEXT NOT NULL, delivery_uuid TEXT NOT NULL, state TEXT NOT NULL,
+            created_at_utc TEXT NOT NULL, expires_at_utc TEXT NOT NULL)""")
+        db.execute("INSERT INTO deliveries VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                   ("old-key", "om_old", "ev_old", "old-scope", "old-uuid",
+                    "outcome_unknown", NOW.isoformat(), (NOW + timedelta(days=7)).isoformat()))
+    store = DeliveryStore(tmp_path, db_name=CONVERSATION_DB_NAME)
+    with store.connect() as db:
+        row = dict(db.execute("SELECT * FROM deliveries WHERE message_key = ?", ("old-key",)).fetchone())
+    assert row["chat_id"] is None and row["sender_open_id"] is None
+    assert row["state"] == "outcome_unknown"
+    assert row["delivery_uuid"] == "old-uuid"
+    assert row["expires_at_utc"] == (NOW + timedelta(days=7)).isoformat()
+    new, claimed = store.claim(_event(), "gq", NOW)
+    assert claimed and new["chat_id"] == "oc_group"
+    assert new["sender_open_id"] == "ou_alice"
 
 
 def test_derived_expiry_never_exceeds_the_first_24h_or_a_source(tmp_path):

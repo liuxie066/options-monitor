@@ -1,4 +1,4 @@
-"""Seven-day preflight delivery metadata, with no chat content or business input."""
+"""Bounded conversation storage and seven-day delivery identity metadata."""
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -42,8 +42,15 @@ class DeliveryStore:
                 delivery_uuid TEXT NOT NULL,
                 state TEXT NOT NULL CHECK(state IN ('claimed','sending','acknowledged','failed','outcome_unknown')),
                 created_at_utc TEXT NOT NULL,
-                expires_at_utc TEXT NOT NULL
+                expires_at_utc TEXT NOT NULL,
+                chat_id TEXT,
+                sender_open_id TEXT
             )""")
+            # Legacy hashes cannot recover either identity; old rows stay unknown.
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(deliveries)")}
+            for column in ("chat_id", "sender_open_id"):
+                if column not in columns:
+                    db.execute(f"ALTER TABLE deliveries ADD COLUMN {column} TEXT")
             db.execute("""CREATE TABLE IF NOT EXISTS input_bindings (
                 scope_sha256 TEXT NOT NULL,
                 input_id TEXT NOT NULL,
@@ -69,9 +76,13 @@ class DeliveryStore:
         key = hashlib.sha256((scope + ":" + event.message_id).encode()).hexdigest()
         with self.connect() as db:
             db.execute("DELETE FROM deliveries WHERE expires_at_utc <= ?", (utc_text(now),))
-            result = db.execute("""INSERT OR IGNORE INTO deliveries VALUES (?, ?, ?, ?, ?, 'claimed', ?, ?)""",
+            result = db.execute("""INSERT OR IGNORE INTO deliveries
+                                (message_key, message_id, event_id, scope_sha256, delivery_uuid,
+                                 state, created_at_utc, expires_at_utc, chat_id, sender_open_id)
+                                VALUES (?, ?, ?, ?, ?, 'claimed', ?, ?, ?, ?)""",
                                 (key, event.message_id, event.event_id, scope, str(uuid.uuid4()),
-                                 utc_text(now), utc_text(now + timedelta(days=7))))
+                                 utc_text(now), utc_text(now + timedelta(days=7)),
+                                 event.chat_id, event.sender_open_id))
             row = db.execute("SELECT * FROM deliveries WHERE message_key = ?", (key,)).fetchone()
             return dict(row), result.rowcount == 1
 

@@ -90,6 +90,10 @@ API 配置字段固定为 `instance_id`、`data_dir`、`api`（`bind_host` 必�
 
 bot 侧会话保存在 `data_dir/conversation.sqlite3`：`messages` 保存按 `turn_id` 分组的用户、工具结果和回复正文，`scenario_inputs` 按版本保存待补参数和已确认输入，`outbox_payloads` 保存待发送正文，`audit` 只保存状态与原因码；`deliveries` 只保存 7 天最小投递元数据。正文、输入、outbox 和审计最多 24 小时，且不得超过其原始消息的到期时间；派生到期取自身 24 小时与全部来源到期时间的较早者，新消息、修改 limit、摘要或重启都不续期。outbox 正文到期只停止重发，不改变原投递状态。读取一律先按 scope 和到期时间过滤；每轮开始和周期维护执行可重复清理，清理失败也不放行过期读取。
 
+投递日志 `deliveries` 在上述 bot 会话库及预检库中额外保存明文 `chat_id` 和 `sender_open_id`，来自已验证的入站事件，便于管理员按群和发送者追溯，随投递元数据保留 7 天。首次打开旧库时自动补充身份列；旧行保持 `NULL`，不猜测历史身份，不改变去重键、状态、uuid 和到期时间。
+
+可按这两个字段筛选投递记录，再通过 `scope_sha256` 及 `message_id = messages.source_id` 关联仍未过期的问答。记录覆盖已领取的有效事件，包括处理/发送失败及结果不明；被拒绝或忽略、未进入投递流程的消息不在此表。上下文仍按完整 scope 隔离，正文仍最多保留 24 小时，不能借身份字段恢复已清理的对话。
+
 服务安装是可选显式集合：`om service render` 和 `om service lifecycle install` 接受 `--group-query-bot-instances`（指向 JSON 数组文件的路径，每项 `instance_id`、`bot_config`、`api_config`）。默认空集合不渲染任何群查询单元，保持既有服务集合不变。显式配置时为每个实例渲染 bot 和 API 两个单元；bot 单元接收飞书、模型和查询凭据，API 单元只接收查询凭据。安装不启动服务，也不自动部署或升级。
 
 ## 续聊与候选条件
@@ -118,7 +122,7 @@ bot 侧会话保存在 `data_dir/conversation.sqlite3`：`messages` 保存按 `t
 
 ## 本地记录与验收
 
-`data_dir/preflight.sqlite3` 只保存消息/event ID、scope 摘要、固定 uuid、状态和首次创建/失效时间，保留 7 天。scope 包含实例、应用、header tenant、群、发送者和线程；线程缺省 null，header tenant/发送者缺失拒绝。sender 自身 tenant 单独保留来源证据，不用组织归属决定是否可使用。
+`data_dir/preflight.sqlite3` 保存消息/event ID、scope 摘要、明文 `chat_id` 和 `sender_open_id`、固定 uuid、状态和首次创建/失效时间，保留 7 天。scope 包含实例、应用、header tenant、群、发送者和线程；线程缺省 null，header tenant/发送者缺失拒绝。sender 自身 tenant 单独保留来源证据，不用组织归属决定是否可使用。
 
 状态为 claimed → sending → acknowledged/failed/outcome_unknown。acknowledged 仅表示平台返回成功且带回复 message_id，不证明用户收悉。结果不明、失败和重复事件均不会自动重发；重启不续期或改写原投递状态。
 
