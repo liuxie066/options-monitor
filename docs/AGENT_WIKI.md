@@ -1003,6 +1003,21 @@ account context/Wheel/ready or unavailable publication. Account boundaries inclu
 actual operations on separate ledgers/brokers, not copies for each account, and
 are not SQL/network call counts. Replay only records work it executes; disabled FX
 persistence, experience and scheduler skips do not synthesize phase durations.
+
+Inside the existing `fetch_chain_cache` parent, explicit phases measure
+`required_data_fetch` (prefetch call), conditional `required_data_calendar`
+(calendar call), `required_data_seal` (manifest seal/read/hash and summary update),
+and `required_data_publish_cleanup` (account summaries, shadow retirement and
+success audit). These sequential spans do not overlap; a skipped calendar emits
+no span. Parent time minus executed child durations is an uncovered residual,
+including surrounding control/logging overhead; do not force it to zero.
+Only these four phases opt into terminal `process_cpu_ms`, measuring the current
+Python process, including its threads but excluding subprocess CPU. Missing CPU
+is unknown. Concurrent threads can make CPU exceed wall time; wall minus CPU is
+not a network or I/O measurement. Calendar degradation can return normally, so
+its phase `ok` does not override the existing degraded event or snapshot status.
+Timing/logging failures preserve business return, exception and cancellation
+behavior. These diagnostics do not change the existing post-portfolio scope.
 Scopes reset on exit and cover synchronous work only. Timing/clock/log failures
 preserve business results and exceptions; new events include no payloads, paths,
 amounts or raw exception text. Historical logs without these events cannot be

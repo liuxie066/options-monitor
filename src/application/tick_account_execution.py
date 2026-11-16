@@ -941,83 +941,95 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                     "no account with valid config authority remains"
                 )
             prefetch_invocation_count += 1
-            prefetch_summary = prefetch_required_data(
-                vpy=request.vpy,
-                base=request.base,
-                repo_root=(request.repo_root or request.base),
-                cfg=union_cfg,
-                shared_required=request.shared_required,
-                force_refresh=bool(request.force_mode),
-                producer_run_id=request.run_id,
-                scan_at_utc=run_started_at_utc,
-                deadline=request.deadline,
-                cancelled=request.cancelled,
-            )
-            if close_advice_required_data_plan_path is not None:
-                calendar_error = enrich_close_advice_required_data_plan_bounded(
-                    plan_path=close_advice_required_data_plan_path,
-                    expected_run_id=request.run_id,
-                    python=request.vpy,
-                    repo_root=request.repo_root or request.base,
+            with prepared_context_phase(
+                "required_data_fetch", runlog=None if request.experience else request.runlog, measure_cpu=True,
+            ):
+                prefetch_summary = prefetch_required_data(
+                    vpy=request.vpy,
+                    base=request.base,
+                    repo_root=(request.repo_root or request.base),
+                    cfg=union_cfg,
+                    shared_required=request.shared_required,
+                    force_refresh=bool(request.force_mode),
+                    producer_run_id=request.run_id,
+                    scan_at_utc=run_started_at_utc,
                     deadline=request.deadline,
                     cancelled=request.cancelled,
                 )
+            if close_advice_required_data_plan_path is not None:
+                with prepared_context_phase(
+                    "required_data_calendar", runlog=None if request.experience else request.runlog, measure_cpu=True,
+                ):
+                    calendar_error = enrich_close_advice_required_data_plan_bounded(
+                        plan_path=close_advice_required_data_plan_path,
+                        expected_run_id=request.run_id,
+                        python=request.vpy,
+                        repo_root=request.repo_root or request.base,
+                        deadline=request.deadline,
+                        cancelled=request.cancelled,
+                    )
                 if calendar_error:
                     request.runlog.safe_event(
                         "close_advice_calendar", "degraded", message=calendar_error,
                     )
-            snapshot_manifest_path = (
-                run_state_dir / "required_data_snapshot_manifest.json"
-            ).resolve()
-            manifest = seal_required_data_snapshot(
-                manifest_path=snapshot_manifest_path,
-                required_data_root=request.shared_required,
-                run_id=request.run_id,
-                prefetch_summary=prefetch_summary,
-                close_advice_required_data_plan_path=(
-                    close_advice_required_data_plan_path
-                ),
-            )
-            manifest_bytes = snapshot_manifest_path.read_bytes()
-            manifest_hash = sha256_bytes(manifest_bytes)
-            snapshot_manifest_sha256 = manifest_hash
-            prefetch_summary = dict(prefetch_summary)
-            prefetch_summary.update(
-                {
-                    "snapshot_manifest_relpath": snapshot_manifest_path.relative_to(
-                        request.run_dir
-                    ).as_posix(),
-                    "snapshot_manifest_sha256": manifest_hash,
-                    "snapshot_status": manifest["status"],
-                }
-            )
-            _publish_prefetch_summary_to_accounts(
-                request=request,
-                accounts=list(scanning_configs),
-                payload=prefetch_summary,
-            )
-            snapshot_status = str(manifest["status"])
-            prefetch_done = True
-            _retire_required_data_shadows_after_manifest(
-                request=request,
-                manifest_path=snapshot_manifest_path,
-                manifest=manifest,
-                manifest_bytes=manifest_bytes,
-                trigger="new_seal",
-            )
-            request.audit_helper.audit(
-                "tool_call",
-                "required_data_prefetch",
-                run_id=request.run_id,
-                status=(
-                    "ok" if snapshot_status in {"complete", "partial"} else "error"
-                ),
-                tool_name="required_data_prefetch",
-                extra={
-                    "snapshot_status": snapshot_status,
-                    "manifest_sha256": manifest_hash,
-                },
-            )
+            with prepared_context_phase(
+                "required_data_seal", runlog=None if request.experience else request.runlog, measure_cpu=True,
+            ):
+                snapshot_manifest_path = (
+                    run_state_dir / "required_data_snapshot_manifest.json"
+                ).resolve()
+                manifest = seal_required_data_snapshot(
+                    manifest_path=snapshot_manifest_path,
+                    required_data_root=request.shared_required,
+                    run_id=request.run_id,
+                    prefetch_summary=prefetch_summary,
+                    close_advice_required_data_plan_path=(
+                        close_advice_required_data_plan_path
+                    ),
+                )
+                manifest_bytes = snapshot_manifest_path.read_bytes()
+                manifest_hash = sha256_bytes(manifest_bytes)
+                snapshot_manifest_sha256 = manifest_hash
+                prefetch_summary = dict(prefetch_summary)
+                prefetch_summary.update(
+                    {
+                        "snapshot_manifest_relpath": snapshot_manifest_path.relative_to(
+                            request.run_dir
+                        ).as_posix(),
+                        "snapshot_manifest_sha256": manifest_hash,
+                        "snapshot_status": manifest["status"],
+                    }
+                )
+            with prepared_context_phase(
+                "required_data_publish_cleanup", runlog=None if request.experience else request.runlog, measure_cpu=True,
+            ):
+                _publish_prefetch_summary_to_accounts(
+                    request=request,
+                    accounts=list(scanning_configs),
+                    payload=prefetch_summary,
+                )
+                snapshot_status = str(manifest["status"])
+                prefetch_done = True
+                _retire_required_data_shadows_after_manifest(
+                    request=request,
+                    manifest_path=snapshot_manifest_path,
+                    manifest=manifest,
+                    manifest_bytes=manifest_bytes,
+                    trigger="new_seal",
+                )
+                request.audit_helper.audit(
+                    "tool_call",
+                    "required_data_prefetch",
+                    run_id=request.run_id,
+                    status=(
+                        "ok" if snapshot_status in {"complete", "partial"} else "error"
+                    ),
+                    tool_name="required_data_prefetch",
+                    extra={
+                        "snapshot_status": snapshot_status,
+                        "manifest_sha256": manifest_hash,
+                    },
+                )
             request.runlog.safe_event(
                 "fetch_chain_cache",
                 "ok" if snapshot_status in {"complete", "partial"} else "error",

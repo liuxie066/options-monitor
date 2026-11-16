@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from time import monotonic
+from time import monotonic, process_time
 from typing import Any, Callable
 
 
@@ -138,9 +138,12 @@ _prepared_context_timing: ContextVar[Any] = ContextVar(
 
 
 @contextmanager
-def prepared_context_phase(phase: str, *, account: str | None = None) -> Iterator[None]:
+def prepared_context_phase(
+    phase: str, *, account: str | None = None, runlog: Any = None, measure_cpu: bool = False,
+) -> Iterator[None]:
     """Inclusive execution timing; completion does not imply business readiness."""
-    runlog = _prepared_context_timing.get()
+    if runlog is None:
+        runlog = _prepared_context_timing.get()
     if runlog is None:
         yield
         return
@@ -160,6 +163,12 @@ def prepared_context_phase(phase: str, *, account: str | None = None) -> Iterato
         started = monotonic()
     except Exception:
         started = None
+    cpu_started = None
+    if measure_cpu:
+        try:
+            cpu_started = process_time()
+        except Exception:
+            pass
     emit("start")
     outcome = "ok"
     try:
@@ -175,6 +184,14 @@ def prepared_context_phase(phase: str, *, account: str | None = None) -> Iterato
                 duration_ms = max(0, int((monotonic() - started) * 1000))
             except Exception:
                 pass
+        if measure_cpu:
+            # Current process only: subprocess CPU is not included.
+            data["process_cpu_ms"] = None
+            if cpu_started is not None:
+                try:
+                    data["process_cpu_ms"] = max(0, int((process_time() - cpu_started) * 1000))
+                except Exception:
+                    pass
         data["outcome"] = outcome
         emit(outcome, duration_ms)
 
