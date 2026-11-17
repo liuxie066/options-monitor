@@ -1883,6 +1883,8 @@ def _warm_required_data_chain_cache_child(
             pass
 
     try:
+        from src.infrastructure.futu_gateway import own_futu_sdk_in_current_worker
+        own_futu_sdk_in_current_worker(deadline=kwargs["deadline"])
         with exclusive_private_file_lock(
             Path(kwargs["base"])
             / "output_shared"

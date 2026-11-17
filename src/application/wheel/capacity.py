@@ -65,8 +65,12 @@ def _read_ordinary_attribution_broker_evidence(*, config: Mapping[str, Any], acc
 
 
 def _attribution_capacity_worker(connection: Any, config: dict[str, Any], account: str, runtime_root: Path,
-                                 ordinary_history_start_ms: int | None = None) -> None:
+                                 ordinary_history_start_ms: int | None = None,
+                                 deadline: float | None = None) -> None:
     try:
+        if deadline is not None:
+            from src.infrastructure.futu_gateway import own_futu_sdk_in_current_worker
+            own_futu_sdk_in_current_worker(deadline=deadline)
         cache_path = runtime_root / "output_shared" / "state" / "rate_cache.json"
         try:
             fx = project_exchange_rate_snapshot(current_exchange_rate_snapshot(cache_path=cache_path, write_cache=False), purpose="capacity")
@@ -109,11 +113,9 @@ def observe_trade_attribution_capacity(*, config: dict[str, Any], account: str, 
         return {"error": "cancelled"}
     context = multiprocessing.get_context("spawn")
     receiver, sender = context.Pipe(duplex=False)
-    args = (sender, config, account, Path(runtime_root).resolve())
-    if ordinary_history_start_ms is not None:
-        args += (ordinary_history_start_ms,)
-    process = context.Process(target=_attribution_capacity_worker, args=args, daemon=True)
     deadline = time.monotonic() + 10
+    args = (sender, config, account, Path(runtime_root).resolve(), ordinary_history_start_ms, deadline)
+    process = context.Process(target=_attribution_capacity_worker, args=args, daemon=True)
     base_result = None
 
     def finish(result: dict[str, Any]) -> dict[str, Any]:
@@ -165,7 +167,9 @@ def observe_trade_attribution_capacity(*, config: dict[str, Any], account: str, 
             if process.is_alive():
                 process.kill()
                 process.join(timeout=0.5)
-            process.close()
+            if process.is_alive():
+                raise RuntimeError("attribution worker cleanup failed")
+        process.close()
 
 
 def _load_frozen_wheel_capacity_context(

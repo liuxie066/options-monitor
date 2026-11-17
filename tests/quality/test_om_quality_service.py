@@ -373,14 +373,16 @@ def test_listener_status_survives_producer_summary_and_quality_publication(
     sources = []
     for index, label in enumerate(labels):
         source_id = f"synthetic-{index}"
-        base = {"source_id": source_id, "account": "reviewer"}
+        base = {"source_id": source_id, "account": "reviewer", "attribution_recovery": {"reviewer": {"us": {
+            "observation": {"status": "not_required", "observed_at_utc": now.isoformat(),
+                            "reason_codes": [], "ordinary_requested": False}}}}}
         first, carried = tmp_path / f"{index}-first.json", tmp_path / f"{index}-carried.json"
         auto_intake._write_listener_status(first, base, status=label, stage="synthetic")
         auto_intake._write_listener_status(carried, base, status=base["status"], stage="receipt_recovery")
         stored = json.loads(carried.read_text(encoding="utf-8"))
         assert stored["status"] == label and base["status"] == label
         sources.append({"id": source_id, "account": "reviewer", "enabled": True,
-                        "summary": _trade_intake_summary({}, stored)})
+                        "summary": _trade_intake_summary({}, stored, accounts=["reviewer"], market="us")})
     ledger_path = tmp_path / "absent-ledger.sqlite3"
     runtime = _runtime(ledger_path, trade_intake={"enabled": enabled, "sources": sources})
     runtime["service_profile"] = {"services": [

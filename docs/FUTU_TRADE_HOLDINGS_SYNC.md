@@ -1622,6 +1622,32 @@ cursor 键为 `"<account>:<market>"`，进程内保存、不迁移旧键；失�
 每个物理账户每市场每轮只共享一组完整容量观察，不为每条成交重新查询；每市场每轮归属 provider I/O 总预算 10 秒，
 一次失败不在同周期重试，响应在整体预算后到达则丢弃本轮写资格，下轮再取。连接调用必须支持超时/取消，
 无法中断的 provider 路径不得放进恢复循环。归属 I/O 位于 process_lock 外，按页检查 stop，不阻塞既有 receipt 恢复。
+归因观察复用已有一次性 daemon worker 作为 SDK 隔离边界；入口显式调用
+`futu_gateway.own_futu_sdk_in_current_worker(deadline=...)`，SDK 在线程中执行，不创建 SDK 孙进程。
+注册绑定当前 PID 和有限 deadline，对预热 worker 的查询线程也有效；仅归因和既有预热入口注册，
+未注册 daemon 明确拒绝，普通调用仍保留 SDK 查询进程。调用控制和 close 均不得延长 worker 总预算。
+父侧保留取消优先、十秒结果接受预算及 terminate/join/kill 回收；回收等待另有最多约一秒开销，
+未确认退出时显式报告 cleanup failure。历史未完成只保留首份 portfolio 和不可用历史标记；
+历史成功须使用随后重新观察的 portfolio，不将旧快照拼成完整普通归因证明。
+
+每个恢复结果的 `observation` 增加受控诊断摘要：`status`、`observed_at_utc`、
+`reason_codes`、`ordinary_requested`。`ok` 表示本轮请求的观察合格，不表示资金足够或归属写入成功；
+`partial/unavailable` 保留 provider、持仓/现金快照或历史证据缺口，合法零持仓/零成交不冒充故障。
+无任务为 `not_required`，取消为 `cancelled`；未运行或旧状态缺字段为 `unknown`。
+成功读取 canonical 事实后，没有待恢复事实的其他支持市场也明确标为 `not_required`，不另查 provider。
+持仓资格复用账户/市场/资产类型及 60 秒规则，现金复用现有 owner；历史封包复用
+`ledger.api.ordinary_attribution_observation_complete`，诊断不替代逐笔金融写资格。
+逐条 `errors` 保留原语义，空数组不能证明观察成功。
+
+公开 runtime status 在账户范围内投影 `trade_intake.attribution_observations`，只含逻辑账户、市场、
+来源、状态、时间、原因码和是否请求历史，不暴露 SDK 原文及完整券商身份。
+观察失败使顶层 `summary.ok=false` 并给出 warning；缺失、取消或超过运行证据窗口为 unknown。
+心跳刷新不更新观察时间；`not_required` 也不证明重新查询恢复。
+quality `RT-OM-002` 消费相同摘要，保留 listener 故障优先级，并按同一 runtime/source/account
+合并跨市场重复读取。具体状态及时间窗见[质量检查映射](quality-monitoring/om-check-implementation.md)。
+离线回归见 `tests/test_futu_owned_worker.py`、`tests/test_attribution_observation_budget.py` 和
+`tests/test_attribution_observation_status.py`；这些不代替部署后的生产观察验收。
+
 终态成交不必重过经济 resolver；历史 JSONL 的 dry-run/不触外部/不发通知约束继续有效，
 缺 provider evidence 时仅给归属预览，不擅自 live query 或 apply。
 

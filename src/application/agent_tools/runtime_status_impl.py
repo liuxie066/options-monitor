@@ -29,6 +29,9 @@ from src.application.llm_provider_registry import provider_requires_api_key
 from src.application.secret_store import SecretError, resolve_secret_status
 from src.application.trades.account_mapping import resolve_trade_intake_config
 from src.application.trades.state import normalize_trade_intake_state_payload
+from src.application.trades.listener_status import (
+    attribution_observations, attribution_observation_health, DEFAULT_LISTENER_HEARTBEAT_SECONDS,
+)
 from src.application.trades.state_reconcile import preview_trade_intake_reconciliation_from_sqlite
 from src.application.payload_helpers import as_dict as _dict
 from src.application.payload_helpers import first_text as _first_text
@@ -198,7 +201,9 @@ def _trade_intake_state_availability(sources: list[dict[str, Any]]) -> dict[str,
     }
 
 
-def _trade_intake_summary(state_json: dict[str, Any], status_json: dict[str, Any]) -> dict[str, Any]:
+def _trade_intake_summary(state_json: dict[str, Any], status_json: dict[str, Any], *,
+                          accounts: list[str] | None = None, source: str | None = None,
+                          market: str | None = None) -> dict[str, Any]:
     processed_raw = state_json.get("processed_deal_ids")
     failed_raw = state_json.get("failed_deal_ids")
     unresolved_raw = state_json.get("unresolved_deal_ids")
@@ -214,6 +219,7 @@ def _trade_intake_summary(state_json: dict[str, Any], status_json: dict[str, Any
             if isinstance(receipt, dict):
                 receipt_items.append(receipt)
     return {
+        "attribution_observations": attribution_observations(status_json, accounts=accounts or [], source=source, market=market),
         "listener_status": status_json.get("status"),
         "listener_stage": status_json.get("stage"),
         "identity_review_required": int(
@@ -381,6 +387,7 @@ def _aggregate_trade_intake_summaries(summaries: list[dict[str, Any]]) -> dict[s
         listener_status = "partial"
 
     out: dict[str, Any] = {
+        "attribution_observations": [row for item in summaries for row in item.get("attribution_observations", [])],
         "listener_status": listener_status,
         "source_count": len(summaries),
         # Sources may share one canonical Inbox; do not sum its quarantine count.
@@ -2382,6 +2389,8 @@ def private_runtime_status_tool(
             for source in sources:
                 if not isinstance(source, dict):
                     continue
+                if source.get("account") and source["account"] not in accounts:
+                    continue
                 source_status_path = _trade_intake_source_path(
                     source.get("status_path"),
                     base=base,
@@ -2414,7 +2423,11 @@ def private_runtime_status_tool(
                 status_json = status_info.get("json")
                 state_payload: dict[str, Any] = state_json if isinstance(state_json, dict) else {}
                 status_payload: dict[str, Any] = status_json if isinstance(status_json, dict) else {}
-                source_summary = _trade_intake_summary(state_payload, status_payload)
+                source_summary = _trade_intake_summary(state_payload, status_payload,
+                    accounts=[source["account"]] if source.get("account") else accounts,
+                    source=source.get("id"), market=desired_market)
+                if not source.get("enabled"):
+                    source_summary["attribution_observations"] = []
                 source_summary.update(_trade_intake_state_availability([
                     {"enabled": bool(source.get("enabled")), "state": state_info},
                 ]))
@@ -2437,6 +2450,7 @@ def private_runtime_status_tool(
                         "mode": source.get("mode"),
                         "host": source.get("host"),
                         "port": source.get("port"),
+                        "runtime_identity": str(ledger_runtime_root.resolve()),
                         "status": status_info,
                         "state": state_info,
                         "audit": audit_info,
@@ -2482,7 +2496,8 @@ def private_runtime_status_tool(
             trade_intake_status_json = trade_intake_status.get("json")
             trade_intake_state_payload: dict[str, Any] = trade_intake_state_json if isinstance(trade_intake_state_json, dict) else {}
             trade_intake_status_payload: dict[str, Any] = trade_intake_status_json if isinstance(trade_intake_status_json, dict) else {}
-            trade_intake_summary = _trade_intake_summary(trade_intake_state_payload, trade_intake_status_payload)
+            trade_intake_summary = _trade_intake_summary(trade_intake_state_payload, trade_intake_status_payload,
+                                                       accounts=accounts, market=desired_market)
             resolved_legacy_state_path = (
                 _path_from_config(payload.get("trade_intake_state_path"), base=base)
                 if payload.get("trade_intake_state_path")
@@ -2608,6 +2623,14 @@ def private_runtime_status_tool(
 
     warnings: list[str] = []
     warning_codes: list[str] = []
+    if trade_intake.get("enabled"):
+        observation_health = attribution_observation_health(
+            _dict(trade_intake.get("summary")).get("attribution_observations", []),
+            now=datetime.now(timezone.utc), max_age_seconds=DEFAULT_LISTENER_HEARTBEAT_SECONDS * 2)
+        if observation_health != "pass":
+            warning_codes.append("ATTRIBUTION_OBSERVATION_UNAVAILABLE" if observation_health == "warn"
+                                 else "ATTRIBUTION_OBSERVATION_UNKNOWN")
+            warnings.append("Trade attribution observation is unavailable or unverified; listener heartbeat is not query evidence.")
     if any(
         item.get("enabled")
         and _dict(item.get("state")).get("read_status") in {"invalid", "unreadable"}
@@ -3261,6 +3284,10 @@ def _status_safe_trade_intake(value: Any) -> dict[str, Any]:
     sources = [item for item in source.get("sources") or [] if isinstance(item, dict)]
     return {
         **_pick(source, {"enabled", "mode"}),
+        "attribution_observations": [
+            _pick(row, {"account", "market", "source", "status", "observed_at_utc", "reason_codes", "ordinary_requested"})
+            for row in summary.get("attribution_observations", []) if isinstance(row, dict)
+        ],
         "source_count": len(sources),
         "enabled_source_count": sum(1 for item in sources if bool(item.get("enabled"))),
         "summary": safe_summary,

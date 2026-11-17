@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Mapping, MutableMapping, Sequence
 from copy import deepcopy
+from datetime import datetime, timezone
 import json
 import time
 from pathlib import Path
@@ -22,7 +23,7 @@ from src.application.ledger.api import (
     read_trade_attribution_snapshot, open_trade_attribution_snapshot_reader, trade_attribution_facts_from_events,
     encode_evidence_cursor, decode_evidence_cursor, TradeEventPaginationError,
     combo_attribution_candidates_from_rows, ATTRIBUTION_POLICY_VERSION,
-    record_trade_attribution_conflicts, ordinary_attribution_window,
+    record_trade_attribution_conflicts, ordinary_attribution_window, ordinary_attribution_observation_complete,
 )
 from src.application.futu_quote_routing import runtime_config_market
 from src.application.write_contract import write_control
@@ -30,6 +31,45 @@ from src.application.trades.account_mapping import combo_reconciliation_mode_for
 from domain.domain.symbol_identity import resolve_symbol_identity, symbol_market
 from src.application.wheel.read_model import build_wheel_read_model_from_rows
 from src.application.daily_decision_brief_repository import read_combo_candidate_exposures_batch
+from src.application.portfolio_context_service import (
+    portfolio_position_snapshot_errors, cash_snapshot_is_usable, evaluate_account_cash_snapshot,
+)
+from src.application.trades.listener_status import observation_status
+
+
+def _attribution_observation_status(observation: Mapping[str, Any], *, account: str, market: str,
+                                    config: Mapping[str, Any], ordinary_requested: bool) -> dict[str, Any]:
+    """Project existing evidence qualification, never grant attribution eligibility."""
+    now = datetime.now(timezone.utc)
+    error = observation.get("error")
+    if error:
+        reason = error if error in {"cancelled", "provider_timeout", "provider_worker_exited"} else "provider_unavailable"
+        return observation_status("cancelled" if reason == "cancelled" else "unavailable",
+                                  reason, now=now, ordinary_requested=ordinary_requested)
+    portfolio = observation.get("portfolio")
+    portfolio = portfolio if isinstance(portfolio, Mapping) else {}
+    reasons = []
+    if any(portfolio_position_snapshot_errors(portfolio, account=account, market=market,
+            asset_type=asset, now_utc=now, max_age_seconds=60) for asset in ("stock", "option")):
+        reasons.append("position_snapshot_unavailable")
+    try:
+        cash = evaluate_account_cash_snapshot(portfolio, config=config, account=account, evaluated_at=now)
+    except (KeyError, TypeError, ValueError, ArithmeticError):
+        cash = {}
+    if not cash_snapshot_is_usable({"cash_snapshot": cash}):
+        reasons.append("cash_snapshot_unavailable")
+    portfolio_ok = not reasons
+    if ordinary_requested:
+        ids = resolve_futu_account_ids(config, account=account)
+        scope = {"broker_id": "futu", "external_account_id": next(iter(ids)) if len(ids) == 1 else None,
+                 "environment": str(infer_futu_portfolio_settings(config, account=account).get("trd_env") or "").upper(),
+                 "account": account}
+        complete = len(ids) == 1 and ordinary_attribution_observation_complete(
+            observation, scope=scope, now_ms=int(now.timestamp() * 1000))
+        if not complete:
+            reasons.append("ordinary_evidence_unavailable")
+    return observation_status("ok" if not reasons else "partial" if portfolio_ok else "unavailable",
+                              *reasons, now=now, ordinary_requested=ordinary_requested)
 
 
 def attribution_result_payload(fact: Mapping[str, Any]) -> dict[str, Any]:
@@ -193,9 +233,14 @@ def _reconcile_trade_attribution_batch(
     selected = sorted((row for row in facts if row["execution_key"] and row["execution_key"] > cursor
         and str(symbol_market(row["contract_key"]["underlying_symbol"]) or "").lower() == market),
         key=lambda row: row["execution_key"])[:100]
-    if not selected or stop_event is not None and stop_event.is_set():
-        return {"status": "idle", "checked": 0, "next_cursor": ""}
-    result = {"checked": 0, "linked": 0, "ordinary": 0, "conflicts": 0, "cache_updates": 0, "errors": [], "next_cursor": cursor}
+    if stop_event is not None and stop_event.is_set():
+        return {"status": "cancelled", "checked": 0, "next_cursor": cursor,
+                "observation": observation_status("cancelled", "cancelled")}
+    if not selected:
+        return {"status": "idle", "checked": 0, "next_cursor": "",
+                "observation": observation_status("not_required")}
+    result = {"checked": 0, "linked": 0, "ordinary": 0, "conflicts": 0, "cache_updates": 0, "errors": [],
+              "next_cursor": cursor, "observation": observation_status("cancelled", "cancelled")}
     evidence = read_attribution_combo_evidence(rows, account=account, runtime_root=runtime_root, now_ms=int(time.time() * 1000))
     if stop_event is not None and stop_event.is_set():
         return result
@@ -207,6 +252,8 @@ def _reconcile_trade_attribution_batch(
         stop_event=stop_event, **({"ordinary_history_start_ms": min(history_starts)} if history_starts else {}))
     if stop_event is not None and stop_event.is_set():
         return result
+    result["observation"] = _attribution_observation_status(
+        observation, account=account, market=market, config=config, ordinary_requested=bool(history_starts))
     view = None
     for selected_fact in selected:
         if stop_event is not None and stop_event.is_set():
@@ -338,7 +385,8 @@ def reconcile_trade_attribution_source(
     recovery: dict[str, dict[str, Any]] = {}
     for account in sorted({str(item or "").strip().lower() for item in accounts} - {""}):
         if stop_event is not None and stop_event.is_set():
-            break
+            recovery[account] = {source_market: {"observation": observation_status("cancelled", "cancelled")}}
+            continue
         entry = recovery.setdefault(account, {})
         try:
             if account not in (config.get("accounts") or []):
@@ -347,9 +395,14 @@ def reconcile_trade_attribution_source(
         except Exception as exc:
             entry["error"] = f"{type(exc).__name__}: {exc}"
             continue
+        # Discovery read the account's canonical facts successfully. An absent
+        # market has no recoverable work, so no extra provider probe is needed.
+        for market in set(RUNTIME_MARKETS) - discovered - {source_market}:
+            entry[market] = {"observation": observation_status("not_required")}
         for market in [source_market, *sorted(discovered - {source_market})]:
             if stop_event is not None and stop_event.is_set():
-                return recovery
+                entry[market] = {"observation": observation_status("cancelled", "cancelled")}
+                continue
             key = f"{account}:{market}"
             if market == source_market:
                 bound, mode = dict(config), combo_mode

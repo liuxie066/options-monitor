@@ -94,6 +94,9 @@ def _runtime_fixture(tmp_path, monkeypatch, kinds, *, enabled=True, explicit=Fal
             status_path.write_text(json.dumps({
                 "status": listener, "last_fee_sync": {"pending_count": 9},
                 "last_backfill_deal_count": 4,
+                "attribution_recovery": {names[index]: {"us": {"observation": {
+                    "status": "ok", "observed_at_utc": datetime.now(timezone.utc).isoformat(),
+                    "reason_codes": [], "ordinary_requested": False}}}},
             }), encoding="utf-8")
     original_read = Path.read_text
 
@@ -235,8 +238,9 @@ def test_real_public_facade_state_availability(tmp_path, monkeypatch, kind, enab
     assert summary["listener_status"] == listener
     assert public["trade_intake"]["enabled"] is enabled
     assert ("TRADE_INTAKE_STATE_UNAVAILABLE" in public["summary"]["warning_codes"]) is warning
-    assert public["summary"]["ok"] is (not warning)
-    assert bool(warnings) is warning
+    any_warning = warning or (enabled and listener is None)
+    assert public["summary"]["ok"] is (not any_warning)
+    assert bool(warnings) is any_warning
     old_summary = private["trade_intake"]["summary"]
     assert [summary[key] for key in COUNT_KEYS] == ([old_summary[key] for key in COUNT_KEYS] if complete else [None] * 7)
     if kind == "known":
