@@ -12,6 +12,8 @@
 
 组合归属与摄取后的组合对账通过 `read_combo_candidate_exposures_batch`，在一次账户/市场的只读操作内收集所需日期的证据。该批次仍验证整份 delivery 状态的全部来源引用，不只校验请求日期；同批复用历史事务与已读事实，下一次调用重新观察变化。读取结束后释放 observation，再沿原账本接口持久化推断；不跨对账轮次缓存结果，不改变确认、完整性和失败语义。
 
+同一 observation 中，delivery 校验成功的标准化 Brief 与兼容摘要可供后续 exposure 读取复用；复用绑定账户、市场、runtime、日期、revision 和已校验源内容，仍返回独立副本。observation 仅保留缓存键，条目被淘汰时回到原标准化路径；键在消费后或 observation 退出时释放，不延长被淘汰 Brief 的生命期、不扩大进程缓存容量，也不替代下一批的新鲜读取或错误校验。
+
 ## 查询
 
 在目标运行根目录，用现有 Tool Gateway：
