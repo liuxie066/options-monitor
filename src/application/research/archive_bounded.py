@@ -749,6 +749,9 @@ def _restore_execute(*, archive_root: Path, target: Path, limits: dict, deadline
         raise TransferError("restore structure invalid")
     result = {
         "complete": True,
+        "archive_root": str(archive_root),
+        "archive_receipt_sha256": hashlib.sha256(receipt_path.read_bytes()).hexdigest(),
+        "run_ids": ids,
         "run_count": len(ids),
         "file_count": len(rows),
         "payload_written_bytes": budget.written,

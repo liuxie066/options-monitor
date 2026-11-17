@@ -290,6 +290,29 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
     prune.add_argument("--keep-count", type=int, default=30)
     prune.add_argument("--no-logs", action="store_true")
     prune.add_argument("--confirm", action="store_true")
+    restore = archive_commands.add_parser(
+        "restore-batch", help="independently restore a bounded archive into a new local root"
+    )
+    restore.add_argument("--archive-root", required=True)
+    restore.add_argument("--restore-root", required=True)
+    restore.add_argument("--limits-file", required=True)
+    retire = archive_commands.add_parser(
+        "retire-batch", help="preview exact bounded archive runs after independent restore"
+    )
+    retire.add_argument("--archive-root", required=True)
+    retire.add_argument("--restore-root", required=True)
+    retire.add_argument("--limits-file", required=True)
+    retire.add_argument("--source-root", default=None)
+    retire.add_argument("--ssh-target", default=None)
+    retire.add_argument("--source-repo-root", default=None)
+    retire.add_argument("--remote-runtime-root", default="/var/lib/options-monitor")
+    retire.add_argument("--expected-plan-sha256", default=None)
+    retire.add_argument("--confirm", action="store_true")
+    retire.add_argument(
+        "--reference-check-sudo",
+        action="store_true",
+        help="explicit Linux-only sudo metadata observer; never automatic",
+    )
     return research
 
 
@@ -659,6 +682,37 @@ def handle_research_command(
                     write=bool(args.write),
                     rsync_path=args.rsync_path,
                 )
+        elif args.archive_command in {"restore-batch", "retire-batch"}:
+            from src.application.research.archive_stream import TransferError
+
+            try:
+                if args.archive_command == "restore-batch":
+                    from src.application.research.archive_bounded import restore_batch
+
+                    data = restore_batch(
+                        archive_root=Path(args.archive_root),
+                        target=Path(args.restore_root),
+                        limits_file=Path(args.limits_file),
+                    )
+                else:
+                    from src.application.research.archive_retirement import retire_batch
+
+                    data = retire_batch(
+                        archive_root=args.archive_root,
+                        restore_root=args.restore_root,
+                        limits_file=args.limits_file,
+                        source_root=args.source_root,
+                        ssh_target=args.ssh_target,
+                        source_repo_root=args.source_repo_root,
+                        remote_runtime_root=args.remote_runtime_root,
+                        confirm=args.confirm,
+                        expected_plan_sha256=args.expected_plan_sha256,
+                        reference_check_sudo=args.reference_check_sudo,
+                    )
+            except (TransferError, OSError, ValueError, KeyError) as exc:
+                raise AgentToolError(
+                    code="INPUT_ERROR", message=f"bounded retirement unavailable: {type(exc).__name__}"
+                ) from exc
         elif args.archive_command == "verify":
             data = archive_verify(repo_root=base, remote=args.remote, archive_root=args.archive_root)
         elif args.archive_command == "prune-remote":

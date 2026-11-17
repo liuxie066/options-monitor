@@ -176,7 +176,7 @@ Python调用可显式传`include_fixed_shared=False`，只带所选run及清单�
 缺省True保留原两个fixedshared根范围；CLI用`--no-fixed-shared`明确选择仅run及引用依赖，且必须同时给`--limits-file`。该模式不证明生产历史全部依赖已验证。
 SSH可显式加`--ssh-compression`使用传输压缩，缺省关闭；只作用于有界SSH，不改变落盘字节/hash/归档格式，不保证吞吐或CPU收益。
 同owner `restore_batch(archive_root, target, limits_file)`从已发布回执向全新本地目录独立复制，
-复用一次多文件流、监督worker和纯证据owner核验，不连接原源端；每文件仍核恢复副本的身份/长度及原回执hash。调用方可在非仓库cwd运行；当前为Python关键字接口，无新增CLI。
+复用一次多文件流、监督worker和纯证据owner核验，不连接原源端；每文件仍核恢复副本的身份/长度及原回执hash。调用方可在非仓库cwd运行；CLI `research archive restore-batch --archive-root <B> --restore-root <新C> --limits-file <JSON>`调用同一owner。独立恢复回执绑定原归档回执SHA256、绝对归档根及run IDs；旧无绑定回执不可作为新退役资格。
 
 预算 JSON 必须完整指定 `seconds`、`grace_seconds`、`max_bytes`、`max_entries`、
 `max_file_bytes`、`max_rss_bytes`、`evidence_bytes`、`reserve_bytes`、`stderr_bytes`，均为正有限值，
@@ -189,4 +189,7 @@ SSH可显式加`--ssh-compression`使用传输压缩，缺省关闭；只作用�
 验证回执、内容同步后以不可覆盖 rename 发布，再同步父目录及回读；发布后同步失败是 unknown，保留副本。
 进程树 RSS/空间是观测停止阈值，存在采样/操作系统退出延迟，不是零超调硬实时保证。
 `ps` 进程观测必须可用；SSH只读命令依赖目标已有Python/timeout；观察超时或退出核定失败返回unknown；调用方须保存CLI输出/返回值，父监督被迫终止时worker结果文件可能不存在，不当作进程已退出。现有小文件SSH核定不代替整批Linux故障/恢复验证，传输压缩尚无生产收益数据。
-不含源删除、服务/配置变更；现有归档和生产数据不作本地验证 fixture。
+上述pull/restore不删除源。另有`research/archive_retirement.py::retire_batch`和CLI `research archive retire-batch`，必须显式给`--archive-root`、`--restore-root`、`--limits-file`及源（`--source-root`或`--ssh-target`）；SSH还须`--source-repo-root`指向已部署且具该owner的源发布，源需现有venv/Python/timeout。不上传或自动升级工具。
+缺省仅预览；单独批准精确预览后，以`--confirm --expected-plan-sha256 <摘要>`执行。回收仅接受run-only有界归档：复验B/C全部冻结文件hash、恢复绑定、源host/runtime/身份/hash、30天OR200及pointer；Linux同UID进程引用或macOS系统lsof观察不可用/unknown均阻断。Linux默认使用普通权限固定只读观察器；只有显式`--reference-check-sudo`（Python `reference_check_sudo=True`）才调用已有`sudo -n /usr/bin/python3 -I -S -B`的固定标准库代码，源UID取该次源worker的UID而非用户可覆盖参数，仅读该UID的`/proc` cwd/exe/fd链接并返回命中/unknown摘要。该选项参与确认摘要，改变权限方式必须重新预览；缺sudo、权限、预算或引用未知均拒绝，不自动提权/回退，不安装sudoers、不访问宿主。Mac显式提权选项不支持且拒绝，仍走原lsof检查。委托`service_cleanup.cleanup_output_runs_for_ids`，持有upgrade transition guard、只删除精确集合；从不清release/cache/log/shared blob。任何选中项漂移/保护则拒绝，不自动缩小或扩大集合。
+删除前源端在`output_shared/state/run_retirements/<绑定摘要>.jsonl`独占持久化开始及逐项deleting/removed/failed记录，父目录链fsync失败或证据预算不足即不删；旧回执不覆盖，不自动重放。首项部分失败、超时或失联也不得报告`source_deleted=false`，而是null/unknown并保留可读进度；预览返回source_receipt_path用于后续独立核定。进程树RSS为本机监督软阈值，SSH源端不是硬RSS限额；总deadline包括B/C复验及源端调用，强制终止可能已发生部分删除，必须人工核对源回执，不自动重试。
+这些接口不授权生产复制、删除、发布升级或长期调度；现有归档和生产数据不作本地验证fixture。
