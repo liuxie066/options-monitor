@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from functools import cmp_to_key
 import shutil
 import stat
+import time
 import subprocess
 from pathlib import Path
 from typing import Any, Callable
@@ -313,6 +314,138 @@ def _output_run_cleanup_plan(
         "delete_runs": delete_runs,
         "estimated_bytes": estimated,
     }
+
+
+def cleanup_output_runs_for_ids(
+    *,
+    runtime_root: Path,
+    run_ids: list[str],
+    confirm: bool = False,
+    expected_plan_sha256: str | None = None,
+    before_delete: Callable[[], None] | None = None,
+    archive_binding_sha256: str | None = None,
+    evidence_bytes: int = 0,
+    deadline: float | None = None,
+) -> dict[str, Any]:
+    """Exact archived-run subset only; never clean releases, caches or logs."""
+    ids = set(run_ids)
+    if (
+        not ids
+        or len(ids) != len(run_ids)
+        or any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name) or name in {".", ".."} for name in ids)
+    ):
+        raise ValueError("explicit unique safe run IDs required")
+    runtime = Path(runtime_root).absolute()
+
+    def plan():
+        full = _output_run_cleanup_plan(
+            runtime_root=runtime, keep_days=30, keep_count=200, now=datetime.now(timezone.utc)
+        )
+        rows = [row for row in full["delete_runs"] if Path(row["path"]).name in ids]
+        if {Path(row["path"]).name for row in rows} != ids:
+            raise ValueError("selected run absent or retention protected")
+        return {**full, "delete_runs": rows, "estimated_bytes": sum(row["estimated_bytes"] for row in rows)}
+
+    def execute():
+        current = plan()
+        digest = _output_runs_plan_sha256(current)
+        result = {
+            "ok": True,
+            "confirmed": confirm,
+            "plan_sha256": digest,
+            "delete_runs": current["delete_runs"],
+            "deleted_paths": [],
+            "operations": [],
+        }
+        if not confirm:
+            return result
+        if not expected_plan_sha256 or digest != expected_plan_sha256:
+            raise ValueError("confirmed output run plan changed")
+        if before_delete is None:
+            raise ValueError("archive source validation required")
+        before_delete()
+        if _output_runs_plan_sha256(plan()) != digest:
+            raise ValueError("output run plan changed during validation")
+        if not archive_binding_sha256 or not re.fullmatch("[0-9a-f]{64}", archive_binding_sha256):
+            raise ValueError("archive binding required")
+        if evidence_bytes < (len(run_ids) * 16384 + 4096):
+            raise ValueError("retirement progress evidence budget")
+        journal_dir = runtime / "output_shared" / "state" / "run_retirements"
+        for parent in [runtime / "output_shared", runtime / "output_shared" / "state", journal_dir]:
+            if parent.is_symlink():
+                raise ValueError("unsafe retirement receipt directory")
+            parent.mkdir(mode=0o700, exist_ok=True)
+            # A prior failed attempt may have created an unsynced directory.
+            fd = os.open(parent.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        key = hashlib.sha256((archive_binding_sha256 + digest).encode()).hexdigest()
+        journal = journal_dir / (key + ".jsonl")
+        result["receipt_path"] = str(journal)
+        result["source_mutated"] = False
+        result["source_deleted"] = False
+        written = 0
+        with journal.open("xb") as handle:
+            os.chmod(journal, 0o600)
+
+            def record(event):
+                nonlocal written
+                wire = (json.dumps(event, separators=(",", ":")) + "\n").encode()
+                if written + len(wire) > evidence_bytes:
+                    raise ValueError("progress evidence budget; inspect source receipt")
+                handle.write(wire)
+                handle.flush()
+                os.fsync(handle.fileno())
+                written += len(wire)
+
+            record(
+                {
+                    "state": "started",
+                    "archive_binding_sha256": archive_binding_sha256,
+                    "plan_sha256": digest,
+                    "run_ids": run_ids,
+                }
+            )
+            fd = os.open(journal_dir, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            for row in current["delete_runs"]:
+                if deadline is not None and time.monotonic() >= deadline:
+                    record({"state": "stopped", "reason": "deadline"})
+                    result.update(ok=False, source_deleted=None)
+                    break
+                record({"state": "deleting", "path": row["path"]})
+                operation = _delete_path_result(Path(row["path"]), kind="output_run")
+                record({"state": "removed" if operation["ok"] else "failed", "operation": operation})
+                result["operations"].append(operation)
+                if not operation["ok"]:
+                    result.update(ok=False, source_mutated=None, source_deleted=None)
+                    break
+                result["deleted_paths"].append(row["path"])
+                result.update(source_mutated=True, source_deleted=True)
+                if Path(row["path"]).exists():
+                    result.update(ok=False, source_deleted=None)
+                    break
+            record(
+                {
+                    "state": "complete" if result["ok"] else "partial_or_unknown",
+                    "deleted_paths": result["deleted_paths"],
+                }
+            )
+        return result
+
+    if not confirm:
+        return execute()
+    with single_instance_lock(
+        runtime / "locks/upgrade.lock.guard", busy_message="run retirement requires idle upgrade transition"
+    ):
+        if (runtime / "locks/upgrade.lock").exists():
+            raise ValueError("upgrade active")
+        return execute()
 
 
 def _runtime_log_cleanup_plan(
