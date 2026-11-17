@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from contextlib import ExitStack
 from dataclasses import replace
 from datetime import date, datetime, timezone
 import json
@@ -24,6 +25,7 @@ from src.application.config_sections import (
     resolve_watchlist_config,
 )
 from src.application.config_profiles import apply_profiles
+from src.application.multi_tick_audit import prepared_context_phase
 from src.application.market_data_provider import (
     resolve_market_data_provider, require_market_data_provider, provider_by_name, market_data_source,
     get_underlier_observations as get_underlier_observations_opend,
@@ -2071,24 +2073,29 @@ def prefetch_required_data(
     scan_at_utc: datetime | None = None,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
+    runlog: Any = None,
 ) -> dict[str, Any]:
     check_fetch_control(deadline, cancelled)
     require_market_data_provider(cfg)
-    with exclusive_private_file_lock(
-        Path(base) / "output_shared" / "state" / "required_data_prefetch.lock"
-    ):
-        return _prefetch_required_data_unlocked(
-            vpy=vpy,
-            base=base,
-            repo_root=repo_root,
-            cfg=cfg,
-            shared_required=shared_required,
-            force_refresh=force_refresh,
-            producer_run_id=producer_run_id,
-            scan_at_utc=scan_at_utc,
-            deadline=deadline,
-            cancelled=cancelled,
-        )
+    with ExitStack() as lock_scope:
+        # Acquisition includes private-file preparation; release is outside held work.
+        with prepared_context_phase("required_data_lock_wait", runlog=runlog):
+            lock_scope.enter_context(exclusive_private_file_lock(
+                Path(base) / "output_shared" / "state" / "required_data_prefetch.lock"
+            ))
+        with prepared_context_phase("required_data_lock_held", runlog=runlog):
+            return _prefetch_required_data_unlocked(
+                vpy=vpy,
+                base=base,
+                repo_root=repo_root,
+                cfg=cfg,
+                shared_required=shared_required,
+                force_refresh=force_refresh,
+                producer_run_id=producer_run_id,
+                scan_at_utc=scan_at_utc,
+                deadline=deadline,
+                cancelled=cancelled,
+            )
 
 
 def _prefetch_required_data_unlocked(

@@ -507,6 +507,7 @@ def test_barrier_prefetches_once_and_seals_before_account_submission(
             return _fake_prepare_options(**kwargs)
 
     def fake_prefetch(**kwargs):
+        assert kwargs["runlog"] is request.runlog
         from src.application.multi_tick_audit import prepared_context_phase
         assert any(e.get("step") == "prepared_context_phase" and e.get("status") == "ok" and e["data"]["phase"] == "post_portfolio_prepare" for e in request.runlog.events)
         with prepared_context_phase("outside_scope"):
@@ -672,10 +673,9 @@ def test_experience_barrier_skips_account_authority_wheel_and_runtime_shadow(
         "_publish_runtime_portfolio_snapshot_shadow",
         _forbidden("runtime portfolio shadow"),
     )
-    monkeypatch.setattr(
-        mod,
-        "prefetch_required_data",
-        lambda **_kwargs: {
+    def experience_prefetch(**kwargs):
+        assert kwargs["runlog"] is None
+        return {
             "schema_version": "1.0",
             "errors": 0,
             "symbols": [],
@@ -685,8 +685,9 @@ def test_experience_barrier_skips_account_authority_wheel_and_runtime_shadow(
                 "symbols": [],
             },
             "quote_receipts": {},
-        },
-    )
+        }
+
+    monkeypatch.setattr(mod, "prefetch_required_data", experience_prefetch)
 
     monkeypatch.setattr(mod, "seal_required_data_snapshot", _seal_stub())
 
