@@ -117,6 +117,13 @@ def _prepare_tick_brief_account(
             outcomes[account] = outcomes.get(account, True) and reliable
             # Publish only the qualification whose necessary source is durable;
             # a later account or cancellation must not erase that fact.
+            try:
+                runlog.safe_event(
+                    "scan_result_available", "ok" if reliable else "error",
+                    data={"account": account, "market": market, "available": bool(reliable)},
+                )
+            except Exception:
+                pass
             if on_account_prepared is not None:
                 on_account_prepared(account, outcomes[account])
             check_fetch_control(deadline, cancelled)
