@@ -209,6 +209,8 @@ class _BriefHistoryObservation(DailyBriefReadScope):
         self._connection = None
         self._payloads: dict[tuple, Any] = {}
         self._payload_hashes: dict[int, tuple[Any, str]] = {}
+        # Only keys: do not keep evicted cache values alive through this observation.
+        self._validated_sources: dict[tuple[str, int, str], tuple] = {}
         self._revisions: dict[str, list[int]] = {}
         self._delivery: dict[str, Any] | None = None
 
@@ -276,6 +278,7 @@ def _brief_history_observation(*, base: Path, account: str, market: str) -> Iter
         try:
             yield observation
         finally:
+            observation._validated_sources.clear()
             _BRIEF_HISTORY_OBSERVATION.reset(token)
 
 
@@ -1766,6 +1769,7 @@ def read_combo_candidate_exposures_batch(
 
     Delivery bytes and referenced sources are validated once against one history
     transaction. Only requested revisions and delivery references are decoded.
+    Already validated source normalization is reused with independent result copies.
     No observation survives this call; independent readers always observe anew.
     """
     identity = dict(base=Path(base).resolve(), account=_normalize_account(account), market=_normalize_market(market))
@@ -1913,9 +1917,24 @@ def _read_brief_result(
                            revision=revision, successful=market_trading_date is None)
         if raw is _MISSING:
             return {"available": False, "reason": "not_found", "brief": None, "path": path}
-        brief = _normalize_persisted_brief(
-            raw, path=path, account=account, market=market, source_digests=digests,
-        )
+        observation = _BRIEF_HISTORY_OBSERVATION.get()
+        validated = None
+        if (observation is not None and observation.matches(base=base, account=account, market=market)
+                and market_trading_date is not None and revision is not None):
+            cache_key = observation._validated_sources.pop(
+                (market_trading_date, revision, _observed_source_content_hash(raw)), None)
+            if cache_key is not None:
+                validated = _VALIDATED_BRIEF_CACHE.get(cache_key)
+        if validated is None:
+            brief = _normalize_persisted_brief(
+                raw, path=path, account=account, market=market, source_digests=digests,
+            )
+        else:
+            # A public reader may mutate its result; never lend out the cache value.
+            brief = deepcopy(validated[0])
+            digests.extend(validated[1])
+            if brief["account"] != account or brief["market"] != market:
+                raise DailyDecisionBriefStateError(f"daily brief state identity mismatch: {path}")
         if market_trading_date is not None and brief["market_trading_date"] != market_trading_date:
             raise DailyDecisionBriefStateError(f"daily brief date mismatch: {path}")
         if revision is not None and int(brief["revision"]) != revision:
@@ -2755,6 +2774,8 @@ def _read_validated_successful_revision_source(
             raise DailyDecisionBriefStateError(f"daily brief delivery revision identity mismatch: {revision_path}")
         if source_digest not in compatible_digests:
             raise DailyDecisionBriefStateError(f"daily brief delivery source digest mismatch: {revision_path}")
+        if observation is not None and observation.matches(base=base, account=account, market=market):
+            observation._validated_sources[(market_trading_date, revision, observation_digest)] = cache_key
         if successful_sources is not None:
             successful_sources[key] = (brief, raw)
         return brief, raw

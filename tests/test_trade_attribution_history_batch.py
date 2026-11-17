@@ -61,6 +61,72 @@ def independent(base, dates):
         base=base, account="lx", market="US", market_trading_date=day) for day in dates}
 
 
+@pytest.mark.parametrize("warm", [False, True])
+def test_batch_normalizes_each_source_at_most_once(history, monkeypatch, warm):
+    base, _, dates = history
+    expected = independent(base, dates)
+    monkeypatch.setattr(repository, "_VALIDATED_BRIEF_CACHE", {})
+    if warm:
+        batch(base, dates)
+    original = repository.normalize_persisted_daily_decision_brief_with_digests
+    calls = []
+
+    def counted(raw):
+        calls.append((raw["market_trading_date"], raw["revision"]))
+        return original(raw)
+
+    monkeypatch.setattr(repository, "normalize_persisted_daily_decision_brief_with_digests", counted)
+    assert batch(base, dates) == expected
+    assert sorted(calls) == ([] if warm else [(day, 0) for day in dates])
+
+
+def test_observation_reuse_does_not_share_mutable_briefs(history):
+    base, _, dates = history
+    args = dict(base=base, account="lx", market="US")
+    read_args = dict(**args, market_trading_date=dates[0], revision=0)
+    expected = repository.read_daily_decision_brief(**read_args)
+    with repository._brief_history_observation(**args):
+        repository.read_daily_decision_brief_delivery_state(**args)
+        # Even a validator's returned object is distinct from the retained source.
+        source, _ = repository._read_validated_successful_revision_source(
+            **read_args, source_digest=expected["brief_digest"])
+        source["actions"].clear()
+        actual = repository.read_daily_decision_brief(**read_args)
+        assert actual == expected
+        actual["brief"]["actions"].clear()
+        assert repository.read_daily_decision_brief(**read_args) == expected
+    assert repository.read_daily_decision_brief(**read_args) == expected
+
+
+@pytest.mark.parametrize("abort", [False, True])
+def test_observation_releases_validated_sources_on_exit(history, abort):
+    base, _, _ = history
+    args = dict(base=base, account="lx", market="US")
+    try:
+        with repository._brief_history_observation(**args) as observation:
+            repository.read_daily_decision_brief_delivery_state(**args)
+            assert observation._validated_sources
+            if abort:
+                raise RuntimeError("cancel observation")
+    except RuntimeError as exc:
+        assert abort and str(exc) == "cancel observation"
+    assert observation._validated_sources == {}
+    assert repository._BRIEF_HISTORY_OBSERVATION.get() is None
+
+
+def test_observation_falls_back_after_validated_cache_eviction(history, monkeypatch):
+    base, _, dates = history
+    args = dict(base=base, account="lx", market="US")
+    expected = independent(base, dates)
+    monkeypatch.setattr(repository, "_VALIDATED_BRIEF_CACHE", {})
+    with repository._brief_history_observation(**args) as observation:
+        observation.delivery_state(**args)
+        repository._VALIDATED_BRIEF_CACHE.clear()
+        actual = {day: repository.read_combo_candidate_exposures(
+            **args, market_trading_date=day, read_scope=observation) for day in dates}
+    assert actual == expected
+
+
 @pytest.mark.parametrize("reuse_scope", [False, True])
 def test_each_independent_delivery_observation_uses_one_fresh_source_transaction(history, monkeypatch, reuse_scope):
     base, _, _ = history
