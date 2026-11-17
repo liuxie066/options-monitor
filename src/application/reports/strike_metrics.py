@@ -89,6 +89,7 @@ def _snapshot_sealed_at(path: Path) -> Any:
 def collect_candidate_evidence(runtime_root: str | Path, now: datetime) -> dict[str, Any]:
     """Validate originals, including dependencies, and project report-only fields."""
     from src.application.opening_candidate_snapshot import (
+        opening_candidate_input,
         candidate_universe_summary, load_opening_candidate_snapshot,
     )
 
@@ -130,7 +131,7 @@ def collect_candidate_evidence(runtime_root: str | Path, now: datetime) -> dict[
                 raise ValueError("snapshot envelope changed during collection")
             rows = []
             for row in snapshot.get("candidate_decisions") or []:
-                src = row.get("normalized_input") or {}
+                src = opening_candidate_input(row)
                 opening = row.get("opening_decision") or {}
                 rows.append({
                     "candidate_id": row.get("candidate_id"), "symbol": src.get("symbol"),

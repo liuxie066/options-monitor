@@ -4,6 +4,8 @@
 
 普通 OM 安装不选择本插件，也不启动新服务。插件导入及命令 help 不启动网络、解析凭据或创建数据目录。完整合同见 [群查询bot设计](../../docs/GROUP_QUERY_BOT_DESIGN.md)。
 
+`./om group-query-bot …`（`python -m src.interfaces.cli.main`）在通用扫描依赖加载前复用本插件的命令注册与分派；参数错误仍由完整 CLI 解析器报告。通过 Python 导入 `main` 后调用的路径保持原样。此优化不改变插件业务自身需要的依赖，也不代表 API 行情请求无需 pandas/Futu SDK。
+
 ## 源码开发与预览
 
 在本工作区的独立 Python 环境显式安装源码包。加载器仍检查 distribution 和版本，不回退到仓库源码目录：

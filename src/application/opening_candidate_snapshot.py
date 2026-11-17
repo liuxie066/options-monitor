@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import hashlib
 import json
 import math
@@ -29,6 +30,7 @@ from src.application.candidate_snapshot_contract import (
     BENIGN_OPENING_NOT_APPLICABLE_REASONS as _BENIGN_ACCOUNT_NOT_APPLICABLE_REASONS,
     CandidateSnapshotContractError,
     OPENING_BROKER_SNAPSHOT_SCHEMA,
+    OPENING_SINGLE_INPUT_SNAPSHOT_SCHEMA,
     assert_current_candidate_artifact_boundary,
     required_data_coverage_fields,
     validate_candidate_run_mode,
@@ -226,8 +228,7 @@ def seal_opening_candidate_snapshot(
     seal_time = _timestamp(sealed_at or datetime.now(timezone.utc))
 
     payload: dict[str, Any] = {
-        "schema_version": (OPENING_BROKER_SNAPSHOT_SCHEMA if authority.get("broker_id") == "longbridge"
-                           else OPENING_CANDIDATE_SNAPSHOT_SCHEMA),
+        "schema_version": OPENING_SINGLE_INPUT_SNAPSHOT_SCHEMA,
         "run_id": run_id_norm,
         "account": account_norm,
         **({"broker_id": authority["broker_id"], "broker_account_id": authority["broker_account_id"],
@@ -335,6 +336,32 @@ def load_opening_candidate_snapshot(
     return payload
 
 
+def opening_candidate_input(decision: Mapping[str, Any]) -> dict[str, Any]:
+    """Read the input from its declared record owner without repairing missing facts."""
+    if decision.get("schema_version") == "opening_candidate_decision.v2":
+        opening = decision.get("opening_decision")
+        if not isinstance(opening, Mapping):
+            raise OpeningCandidateSnapshotError("opening candidate decision payload is invalid")
+        value = opening.get("normalized_input")
+    elif decision.get("schema_version") == "opening_candidate_decision.v1":
+        value = decision.get("normalized_input")
+    else:
+        value = decision.get("normalized_input", {})
+    if not isinstance(value, dict):
+        raise OpeningCandidateSnapshotError("opening candidate normalized input is invalid")
+    return value
+
+
+def _decision_view(decision: Mapping[str, Any]) -> dict[str, Any]:
+    if decision.get("schema_version") == "opening_candidate_decision.v2":
+        return {
+            **decision,
+            "schema_version": "opening_candidate_decision.v1",
+            "normalized_input": deepcopy(opening_candidate_input(decision)),
+        }
+    return dict(decision)
+
+
 def ranked_opening_candidates(
     snapshot: Mapping[str, Any],
     *,
@@ -343,12 +370,21 @@ def ranked_opening_candidates(
     """Project the sealed order without re-ranking or filling missing facts."""
 
     mode_norm = _mode(mode) if mode is not None else None
-    return [
-        {**item, "strategy_core_status": "source" if (item.get("facts") or {}).get("strategy_core") else "legacy"}
-        for item in snapshot.get("ranked_candidates") or []
-        if isinstance(item, Mapping)
-        and (mode_norm is None or item.get("strategy_mode") == mode_norm)
-    ]
+    single_input = snapshot.get("schema_version") == OPENING_SINGLE_INPUT_SNAPSHOT_SCHEMA
+    decisions = {row["candidate_id"]: row for row in snapshot.get("candidate_decisions") or []} if single_input else {}
+    out = []
+    for item in snapshot.get("ranked_candidates") or []:
+        if not isinstance(item, Mapping) or (mode_norm is not None and item.get("strategy_mode") != mode_norm):
+            continue
+        row = dict(item)
+        if single_input:
+            decision = decisions.get(row.get("candidate_id"))
+            if decision is None:
+                raise OpeningCandidateSnapshotError("ranked opening candidate decision is unavailable")
+            row["facts"] = deepcopy(opening_candidate_input(decision))
+        row["strategy_core_status"] = "source" if (row.get("facts") or {}).get("strategy_core") else "legacy"
+        out.append(row)
+    return out
 
 
 def ranked_opening_candidate_decisions(
@@ -362,18 +398,23 @@ def ranked_opening_candidate_decisions(
         if isinstance(item, Mapping)
     }
     out: list[dict[str, Any]] = []
-    for ranked in ranked_opening_candidates(snapshot):
+    for ranked in snapshot.get("ranked_candidates") or []:
         candidate_id = str(ranked.get("candidate_id") or "")
         decision = decision_by_id.get(candidate_id)
         if decision is None:
             raise OpeningCandidateSnapshotError(
                 "ranked opening candidate decision is unavailable"
             )
+        facts = (
+            opening_candidate_input(decision)
+            if snapshot.get("schema_version") == OPENING_SINGLE_INPUT_SNAPSHOT_SCHEMA
+            else ranked.get("facts") or {}
+        )
         out.append(
             {
-                **decision,
+                **_decision_view(decision),
                 "opening_snapshot_rank": ranked.get("rank"),
-                "strategy_core_status": ranked["strategy_core_status"],
+                "strategy_core_status": "source" if facts.get("strategy_core") else "legacy",
             }
         )
     return out
@@ -388,7 +429,7 @@ def rejected_opening_candidate_decisions(
 
     mode_norm = _mode(mode) if mode is not None else None
     return [
-        {**item, "strategy_core_status": "source" if (item.get("normalized_input") or {}).get("strategy_core") else "legacy"}
+        {**_decision_view(item), "strategy_core_status": "source" if opening_candidate_input(item).get("strategy_core") else "legacy"}
         for item in snapshot.get("candidate_decisions") or []
         if isinstance(item, Mapping)
         and (mode_norm is None or item.get("strategy_mode") == mode_norm)
@@ -405,8 +446,11 @@ def validate_opening_candidate_snapshot(
     require_current_contract: bool = False,
 ) -> None:
     item = dict(payload or {})
-    if item.get("schema_version") not in {OPENING_CANDIDATE_SNAPSHOT_SCHEMA, OPENING_BROKER_SNAPSHOT_SCHEMA}:
+    if item.get("schema_version") not in {
+        OPENING_CANDIDATE_SNAPSHOT_SCHEMA, OPENING_BROKER_SNAPSHOT_SCHEMA, OPENING_SINGLE_INPUT_SNAPSHOT_SCHEMA,
+    }:
         raise OpeningCandidateSnapshotError("opening candidate snapshot schema mismatch")
+    single_input = item["schema_version"] == OPENING_SINGLE_INPUT_SNAPSHOT_SCHEMA
     if "strike_boundary_reason_codes_version" in item:
         version = item["strike_boundary_reason_codes_version"]
         if type(version) is not int or version != 1:
@@ -420,8 +464,8 @@ def validate_opening_candidate_snapshot(
     except CandidateSnapshotContractError as exc:
         raise OpeningCandidateSnapshotError(str(exc)) from exc
     if mode_fields["scan_mode"] == "experience":
-        if item.get("schema_version") == OPENING_BROKER_SNAPSHOT_SCHEMA:
-            raise OpeningCandidateSnapshotError("broker snapshot requires standard mode")
+        if item.get("schema_version") != OPENING_CANDIDATE_SNAPSHOT_SCHEMA:
+            raise OpeningCandidateSnapshotError("broker or single-input snapshot requires standard mode")
         from src.application.experience_candidate_snapshot import (
             ExperienceCandidateSnapshotError,
             validate_experience_candidate_owner,
@@ -450,7 +494,9 @@ def validate_opening_candidate_snapshot(
     _timestamp(item.get("sealed_at_utc"))
     if item.get("opening_status") not in OPENING_STATUSES:
         raise OpeningCandidateSnapshotError("opening candidate snapshot status is invalid")
-    broker_snapshot = item["schema_version"] == OPENING_BROKER_SNAPSHOT_SCHEMA
+    broker_snapshot = item["schema_version"] == OPENING_BROKER_SNAPSHOT_SCHEMA or (
+        single_input and item.get("broker_id") == "longbridge"
+    )
     if broker_snapshot:
         if item.get("broker_id") != "longbridge" or "futu_account_id" in item:
             raise OpeningCandidateSnapshotError("broker snapshot identity is invalid")
@@ -509,9 +555,18 @@ def validate_opening_candidate_snapshot(
         or any(not isinstance(row, Mapping) for row in scopes)
     ):
         raise OpeningCandidateSnapshotError("opening candidate snapshot collections are invalid")
+    if single_input:
+        if any(row.get("schema_version") != "opening_candidate_decision.v2" or "normalized_input" in row for row in decisions):
+            raise OpeningCandidateSnapshotError("single-input candidate decision contract is invalid")
+        if any("facts" in row for row in ranked):
+            raise OpeningCandidateSnapshotError("single-input ranking cannot duplicate candidate facts")
+        if len({row.get("candidate_id") for row in ranked}) != len(ranked):
+            raise OpeningCandidateSnapshotError("ranked candidate identity is duplicated")
+    elif any(row.get("schema_version") == "opening_candidate_decision.v2" for row in decisions):
+        raise OpeningCandidateSnapshotError("single-input decision requires its snapshot schema")
     for strategy_mode in {row.get("strategy_mode") for row in decisions if row.get("strategy_mode")}:
         _validate_core_scope(
-            [dict(row.get("normalized_input") or {}) for row in decisions if row.get("strategy_mode") == strategy_mode],
+            [opening_candidate_input(row) for row in decisions if row.get("strategy_mode") == strategy_mode],
             mode=_mode(strategy_mode), account=expected_account, market=_market(item.get("market")),
         )
     if broker_snapshot and authority["status"] != "available" and ranked:
@@ -528,13 +583,13 @@ def validate_opening_candidate_snapshot(
         decision_by_id[candidate_id] = decision
         # opening_candidate_snapshot.v1 historically allowed a minimal
         # candidate-id record for read-only ranked projections. New seals use
-        # the complete opening_candidate_decision.v1 contract below.
-        if decision.get("schema_version") != "opening_candidate_decision.v1":
+        # complete records with a single declared input owner.
+        if decision.get("schema_version") != ("opening_candidate_decision.v2" if single_input else "opening_candidate_decision.v1"):
             if broker_snapshot:
                 raise OpeningCandidateSnapshotError("broker snapshot requires complete candidate decisions")
             continue
         mode = _mode(decision.get("strategy_mode"))
-        normalized = decision.get("normalized_input")
+        normalized = opening_candidate_input(decision)
         if not isinstance(normalized, dict):
             raise OpeningCandidateSnapshotError(
                 "opening candidate normalized input is invalid"
@@ -655,7 +710,7 @@ def validate_opening_candidate_snapshot(
         <= set(row)
         for row in results
     ) and (not decision_ids or validated_decision_ids == decision_ids)
-    if require_current_contract and not full_current_contract:
+    if (require_current_contract or single_input) and not full_current_contract:
         raise OpeningCandidateSnapshotError(
             "opening candidate current contract is incomplete"
         )
@@ -689,7 +744,7 @@ def validate_opening_candidate_snapshot(
         }
         for raw_decision in decisions:
             decision = dict(raw_decision)
-            normalized = dict(decision.get("normalized_input") or {})
+            normalized = opening_candidate_input(decision)
             decision_scope = (
                 _required_text(
                     normalized.get("symbol"),
@@ -748,7 +803,7 @@ def _validate_ranking_inputs(
             or len(ids) != len(set(ids)) or set(ids) != accepted
         ):
             raise OpeningCandidateSnapshotError("opening candidate ranking inputs accepted set mismatch")
-        rows = [dict(decisions[cid]["normalized_input"]) for cid in ids]
+        rows = [opening_candidate_input(decisions[cid]) for cid in ids]
         try:
             profile = candidate_ranking_profile(rows, mode=mode)
         except (ValueError, TypeError, KeyError) as exc:
@@ -1141,10 +1196,9 @@ def _snapshot_decisions(
                 normalized=normalized,
             )
             decision = {
-                "schema_version": "opening_candidate_decision.v1",
+                "schema_version": "opening_candidate_decision.v2",
                 "candidate_id": candidate_id,
                 "strategy_mode": mode,
-                "normalized_input": normalized,
                 "normalized_input_hash": canonical_sha256(normalized),
                 "decision_hash": canonical_sha256(opening),
                 "risk_policy_hash": risk_policy_hash,
@@ -1184,7 +1238,7 @@ def _ranked_candidates(
                 raise OpeningCandidateSnapshotError(
                     "final candidate is not accepted by opening policy"
                 )
-            normalized = dict(decision.get("normalized_input") or {})
+            normalized = dict(opening_candidate_input(decision))
             if final_row.get("strategy_core") != normalized.get("strategy_core"):
                 raise OpeningCandidateSnapshotError("final candidate strategy identity mismatch")
             if final_row.get("decision_now_utc") != normalized.get("decision_now_utc"):
@@ -1226,7 +1280,6 @@ def _ranked_candidates(
                     "candidate_id": candidate_id,
                     "strategy_mode": mode,
                     "rank": mode_rank,
-                    "facts": ranked_row,
                     "ranking": explain_rank(ranked_row, mode=mode),
                     "decision_hash": decision.get("decision_hash"),
                     "risk_policy_hash": decision.get("risk_policy_hash"),
@@ -1416,7 +1469,7 @@ def _scope_results(
             }
         )
     for decision in decisions:
-        normalized = dict(decision.get("normalized_input") or {})
+        normalized = opening_candidate_input(decision)
         opening = dict(decision.get("opening_decision") or {})
         rejects = [dict(item) for item in opening.get("rejects") or []]
         out.append(

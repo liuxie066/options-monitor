@@ -8,8 +8,6 @@ from typing import Any
 from urllib.parse import urlparse
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.config_validator import validate_bot_config
-from src.application.config_yaml import default_yaml_bot_config_path
 from src.application.llm_provider_registry import (
     provider_requires_api_key,
     require_provider_spec,
@@ -214,6 +212,8 @@ def _load_bot_config(
         return None, "invalid_bot_config"
     if not isinstance(payload, dict):
         return None, "invalid_bot_config"
+    from src.application.config_validator import validate_bot_config
+
     try:
         validate_bot_config(payload)
     except SystemExit:
@@ -272,4 +272,6 @@ def _bot_config_path(
     repo_local = (root / "config.bot.json").resolve()
     if repo_local.exists():
         return repo_local
+    from src.application.config_yaml import default_yaml_bot_config_path
+
     return default_yaml_bot_config_path(repo_root=root)

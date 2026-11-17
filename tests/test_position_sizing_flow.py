@@ -117,7 +117,7 @@ def test_single_account_sizing_survives_real_decision_seal_and_brief(tmp_path, m
         sealed_at="2026-07-17T13:59:59Z",
     )
     sealed = json.loads((tmp_path / "output_runs/run-1/accounts/lx/state/opening_candidate_snapshot.json").read_text())
-    assert sealed["candidate_decisions"][0]["normalized_input"]["position_sizing_quote_recovery"] == recovery_proof
+    assert sealed["candidate_decisions"][0]["opening_decision"]["normalized_input"]["position_sizing_quote_recovery"] == recovery_proof
     _materialize_candidate_bundle_fixture(tmp_path)
     brief = _assemble(tmp_path)
     assert brief["actionability"] != "blocked", [action.get("metrics") for action in brief["actions"]]

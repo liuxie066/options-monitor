@@ -84,18 +84,6 @@ _RETIRED_AI_MESSAGE_MARKERS = (
 )
 
 
-def _diagnostic_validated_brief_cache_snapshot() -> dict:
-    """Temporary diagnostic root; published values are private, never mutated.
-
-    Copy only the exact bounded outer dict while the GIL is held. Source
-    readers return deep copies; other threads can replace/evict outer entries.
-    The snapshot extends those values' lifetime until the one probe finishes.
-    """
-    if type(_VALIDATED_BRIEF_CACHE) is not dict or len(_VALIDATED_BRIEF_CACHE) > 256:
-        raise ValueError("diagnostic_cache_not_bounded")
-    return _VALIDATED_BRIEF_CACHE.copy()
-
-
 class DailyDecisionBriefStateError(RuntimeError):
     """Raised when persisted Daily Decision Brief state is unsafe to infer from."""
 

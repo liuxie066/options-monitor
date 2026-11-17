@@ -25,7 +25,8 @@ from src.application.tick_run_workspace import (
     read_account_run_state_bytes_safely,
     write_account_run_state_bytes_once_safely,
 )
-from src.application.payload_helpers import readable_json_bytes as _canonical_json_bytes
+from src.application.payload_helpers import canonical_json_bytes_lines as _canonical_json_bytes
+from src.application.payload_helpers import readable_json_bytes
 
 
 COMBO_YIELD_CANDIDATE_SNAPSHOT_SCHEMA = "combo_yield_candidate_snapshot.v4"
@@ -643,6 +644,14 @@ def seal_combo_yield_candidate_snapshot(
             account_dir=account_dir,
             target=account_dir / "state" / COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE,
         )
+        if (account_dir / "state" / COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE).exists():
+            existing = read_account_run_state_bytes_safely(
+                base=Path(base), run_id=run_id_norm, account=account_norm,
+                name=COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE,
+            )
+            # Preserve a sealed legacy encoding only for this exact validated payload.
+            if existing != encoded and existing == readable_json_bytes(payload):
+                encoded = existing
         write_account_run_state_bytes_once_safely(
             base=Path(base),
             run_id=run_id_norm,

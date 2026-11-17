@@ -177,7 +177,7 @@ def test_real_put_steps_multi_symbol_rank_complete_passes_and_reversion(frozen_s
     assert rejects[0]["opening_decision"]["rejects"][0]["stage"] == "stage0_input_normalization"
     for record in exp_decisions:
         assert record["normalized_input"]["strategy_core"] == record["opening_decision"]["normalized_input"]["strategy_core"]
-        assert record["normalized_input"]["strategy_core"]["runtime"] == {
+        assert record["opening_decision"]["normalized_input"]["strategy_core"]["runtime"] == {
             "mode": "source", "core_version": "0.2.0", "build_digest": None,
         }
     assert "先按接货后集中度" in explain_candidate_rank(ranked[0], mode="put")["rank_reason"]
@@ -335,7 +335,7 @@ def test_cc_cost_policy_steps_decision_snapshot_and_restoration(frozen_scan, mul
             candidate_evaluations=None,
         )
         assert fallback[0]["opening_decision"]["accepted"]
-        assert validate_strategy_identity(fallback[0]["normalized_input"], mode="call") == policy
+        assert validate_strategy_identity(fallback[0]["opening_decision"]["normalized_input"], mode="call") == policy
 
 
 @pytest.mark.parametrize("value", [None, True, 0, -1, "bad", float("nan"), float("inf")])
@@ -411,9 +411,9 @@ def test_snapshot_fallback_uses_resolved_policy_and_hashes_identity():
     )
     record = records[0]
     assert record["opening_decision"]["accepted"]
-    assert record["normalized_input"]["strategy_core"] == row["strategy_core"]
-    assert record["normalized_input_hash"] == canonical_sha256(record["normalized_input"])
-    assert record["normalized_input_hash"] != canonical_sha256(_without_identity(record["normalized_input"]))
+    assert record["opening_decision"]["normalized_input"]["strategy_core"] == row["strategy_core"]
+    assert record["normalized_input_hash"] == canonical_sha256(record["opening_decision"]["normalized_input"])
+    assert record["normalized_input_hash"] != canonical_sha256(_without_identity(record["opening_decision"]["normalized_input"]))
 
 
 def test_legacy_snapshot_read_views_do_not_rewrite_bytes_or_hash(tmp_path):
@@ -536,6 +536,6 @@ def test_provider_normalization_to_scan_underwriting_and_sealed_delta(
     assert load_opening_candidate_snapshot(base=frozen_scan, run_id="delta-chain", account="lx",
                                           require_current_contract=True) == sealed
     assert _snapshot_path(frozen_scan, "delta-chain").read_bytes() == before
-    stored = sealed["candidate_decisions"][0]["normalized_input"]
+    stored = sealed["candidate_decisions"][0]["opening_decision"]["normalized_input"]
     assert stored["delta"] == signed_delta
     assert stored["delta_source"] == observed.delta_source

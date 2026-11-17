@@ -14,7 +14,10 @@ from src.application.scan_sell_put import compute_metrics
 from src.application.candidate_models import CandidateContractInput
 from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
 from src.application.report_summaries import summarize_sell_put
-from src.application.opening_candidate_snapshot import OpeningCandidateSnapshotError, validate_opening_candidate_snapshot
+from src.application.opening_candidate_snapshot import (
+    OpeningCandidateSnapshotError, validate_opening_candidate_snapshot,
+    ranked_opening_candidates, opening_candidate_input,
+)
 from test_candidate_engine_phase2_contract import _opening_row
 from test_opening_candidate_snapshot import _seal_snapshot, _scan_status, _publish_opening_manifest
 from test_sell_put_strategy_risk import _account_nvda_context
@@ -122,12 +125,12 @@ def test_experiment_survives_snapshot_brief_and_notification_and_reverts(tmp_pat
         base = tmp_path / label
         snapshot, summaries = _pipeline(base, profile)
         validate_opening_candidate_snapshot(snapshot, expected_run_id="run-1", expected_account="lx")
-        order = [r["facts"]["symbol"] for r in snapshot["ranked_candidates"]]
+        order = [r["facts"]["symbol"] for r in ranked_opening_candidates(snapshot)]
         assert order[:2] == (["AMD", "NVDA"] if label == "experiment" else ["NVDA", "AMD"])
         assert len(snapshot["ranked_candidates"]) == 4
         # Changing cross-symbol ranking must not change either symbol's representative.
         representatives = {r["facts"]["symbol"]: r["facts"]["contract_symbol"]
-                           for r in snapshot["ranked_candidates"][:2]}
+                           for r in ranked_opening_candidates(snapshot)[:2]}
         assert set(representatives) == {"NVDA", "AMD"}
         explained, brief, text = _consumer_outputs(base, snapshot)
         candidates = brief["candidates"]["sell_put"]
@@ -143,7 +146,7 @@ def test_experiment_survives_snapshot_brief_and_notification_and_reverts(tmp_pat
 def test_strategy_identity_is_inside_snapshot_hash(tmp_path):
     snapshot, _ = _pipeline(tmp_path, "concentration_first")
     corrupt = deepcopy(snapshot)
-    facts = corrupt["ranked_candidates"][0]["facts"]
+    facts = opening_candidate_input(corrupt["candidate_decisions"][0])
     facts["strategy_core"]["ranking_profile"] = "current_tie_break"
     with pytest.raises(OpeningCandidateSnapshotError):
         validate_opening_candidate_snapshot(corrupt, expected_run_id="run-1", expected_account="lx")

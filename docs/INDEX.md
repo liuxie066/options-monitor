@@ -99,7 +99,6 @@
 
 ## 运维、修复与发布
 
-- [临时owner对象诊断](TRADE_INTAKE_OWNER_DIAGNOSTIC.md)：默认关闭的一次性聚合、软预算、隔离实测及待批准的生产回退流程。
 
 - [Guardrails](https://github.com/liuxie066/options-monitor/blob/main/docs/GUARDRAILS.md)：本地 hook 与 CI 门禁。
 - [Report Center](REPORT_CENTER.md)：报告注册表、`om report` 入口、周度配置三态与 A/B 口径、本机调度和投递回执。
@@ -117,6 +116,8 @@
 历史兼容文档只能解释旧 artifact，不能覆盖当前代码行为。
 
 ## 退役与阶段性证据
+
+- [一次性对象诊断退役](TRADE_INTAKE_OWNER_DIAGNOSTIC.md)：移除临时采集器后的证据与运维边界。
 
 - [AI Decision Advice retirement](AI_DECISION_ADVICE_DESIGN.md)：已退役能力和残留兼容边界。
 这些文件保留用于解释历史决策，不逐段更新成当前实现。

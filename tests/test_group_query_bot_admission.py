@@ -47,6 +47,73 @@ assert not any(name.startswith("om_group_query_bot") for name in sys.modules)
 ''')
 
 
+def test_module_group_help_does_not_load_scan_dependencies():
+    _run('''
+import importlib.abc, runpy, sys
+class DenyScan(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, *args):
+        if fullname == "pandas" or fullname == "src.application.pipeline_runtime":
+            raise AssertionError("group service loaded scan dependencies")
+sys.meta_path.insert(0, DenyScan())
+sys.argv = ["om", "group-query-bot", "preflight", "--help"]
+try:
+    runpy.run_module("src.interfaces.cli.main", run_name="__main__")
+except SystemExit as exc:
+    assert exc.code == 0
+assert "pandas" not in sys.modules
+assert not any(name.startswith("om_group_query_bot") for name in sys.modules)
+''')
+
+
+def test_module_group_entry_preserves_parser_and_error_contract():
+    _run('''
+import contextlib, importlib.metadata, io, runpy, sys
+from src.interfaces.cli.main import main
+original = importlib.metadata.version
+def version(name):
+    if name == "om-group-query-bot-plugin":
+        raise importlib.metadata.PackageNotFoundError(name)
+    return original(name)
+importlib.metadata.version = version
+def invoke(argv, module):
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            if module:
+                sys.argv = ["om", *argv]
+                runpy.run_module("src.interfaces.cli.main", run_name="__main__")
+                code = 0
+            else:
+                code = main(argv)
+        except SystemExit as exc:
+            code = exc.code
+    return code, out.getvalue(), err.getvalue()
+for args in (["--help"], ["preflight", "--help"], ["serve", "--help"],
+             ["api-serve", "--help"], [], ["serve"], ["wrong"],
+             ["serve", "--config", "not-read.json", "--unknown"],
+             ["preflight", "--config", "not-read.json"],
+             ["serve", "--config", "not-read.json"]):
+    argv = ["group-query-bot", *args]
+    expected = invoke(argv, False)
+    sys.modules.pop("src.interfaces.cli.main", None)
+    assert invoke(argv, True) == expected, args
+importlib.metadata.version = original
+import om_group_query_bot.cli as plugin
+plugin.run_preflight = lambda path, confirm=False: {"path": path, "confirm": confirm}
+plugin.run_serve = lambda path: {"serve_path": path}
+plugin.run_api_serve = lambda path: {"api_path": path}
+for args in (["preflight", "--config", "fixture.json"],
+             ["preflight", "--config", "fixture.json", "--confirm"],
+             ["serve", "--config", "fixture.json"],
+             ["serve", "--config", "fixture.json", "--confirm"],
+             ["api-serve", "--config", "fixture.json"]):
+    argv = ["group-query-bot", *args]
+    expected = invoke(argv, False)
+    sys.modules.pop("src.interfaces.cli.main", None)
+    assert invoke(argv, True) == expected, args
+''')
+
+
 def test_missing_or_wrong_version_is_rejected_before_package_execution():
     for installed_version in (None, "999.0.0"):
         result = _run(f'''

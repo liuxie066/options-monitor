@@ -7,6 +7,7 @@ from domain.domain.risk_capacity import evaluate_cash_snapshot
 from src.application.opening_candidate_snapshot import (
     OpeningCandidateSnapshotError, seal_opening_candidate_snapshot,
     validate_opening_candidate_snapshot, load_opening_candidate_snapshot,
+    ranked_opening_candidates, opening_candidate_input,
 )
 from src.application.candidate_snapshot_manifest import load_candidate_snapshot_bundle
 from src.application.sell_put_cash import enrich_sell_put_candidates_with_cash
@@ -87,11 +88,11 @@ def test_longbridge_capacity_seals_and_manifest_loads(tmp_path):
     # Pandas missing values are presentation-only; the scanner normalizes them before capture.
     row = {key: value for key, value in _cash_row(_portfolio()).items() if value is not pd.NA}
     payload = _seal(tmp_path, row=row)
-    assert payload["schema_version"] == "opening_candidate_snapshot.v4"
+    assert payload["schema_version"] == "opening_candidate_snapshot.v5"
     assert payload["broker_id"] == "longbridge"
     assert payload["broker_account_id"] == "LB-123"
     assert "futu_account_id" not in payload
-    assert payload["ranked_candidates"][0]["facts"]["max_new_contracts"] == 3
+    assert ranked_opening_candidates(payload)[0]["facts"]["max_new_contracts"] == 3
     manifest = _publish_opening_manifest(tmp_path, payload)
     assert load_opening_candidate_snapshot(base=tmp_path, run_id="broker", account="lx") == payload
     bundle = load_candidate_snapshot_bundle(base=tmp_path, run_id="broker", account="lx")
@@ -134,13 +135,13 @@ def test_longbridge_seal_rejects_invalid_authority(tmp_path, overrides):
         _seal(tmp_path, authority=_authority(**overrides))
 
 
-def test_futu_snapshot_shape_and_candidate_ids_stay_v3_and_v1(tmp_path):
+def test_single_input_futu_snapshot_preserves_candidate_identity(tmp_path):
     payload = _seal(tmp_path, authority=_physical_account("lx", "US"))
-    assert payload["schema_version"] == "opening_candidate_snapshot.v3"
+    assert payload["schema_version"] == "opening_candidate_snapshot.v5"
     assert payload["futu_account_id"] == "12345"
     assert "broker_id" not in payload and "broker_account_id" not in payload
     decision = payload["candidate_decisions"][0]
-    normalized = decision["normalized_input"]
+    normalized = opening_candidate_input(decision)
     assert decision["candidate_id"] == canonical_sha256({
         "schema": "opening_candidate_identity.v1", "account": "lx", "futu_account_id": "12345",
         "market": "US", "strategy_mode": "put", "symbol": normalized["symbol"],
@@ -197,7 +198,7 @@ def test_real_longbridge_adapter_without_binding_seals_unavailable(tmp_path):
         scan_statuses=[_scan_status("NVDA", "put", "completed", reason="no_candidate")],
         final_candidates={"put": []}, run_mode={"scan_mode": "standard", "executable": True}, sealed_at=NOW,
     )
-    assert payload["schema_version"] == "opening_candidate_snapshot.v4"
+    assert payload["schema_version"] == "opening_candidate_snapshot.v5"
     assert payload["capacity_authority_status"] == "unavailable"
     assert payload["broker_account_id"] is None
     assert payload["credential_binding_sha256"] is None
@@ -261,7 +262,7 @@ def test_longbridge_cc_prefilter_scanner_and_sealer(tmp_path, monkeypatch):
         run_mode={"scan_mode": "standard", "executable": True}, sealed_at=clock,
     )
     assert payload["opening_status"] == "candidates_found"
-    assert payload["ranked_candidates"][0]["facts"]["broker_id"] == "longbridge"
+    assert ranked_opening_candidates(payload)[0]["facts"]["broker_id"] == "longbridge"
     assert "futu_account_id" not in payload
     _publish_opening_manifest(tmp_path, payload)
     assert load_candidate_snapshot_bundle(base=tmp_path, run_id="cc", account="demo")["owners"]["opening"] == payload
