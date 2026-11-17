@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1564 (`src`: 626, `domain`: 99, `scripts`: 34, `tests`: 801)
-- Internal import edges: 14108 total, 4693 production/script edges excluding tests
+- Python files scanned: 1565 (`src`: 626, `domain`: 99, `scripts`: 34, `tests`: 802)
+- Internal import edges: 14113 total, 4694 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -51,7 +51,7 @@ flowchart LR
   scripts -->|2| tests
   src -->|1| application
   storage -->|1| domain
-  tests -->|7093| application
+  tests -->|7097| application
   tests -->|778| domain
   tests -->|2| domain_services
   tests -->|508| infrastructure
@@ -90,7 +90,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 7093 |
+| tests | application | 7097 |
 | tests | domain | 778 |
 | tests | interfaces | 527 |
 | tests | infrastructure | 508 |
@@ -122,8 +122,8 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | domain.domain | domain.domain.ledger | 33 |
 | src.application.inbound | src.application | 29 |
 | src.application.ledger | src.application | 29 |
+| src.application.multi_tick | src.application | 27 |
 | domain.domain.ledger | domain.domain | 27 |
-| src.application.multi_tick | src.application | 26 |
 | src.application.positions | src.application | 26 |
 | src.application | src.application.settings | 21 |
 | src.application | src.application.trades | 21 |
@@ -214,7 +214,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.ledger.api | 56 |
 | src.application.trades.auto_intake | 53 |
 | src.application.ledger.trade_attribution | 42 |
-| src.application.multi_tick.required_data_prefetch | 41 |
+| src.application.multi_tick.required_data_prefetch | 42 |
 | src.interfaces.cli.main | 39 |
 | src.application.agent_tools.runtime_status_impl | 36 |
 | src.application.multi_account_tick | 36 |

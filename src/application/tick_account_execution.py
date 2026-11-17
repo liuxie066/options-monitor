@@ -945,6 +945,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 "required_data_fetch", runlog=None if request.experience else request.runlog, measure_cpu=True,
             ):
                 prefetch_summary = prefetch_required_data(
+                    runlog=None if request.experience else request.runlog,
                     vpy=request.vpy,
                     base=request.base,
                     repo_root=(request.repo_root or request.base),
