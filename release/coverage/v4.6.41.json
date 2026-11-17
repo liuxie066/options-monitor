@@ -1,0 +1,150 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.41",
+  "base": {
+    "tag": "v4.6.40",
+    "commit": "8b8a144ae542f6c4ac8cacab341ec5b07fcd49ad"
+  },
+  "reviewed_head": "075cf6b45c71b3949587e613994cdf783badda65",
+  "commits": [
+    {
+      "sha": "35982da788693a8c270e0272271954790cd79fc7",
+      "subject": "perf(tick): measure prefetch lock acquisition and held work"
+    },
+    {
+      "sha": "ee60dc85b4930bcca0b263f86d1bd838eab33dc0",
+      "subject": "Merge pull request #1201 from liuxie066/perf/tick-prefetch-lock-timing"
+    },
+    {
+      "sha": "5e0317d09114ec39ad2ca2405e0abf10758dd26c",
+      "subject": "feat(research): add bounded archive streaming and independent restore"
+    },
+    {
+      "sha": "e14605e2320cf19a546dcdf547aee9acddf53563",
+      "subject": "Merge pull request #1202 from liuxie066/feature/archive-bounded-local-20261116"
+    },
+    {
+      "sha": "215015573e594e69938e71aa5f7a66b2282726ed",
+      "subject": "fix(rv): unify HK and US cross-year calendar evidence"
+    },
+    {
+      "sha": "a523b84bee6c3cd883caa53c616e91c90b8db2b0",
+      "subject": "perf(tick): observe outer lifecycle and durable scan availability"
+    },
+    {
+      "sha": "34019e858bc493aa0c4b7cfa3bdff6bf851d9e3f",
+      "subject": "chore(rv): merge main for required integration checks"
+    },
+    {
+      "sha": "891844f16fe9aa8754b8eba367619225e7be5dab",
+      "subject": "Merge pull request #1204 from liuxie066/perf/tick-lifecycle-observation"
+    },
+    {
+      "sha": "37fa312b898569596c1ed9d2431910fc7cc6d0ac",
+      "subject": "chore(rv): sync main lifecycle changes"
+    },
+    {
+      "sha": "075cf6b45c71b3949587e613994cdf783badda65",
+      "subject": "fix(rv): unify HK/US cross-year calendar evidence (#1203)"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "提供有界归档流与独立恢复能力，保留来源验证和显式执行边界；发布部署不会自动执行归档或清理。（#1202）",
+      "commits": [
+        "5e0317d09114ec39ad2ca2405e0abf10758dd26c",
+        "e14605e2320cf19a546dcdf547aee9acddf53563"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Tick 细分预取获取锁与持锁工作耗时，保留原锁行为，避免将整个预取阶段误判为网络等待。（#1201）",
+      "commits": [
+        "35982da788693a8c270e0272271954790cd79fc7",
+        "ee60dc85b4930bcca0b263f86d1bd838eab33dc0"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Tick 补齐外层生命周期、实际 deadline 余量及可靠扫描来源持久化后的可用时间观测；计时不等同于扫描成功或通知送达。（#1204）",
+      "commits": [
+        "a523b84bee6c3cd883caa53c616e91c90b8db2b0",
+        "891844f16fe9aa8754b8eba367619225e7be5dab"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "统一 HK/US 跨年日历证据，补齐美股 2027 年日历，保留缺失与不完整来源的判定。（#1203）",
+      "commits": [
+        "215015573e594e69938e71aa5f7a66b2282726ed",
+        "34019e858bc493aa0c4b7cfa3bdff6bf851d9e3f",
+        "37fa312b898569596c1ed9d2431910fc7cc6d0ac",
+        "075cf6b45c71b3949587e613994cdf783badda65"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "35982da788693a8c270e0272271954790cd79fc7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1201"
+      ]
+    },
+    {
+      "commit": "ee60dc85b4930bcca0b263f86d1bd838eab33dc0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1201"
+      ]
+    },
+    {
+      "commit": "5e0317d09114ec39ad2ca2405e0abf10758dd26c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1202"
+      ]
+    },
+    {
+      "commit": "e14605e2320cf19a546dcdf547aee9acddf53563",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1202"
+      ]
+    },
+    {
+      "commit": "215015573e594e69938e71aa5f7a66b2282726ed",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1203"
+      ]
+    },
+    {
+      "commit": "34019e858bc493aa0c4b7cfa3bdff6bf851d9e3f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1203"
+      ]
+    },
+    {
+      "commit": "37fa312b898569596c1ed9d2431910fc7cc6d0ac",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1203"
+      ]
+    },
+    {
+      "commit": "075cf6b45c71b3949587e613994cdf783badda65",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1203"
+      ]
+    },
+    {
+      "commit": "a523b84bee6c3cd883caa53c616e91c90b8db2b0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1204"
+      ]
+    },
+    {
+      "commit": "891844f16fe9aa8754b8eba367619225e7be5dab",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1204"
+      ]
+    }
+  ]
+}
