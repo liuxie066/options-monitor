@@ -177,6 +177,13 @@ Python调用可显式传`include_fixed_shared=False`，只带所选run及清单�
 SSH可显式加`--ssh-compression`使用传输压缩，缺省关闭；只作用于有界SSH，不改变落盘字节/hash/归档格式，不保证吞吐或CPU收益。
 同owner `restore_batch(archive_root, target, limits_file)`从已发布回执向全新本地目录独立复制，
 复用一次多文件流、监督worker和纯证据owner核验，不连接原源端；每文件仍核恢复副本的身份/长度及原回执hash。调用方可在非仓库cwd运行；CLI `research archive restore-batch --archive-root <B> --restore-root <新C> --limits-file <JSON>`调用同一owner。独立恢复回执绑定原归档回执SHA256、绝对归档根及run IDs；旧无绑定回执不可作为新退役资格。
+有界 worker 失败回执保留 `reason` 并增加固定 `error_stage`/`error_code`；source snapshot 非零退出
+只接收不超过512B的白名单错误终态，并附真实 `source_exit_code`。缺失、畸形、截断或未知错误包
+保持 `source_failure_unknown`；SSH255不解释为已证明的认证/网络原因。源stderr继续不回传，
+不输出原始异常、路径或业务正文。清理状态不明时保留原source失败并标 `source_cleanup=unknown`；
+本机SSH退出不证明所有远端后代退出。1024B外层失败回执超额时舍弃本地目标路径，保留诊断字段。
+restore 同样输出安全阶段和失败码；共享二进制传输内部未细分的错误仍为 `transfer_failed`。
+诊断改动不调整保留/身份/容量门禁，不增加重试或源读取预算，不授予复制、删源或策略修改权限。
 
 预算 JSON 必须完整指定 `seconds`、`grace_seconds`、`max_bytes`、`max_entries`、
 `max_file_bytes`、`max_rss_bytes`、`evidence_bytes`、`reserve_bytes`、`stderr_bytes`，均为正有限值，

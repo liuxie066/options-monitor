@@ -97,7 +97,8 @@ def test_missing_canonical_blob_rejected_in_snapshot(tmp_path):
         [sys.executable, "-c", SNAPSHOT_SCRIPT, str(source), json.dumps(request)], capture_output=True, timeout=3
     )
     assert result.returncode != 0
-    assert result.stdout == b""
+    assert json.loads(result.stdout) == {"ok": False, "error_stage": "selected_tree", "error_code": "selected_root_missing"}
+    assert result.stderr == b""
 
 
 def test_snapshot_symlink_never_reads_target(tmp_path):

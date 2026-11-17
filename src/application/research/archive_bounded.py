@@ -24,10 +24,77 @@ from src.application.research.archive_stream import (
 )
 
 
+class _ArchiveFailure(TransferError):
+    """Private, fixed diagnostic codes; never carry source paths or business text."""
+
+    def __init__(self, code: str, *, stage: str | None = None, source_exit_code: int | None = None):
+        super().__init__(code)
+        self.code = code
+        self.stage = stage
+        self.source_exit_code = source_exit_code
+
+
+def _failure_details(exc: Exception, stage: str) -> dict:
+    if isinstance(exc, _ArchiveFailure):
+        detail = {"error_stage": exc.stage or stage, "error_code": exc.code}
+        if exc.source_exit_code is not None:
+            detail["source_exit_code"] = exc.source_exit_code
+        if getattr(exc, "source_cleanup_unknown", False):
+            detail["source_cleanup"] = "unknown"
+        return detail
+    code = (
+        "permission_denied" if isinstance(exc, PermissionError) else
+        "input_missing" if isinstance(exc, FileNotFoundError) else
+        "invalid_json" if isinstance(exc, json.JSONDecodeError) else
+        "deadline" if isinstance(exc, (TimeoutError, subprocess.TimeoutExpired)) else
+        "transfer_failed" if isinstance(exc, TransferError) else "unknown"
+    )
+    return {"error_stage": stage, "error_code": code}
+
+
+_SOURCE_STAGES = {"setup", "retention_metadata", "pointer", "selected_tree", "manifest", "hash"}
+_SOURCE_CODES = {
+    "unsafe_directory", "unsafe_path", "nonregular_file", "retention_metadata_budget",
+    "pointer_too_large", "pointer_outside_runs", "selected_root_missing", "deadline",
+    "entry_budget", "database_excluded", "byte_budget", "manifest_length", "blob_hash",
+    "blob_ref", "nonregular_input", "short_source", "source_changed", "permission_denied",
+    "input_missing", "invalid_json", "invalid_structure", "os_error", "unknown",
+}
+
+
+def _source_failure(data: bytes, exit_code: int) -> _ArchiveFailure:
+    # stdout is untrusted protocol data. Never return raw stdout/stderr or parse
+    # arbitrary exception messages. Missing/truncated/nonterminal data is unknown.
+    if len(data) <= 512:
+        try:
+            value = json.loads(data)
+            if (isinstance(value, dict) and set(value) == {"ok", "error_stage", "error_code"}
+                    and value["ok"] is False and isinstance(value["error_stage"], str)
+                    and isinstance(value["error_code"], str)
+                    and value["error_stage"] in _SOURCE_STAGES and value["error_code"] in _SOURCE_CODES):
+                return _ArchiveFailure(value["error_code"], stage=value["error_stage"], source_exit_code=exit_code)
+        except (ValueError, TypeError):
+            pass
+    return _ArchiveFailure("source_failure_unknown", stage="source_snapshot", source_exit_code=exit_code)
+
+
 # Executed read-only in a short-lived interpreter, locally or over existing SSH.
 # A complete metadata pass precedes hashing. Output is bounded by the caller.
 SNAPSHOT_SCRIPT = r"""
 import hashlib,json,os,socket,stat,sys,time
+stage='setup'
+class SnapshotFailure(Exception): pass
+def fail(code): raise SnapshotFailure(code)
+def failure_hook(kind,error,traceback):
+    code=(error.args[0] if isinstance(error,SnapshotFailure) else
+          'permission_denied' if isinstance(error,PermissionError) else
+          'input_missing' if isinstance(error,FileNotFoundError) else
+          'deadline' if isinstance(error,TimeoutError) else
+          'invalid_json' if isinstance(error,json.JSONDecodeError) else
+          'invalid_structure' if isinstance(error,(KeyError,TypeError,ValueError,AttributeError)) else
+          'os_error' if isinstance(error,OSError) else 'unknown')
+    print(json.dumps({'ok':False,'error_stage':stage,'error_code':code},separators=(',',':')),flush=True)
+sys.excepthook=failure_hook
 root,request_json=sys.argv[1:]
 r=json.loads(request_json); deadline=time.monotonic()+r['seconds']
 rows=[]; directories=[]; total=0; entries=0; seen=set()
@@ -35,7 +102,7 @@ def open_directory(relative):
     fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
     try:
         for part in relative.split('/'):
-            if part in ('','.','..'): raise ValueError('unsafe directory')
+            if part in ('','.','..'): fail('unsafe_directory')
             child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
             os.close(fd);fd=child
         return fd
@@ -50,7 +117,7 @@ def safe_lstat(relative):
 
 def open_regular(relative):
     parts=relative.split('/')
-    if any(part in ('','.','..') for part in parts): raise ValueError('unsafe path')
+    if any(part in ('','.','..') for part in parts): fail('unsafe_path')
     fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
     try:
         for part in parts[:-1]:
@@ -59,44 +126,48 @@ def open_regular(relative):
         source=os.open(parts[-1],os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=fd)
     finally: os.close(fd)
     if not stat.S_ISREG(os.fstat(source).st_mode):
-        os.close(source);raise ValueError('nonregular file')
+        os.close(source);fail('nonregular_file')
     return os.fdopen(source,'rb')
 
 # Only metadata is read for retention; selected content remains separately bounded.
+stage='retention_metadata'
 run_metadata=[]; run_directory=open_directory('output_runs')
 try:
     with os.scandir(run_directory) as iterator:
         metadata_count=0
         for item in iterator:
             metadata_count+=1
-            if time.monotonic()>=deadline or metadata_count>r['max_entries']: raise ValueError('retention metadata budget')
+            if time.monotonic()>=deadline or metadata_count>r['max_entries']: fail('retention_metadata_budget')
             st=item.stat(follow_symlinks=False)
             if stat.S_ISDIR(st.st_mode): run_metadata.append([item.name,st.st_mtime])
 finally: os.close(run_directory)
+stage='pointer'
 pointer=None
 try:
     with open_regular('output_shared/state/last_run_dir.txt') as handle:
         raw=handle.read(r['max_file_bytes']+1)
-    if len(raw)>r['max_file_bytes']: raise ValueError('pointer too large')
+    if len(raw)>r['max_file_bytes']: fail('pointer_too_large')
     target=os.path.normpath(raw.decode().strip())
-    if os.path.dirname(target)!=os.path.join(root,'output_runs'): raise ValueError('pointer outside runs')
+    if os.path.dirname(target)!=os.path.join(root,'output_runs'): fail('pointer_outside_runs')
     pointer=os.path.basename(target)
 except FileNotFoundError: pass
 for relative in r['roots']:
+    stage='selected_tree'
     path=os.path.join(root,relative)
     if not os.path.exists(path):
         if relative in ('output_shared/research','output_shared/required_data'):
             continue
-        raise ValueError('selected run missing')
+        fail('selected_root_missing')
     pending=[relative]
     while pending:
-        if time.monotonic()>=deadline: raise TimeoutError('snapshot deadline')
+        stage='selected_tree'
+        if time.monotonic()>=deadline: fail('deadline')
         rel=pending.pop()
         if rel in seen: continue
         seen.add(rel)
         full=os.path.join(root,rel); st=safe_lstat(rel)
         entries+=1
-        if entries>r['max_entries']: raise ValueError('entry budget')
+        if entries>r['max_entries']: fail('entry_budget')
         if stat.S_ISDIR(st.st_mode):
             directories.append(rel)
             directory=open_directory(rel)
@@ -104,42 +175,44 @@ for relative in r['roots']:
                 with os.scandir(directory) as iterator:
                     for item in iterator:
                         pending.append(rel+'/'+item.name)
-                        if entries+len(pending)>r['max_entries']: raise ValueError('entry budget')
+                        if entries+len(pending)>r['max_entries']: fail('entry_budget')
             finally: os.close(directory)
         elif stat.S_ISREG(st.st_mode):
             if rel.endswith(('.db','.sqlite','.sqlite3','-wal','-shm')):
-                raise ValueError('database excluded')
+                fail('database_excluded')
             total+=st.st_size
-            if total>r['max_bytes'] or st.st_size>r['max_file_bytes']: raise ValueError('byte budget')
+            if total>r['max_bytes'] or st.st_size>r['max_file_bytes']: fail('byte_budget')
             rows.append({'path':rel,'size':st.st_size,'mtime_ns':st.st_mtime_ns,
                          'identity':[st.st_dev,st.st_ino,st.st_size,st.st_mtime_ns,st.st_ctime_ns]})
             if rel.endswith('/state/required_data_snapshot_manifest.json'):
+                stage='manifest'
                 with open_regular(rel) as manifest_file:
                     raw=manifest_file.read(r['max_file_bytes']+1)
-                if len(raw)>r['max_file_bytes']: raise ValueError('manifest length')
+                if len(raw)>r['max_file_bytes']: fail('manifest_length')
                 manifest=json.loads(raw)
                 for value in manifest['symbols'].values():
                     if 'scan_blob_ref' not in value: continue
                     ref=value['scan_blob_ref']; digest=ref['blob_sha256']
-                    if len(digest)!=64 or any(c not in '0123456789abcdef' for c in digest): raise ValueError('blob hash')
+                    if len(digest)!=64 or any(c not in '0123456789abcdef' for c in digest): fail('blob_hash')
                     path='output_shared/blobs/sha256/'+digest[:2]+'/'+digest+'.json.gz'
-                    if ref['blob_relpath']!=path or ref['uncompressed_size_bytes']>r['max_file_bytes']: raise ValueError('blob ref')
+                    if ref['blob_relpath']!=path or ref['uncompressed_size_bytes']>r['max_file_bytes']: fail('blob_ref')
                     if path not in r['roots']: r['roots'].append(path)
-        else: raise ValueError('nonregular input')
+        else: fail('nonregular_input')
+stage='hash'
 for row in rows:
     h=hashlib.sha256(); p=os.path.join(root,row['path'])
     with open_regular(row['path']) as f:
         before=os.fstat(f.fileno())
         remaining=row['size']
         while remaining:
-            if time.monotonic()>=deadline: raise TimeoutError('hash deadline')
+            if time.monotonic()>=deadline: fail('deadline')
             chunk=f.read(min(65536,remaining))
-            if not chunk: raise ValueError('short source')
+            if not chunk: fail('short_source')
             h.update(chunk);remaining-=len(chunk)
         extra=f.read(1);after=os.fstat(f.fileno())
     identity=lambda s:(s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
     if extra or identity(before)!=identity(after) or before.st_size!=row['size'] or list(identity(before))!=row['identity']:
-        raise ValueError('source changed')
+        fail('source_changed')
     row['sha256']=h.hexdigest()
 print(json.dumps({'host':socket.getfqdn(),'runtime_root':root,'run_metadata':sorted(run_metadata),'pointer':pointer,'files':sorted(rows,key=lambda x:x['path']),'directories':sorted(directories)},separators=(',',':')))
 """
@@ -232,26 +305,40 @@ def _snapshot(source: dict, roots: list[str], limits: dict, deadline: float, tem
         selector.register(proc.stdout, selectors.EVENT_READ)
         while selector.get_map():
             if time.monotonic() >= deadline:
-                raise TransferError("snapshot deadline")
+                raise _ArchiveFailure('snapshot_deadline')
             for key, _ in selector.select(min(0.05, max(0, deadline - time.monotonic()))):
                 chunk = os.read(key.fileobj.fileno(), 65536)
                 if not chunk:
                     selector.unregister(key.fileobj)
                     break
                 if len(data) + len(chunk) > limits["_evidence_remaining"]:
-                    raise TransferError("snapshot evidence budget")
+                    raise _ArchiveFailure('snapshot_evidence_budget')
                 data.extend(chunk)
-        if proc.wait(timeout=max(0.001, deadline - time.monotonic())) != 0:
-            raise TransferError("source snapshot failed")
+        exit_code = proc.wait(timeout=max(0.001, deadline - time.monotonic()))
         limits["_evidence_remaining"] -= len(data)
-        result = json.loads(data)
+        if exit_code != 0:
+            raise _source_failure(data, exit_code)
+        try:
+            result = json.loads(data)
+        except ValueError as exc:
+            raise _ArchiveFailure("source_protocol_invalid", stage="source_snapshot", source_exit_code=exit_code) from exc
+        if not isinstance(result, dict) or result.get("ok") is False:
+            raise _ArchiveFailure("source_protocol_invalid", stage="source_snapshot", source_exit_code=exit_code)
         if result.get("runtime_root") != source["runtime_root"]:
-            raise TransferError("source identity mismatch")
+            raise _ArchiveFailure("source_identity_mismatch", stage="source_snapshot", source_exit_code=exit_code)
         return result
     finally:
         selector.close()
-        stop_group(proc, limits["grace_seconds"])
-        proc.stdout.close()
+        primary = sys.exception()
+        try:
+            stop_group(proc, limits["grace_seconds"])
+        except Exception as cleanup:
+            if isinstance(primary, _ArchiveFailure):
+                primary.source_cleanup_unknown = True
+                raise primary from cleanup
+            raise _ArchiveFailure("process_cleanup_unknown", stage="source_snapshot_cleanup") from cleanup
+        finally:
+            proc.stdout.close()
 
 
 def _retention_check(snapshot: dict, run_ids: list[str], frozen_at: float) -> dict:
@@ -260,7 +347,7 @@ def _retention_check(snapshot: dict, run_ids: list[str], frozen_at: float) -> di
     metadata = snapshot["run_metadata"]
     names = [name for name, _ in metadata]
     if len(names) != len(set(names)) or not set(run_ids).issubset(names):
-        raise TransferError("selected run metadata missing or ambiguous")
+        raise _ArchiveFailure('selected_run_metadata_missing_or_ambiguous')
     protected = retained_output_runs(
         [(name, datetime.fromtimestamp(mtime, tz=timezone.utc)) for name, mtime in metadata],
         keep_days=30,
@@ -269,7 +356,7 @@ def _retention_check(snapshot: dict, run_ids: list[str], frozen_at: float) -> di
         pointer=snapshot["pointer"],
     )
     if any(run_id in protected for run_id in run_ids):
-        raise TransferError("selected run is retention protected")
+        raise _ArchiveFailure('selected_run_is_retention_protected')
     return protected
 
 
@@ -278,10 +365,10 @@ def _compare_selected_snapshots(before: dict, after: dict, run_ids: list[str], f
     protected = _retention_check(after, run_ids, frozen_at)
     selected = lambda snap: sorted((name, mtime) for name, mtime in snap["run_metadata"] if name in run_ids)
     if selected(before) != selected(after):
-        raise TransferError("selected run metadata changed")
+        raise _ArchiveFailure('selected_run_metadata_changed')
     stable = lambda snap: {k: v for k, v in snap.items() if k not in {"run_metadata", "pointer"}}
     if stable(before) != stable(after):
-        raise TransferError("source changed after copy")
+        raise _ArchiveFailure('source_changed_after_copy')
     return protected
 
 
@@ -297,40 +384,45 @@ def _execute(request: dict) -> dict:
     roots = [f"output_runs/{run_id}" for run_id in request["run_ids"]]
     if request.get("include_fixed_shared", True):
         roots.extend(archive.SYNC_RELATIVE_DIRS)
+    request["_stage"] = "source_snapshot"
     before = _snapshot(source, roots, limits, deadline, staging)
+    request["_stage"] = "retention_check"
     protected = _retention_check(before, request["run_ids"], request["frozen_at"])
+    request["_stage"] = "source_identity"
     if request.get("expected_host") != before["host"]:
-        raise TransferError("source host mismatch")
+        raise _ArchiveFailure('source_host_mismatch')
+    request["_stage"] = "old_archive_review"
     old_archive = request.get("existing_archive_root")
     old_review = None
     if old_archive:
         old_root = Path(old_archive)
         inventory_file = old_root / "manifests" / "inventory.latest.json"
         if inventory_file.is_symlink() or inventory_file.stat().st_size > limits["max_file_bytes"]:
-            raise TransferError("old inventory unsafe or exceeds budget")
+            raise _ArchiveFailure('old_inventory_unsafe_or_exceeds_budget')
         old_inventory = json.loads(inventory_file.read_bytes())
         old_ids = [archive._safe_run_id(row["run_id"]) for row in old_inventory.get("runs", [])]
         if not old_ids or len(old_ids) > 10:
-            raise TransferError("old batch requires 1..10 explicit inventory rows")
+            raise _ArchiveFailure('old_batch_requires_1_10_explicit_inventory_rows')
         old_roots = [f"output_runs/{name}" for name in old_ids] + list(archive.SYNC_RELATIVE_DIRS)
         captured_old = _snapshot({"kind": "local", "runtime_root": str(old_root)}, old_roots, limits, deadline, staging)
         captured_source = _snapshot(source, old_roots, limits, deadline, staging)
         logical = lambda snap: [(row["path"], row["size"], row["sha256"]) for row in snap["files"]]
         if logical(captured_old) != logical(captured_source):
-            raise TransferError("old archive source content mismatch")
+            raise _ArchiveFailure('old_archive_source_content_mismatch')
         for name in old_ids:
             refs, status, _ = archive._run_scan_blob_refs(old_root / "output_runs" / name)
             if status == "invalid":
-                raise TransferError("old canonical references invalid")
+                raise _ArchiveFailure('old_canonical_references_invalid')
             for ref in refs:
                 if ref["uncompressed_size_bytes"] > limits["max_file_bytes"]:
-                    raise TransferError("old blob exceeds decode limit")
+                    raise _ArchiveFailure('old_blob_exceeds_decode_limit')
                 archive.load_required_data_scan_blob(runtime_root=old_root, blob_ref=ref)
         old_review = {
             "run_ids": old_ids,
             "status": "content_verified_read_only",
             "source_snapshot_sha256": hashlib.sha256(json.dumps(captured_source, sort_keys=True).encode()).hexdigest(),
         }
+    request["_stage"] = "target_prepare"
     staging.mkdir(mode=0o700)
     budget = WriteBudget(limits["max_bytes"])
     operations = []
@@ -352,7 +444,7 @@ def _execute(request: dict) -> dict:
         )
         limits["_evidence_remaining"] -= operation["request_bytes"] + operation["stderr_bytes"]
         if limits["_evidence_remaining"] < 0:
-            raise TransferError("cumulative evidence budget")
+            raise _ArchiveFailure('cumulative_evidence_budget')
         operations.append(operation)
 
     # Snapshot discovers canonical refs before any payload transfer.
@@ -361,29 +453,33 @@ def _execute(request: dict) -> dict:
     allocated = sum(((row["size"] + space.f_frsize - 1) // space.f_frsize) * space.f_frsize for row in before["files"])
     required = allocated + limits["evidence_bytes"] + limits["reserve_bytes"]
     if space.f_bavail * space.f_frsize < required:
-        raise TransferError("insufficient target batch space")
+        raise _ArchiveFailure('insufficient_target_batch_space')
     for relative in before["directories"]:
         (staging / safe_relative(relative)).mkdir(parents=True, exist_ok=True)
+    request["_stage"] = "payload_transfer"
     copy_rows(before["files"])
     for run_id in request["run_ids"]:
         found, status, _error = archive._run_scan_blob_refs(staging / "output_runs" / run_id)
         if status == "invalid":
-            raise TransferError("invalid canonical refs")
+            raise _ArchiveFailure('invalid_canonical_refs')
         refs.extend(found)
     blobs = sorted({ref["blob_relpath"] for ref in refs})
+    request["_stage"] = "source_recheck"
     after = _snapshot(source, roots + blobs, limits, deadline, staging)
     protected_after = _compare_selected_snapshots(before, after, request["run_ids"], request["frozen_at"])
+    request["_stage"] = "canonical_verify"
     for ref in refs:
         archive.load_required_data_scan_blob(runtime_root=staging, blob_ref=ref)
+    request["_stage"] = "owner_verify"
     inventory = archive._run_inventory(staging / "output_runs", base=staging, run_ids=request["run_ids"])
     if len(inventory) != len(request["run_ids"]) or not all(row["verified"] for row in inventory):
-        raise TransferError("archive structure invalid")
+        raise _ArchiveFailure('archive_structure_invalid')
     from src.application.candidate_evidence_history import load_run_candidate_evidence
 
     for run_id in request["run_ids"]:
         evidence = load_run_candidate_evidence(base=staging, run_id=run_id, runs_root=staging / "output_runs")
         if any(item.classification["status"].startswith("unsupported") for item in evidence):
-            raise TransferError("candidate owner evidence unsupported")
+            raise _ArchiveFailure('candidate_owner_evidence_unsupported')
     review = {
         "source_deleted": False,
         "apply_supported": False,
@@ -405,7 +501,7 @@ def _execute(request: dict) -> dict:
     }
     review_bytes = json.dumps(review, separators=(",", ":")).encode()
     if len(review_bytes) > limits["_evidence_remaining"]:
-        raise TransferError("candidate evidence budget")
+        raise _ArchiveFailure('candidate_evidence_budget')
     limits["_evidence_remaining"] -= len(review_bytes)
     (staging / "retirement-review.json").write_bytes(review_bytes)
     receipt = {
@@ -435,12 +531,13 @@ def _execute(request: dict) -> dict:
     }
     encoded = json.dumps(receipt, separators=(",", ":")).encode()
     if len(encoded) > limits["_evidence_remaining"]:
-        raise TransferError("cumulative receipt evidence budget")
+        raise _ArchiveFailure('cumulative_receipt_evidence_budget')
     limits["_evidence_remaining"] -= len(encoded)
     (staging / "bounded-receipt.json").write_bytes(encoded)
+    request["_stage"] = "archive_publish"
     publish_batch(staging, target, deadline=deadline)
     if time.monotonic() >= deadline or (target / "bounded-receipt.json").read_bytes() != encoded:
-        raise TransferError("published receipt readback unknown")
+        raise _ArchiveFailure('published_receipt_readback_unknown')
     return {
         "ok": True,
         "state": "published",
@@ -457,17 +554,21 @@ def _worker(request: dict) -> None:
     try:
         result = _execute(request)
     except Exception as exc:
+        details = _failure_details(exc, request.get("_stage", "archive_setup"))
+        cleanup_unknown = (details.get("source_cleanup") == "unknown"
+                           or details["error_code"] == "process_cleanup_unknown")
         result = {
             "ok": False,
-            "state": "unknown" if Path(request["target"]).exists() else "failed",
-            "reason": type(exc).__name__,
+            "state": "unknown" if cleanup_unknown or Path(request["target"]).exists() else "failed",
+            "reason": "TransferError" if isinstance(exc, TransferError) else type(exc).__name__,
+            **details,
             "source_deleted": False,
             "staging": request["staging"],
             "archive_root": request["target"],
         }
     data = json.dumps(result, separators=(",", ":")).encode()
     if len(data) > 1024:
-        data = b'{"ok":false,"state":"unknown","reason":"receipt_budget"}'
+        data = json.dumps({k: v for k, v in result.items() if k not in {"staging", "archive_root"}}, separators=(",", ":")).encode()
     # Exclusive outer receipt: never mutate an existing archive or receipt.
     with open(request["result"], "xb") as output:
         output.write(data)
@@ -676,42 +777,42 @@ def _restore_execute(*, archive_root: Path, target: Path, limits: dict, deadline
 
     archive_root, target = Path(archive_root).absolute(), Path(target).absolute()
     if target.exists() or target.is_symlink() or not target.parent.is_dir():
-        raise TransferError("restore requires a new target")
+        raise _ArchiveFailure('restore_requires_a_new_target')
     if target.is_relative_to(archive_root) or archive_root.is_relative_to(target):
-        raise TransferError("restore roots overlap")
+        raise _ArchiveFailure('restore_roots_overlap')
     receipt_path = archive_root / "bounded-receipt.json"
     if receipt_path.is_symlink() or receipt_path.stat().st_size > limits["evidence_bytes"]:
-        raise TransferError("restore receipt unsafe")
+        raise _ArchiveFailure('restore_receipt_unsafe')
     receipt = json.loads(receipt_path.read_bytes())
     rows = receipt["source_files"]
     ids = receipt["run_ids"]
     directories = receipt["source_identity"]["directories"]
     if not ids or len(ids) > 738 or len(rows) + len(directories) > limits["max_entries"]:
-        raise TransferError("restore count budget")
+        raise _ArchiveFailure('restore_count_budget')
     if len({row["path"] for row in rows}) != len(rows):
-        raise TransferError("duplicate restore paths")
+        raise _ArchiveFailure('duplicate_restore_paths')
     total = sum(row["size"] for row in rows)
     if total > limits["max_bytes"] or any(row["size"] > limits["max_file_bytes"] for row in rows):
-        raise TransferError("restore byte budget")
+        raise _ArchiveFailure('restore_byte_budget')
     space = os.statvfs(target.parent)
     if space.f_bavail * space.f_frsize < total + limits["evidence_bytes"] + limits["reserve_bytes"]:
-        raise TransferError("restore space budget")
+        raise _ArchiveFailure('restore_space_budget')
     staging = target.parent / ("." + target.name + "-" + uuid.uuid4().hex + ".partial")
     staging.mkdir(mode=0o700)
     budget = WriteBudget(limits["max_bytes"])
     remaining_evidence = limits["evidence_bytes"] - receipt_path.stat().st_size - 1024
     if remaining_evidence <= 0:
-        raise TransferError("restore evidence budget")
+        raise _ArchiveFailure('restore_evidence_budget')
     for directory in directories:
         if time.monotonic() >= deadline:
-            raise TransferError("restore deadline")
+            raise _ArchiveFailure('restore_deadline')
         (staging / safe_relative(directory)).mkdir(parents=True, exist_ok=True)
     local_rows = []
     for row in rows:
         rel = safe_relative(row["path"])
         record = (archive_root / rel).lstat()
         if not stat.S_ISREG(record.st_mode) or record.st_size != row["size"]:
-            raise TransferError("restore file type or size changed")
+            raise _ArchiveFailure('restore_file_type_or_size_changed')
         local_rows.append(
             {
                 **row,
@@ -732,21 +833,21 @@ def _restore_execute(*, archive_root: Path, target: Path, limits: dict, deadline
     remaining_evidence -= operation["request_bytes"] + operation["stderr_bytes"]
     for run_id in ids:
         if time.monotonic() >= deadline:
-            raise TransferError("restore owner deadline")
+            raise _ArchiveFailure('restore_owner_deadline')
         run_id = archive._safe_run_id(run_id)
         refs, status, _ = archive._run_scan_blob_refs(staging / "output_runs" / run_id)
         if status == "invalid":
-            raise TransferError("restore invalid refs")
+            raise _ArchiveFailure('restore_invalid_refs')
         for ref in refs:
             if ref["uncompressed_size_bytes"] > limits["max_file_bytes"]:
-                raise TransferError("restore decode budget")
+                raise _ArchiveFailure('restore_decode_budget')
             archive.load_required_data_scan_blob(runtime_root=staging, blob_ref=ref)
         evidence = load_run_candidate_evidence(base=staging, run_id=run_id, runs_root=staging / "output_runs")
         if any(item.classification["status"].startswith("unsupported") for item in evidence):
-            raise TransferError("restore owner unsupported")
+            raise _ArchiveFailure('restore_owner_unsupported')
     inventory = archive._run_inventory(staging / "output_runs", base=staging, run_ids=ids)
     if len(inventory) != len(ids) or not all(row["verified"] for row in inventory):
-        raise TransferError("restore structure invalid")
+        raise _ArchiveFailure('restore_structure_invalid')
     result = {
         "complete": True,
         "archive_root": str(archive_root),
@@ -759,11 +860,11 @@ def _restore_execute(*, archive_root: Path, target: Path, limits: dict, deadline
     }
     encoded = json.dumps(result, sort_keys=True).encode()
     if len(encoded) > remaining_evidence or time.monotonic() >= deadline:
-        raise TransferError("restore receipt budget")
+        raise _ArchiveFailure('restore_receipt_budget')
     (staging / "restore-receipt.json").write_bytes(encoded)
     publish_batch(staging, target, deadline=deadline)
     if (target / "restore-receipt.json").read_bytes() != encoded:
-        raise TransferError("restore publication unknown")
+        raise _ArchiveFailure('restore_publication_unknown')
     return result
 
 
@@ -777,13 +878,13 @@ def restore_batch(*, archive_root: Path, target: Path, limits_file: Path) -> dic
     result_path = Path(target).parent / (".restore-" + uuid.uuid4().hex + ".result.json")
     code = """import json,sys,os
 from pathlib import Path
-from src.application.research.archive_bounded import _restore_execute
+from src.application.research.archive_bounded import _restore_execute, _failure_details, TransferError
 r=json.load(sys.stdin)
 try:
  result=_restore_execute(archive_root=Path(r['archive_root']),target=Path(r['target']),limits=r['limits'],deadline=r['deadline'])
  result['ok']=True
 except Exception as exc:
- result={'ok':False,'state':'unknown','reason':type(exc).__name__,'source_deleted':False}
+ result={'ok':False,'state':'unknown','reason':'TransferError' if isinstance(exc,TransferError) else type(exc).__name__,'source_deleted':False,**_failure_details(exc,'restore')}
 with open(r['result'],'xb') as f:
  f.write(json.dumps(result).encode());f.flush();os.fsync(f.fileno())
 """
