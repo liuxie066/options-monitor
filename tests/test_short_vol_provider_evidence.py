@@ -86,6 +86,13 @@ def cache_path(base_dir):
     return rv.qfq_history_cache_path(base_dir, market="US", underlier_code="US.NVDA")
 
 
+@pytest.fixture
+def missing_calendar_registration(monkeypatch):
+    """No reviewed next-year source: preserve the partial/no-history contracts."""
+    monkeypatch.delitem(rv._SCHEDULED_CALENDARS, ("US", 2027))
+
+
+@pytest.mark.usefixtures("missing_calendar_registration")
 def test_cross_year_calendar_is_unavailable_only_for_far_expiry(tmp_path):
     control = fetch(Gateway(), tmp_path / "control")
     gateway = Gateway()
@@ -103,6 +110,7 @@ def test_cross_year_calendar_is_unavailable_only_for_far_expiry(tmp_path):
     assert snapshot.trading_calendar_evidence["status"] == "ok"
 
 
+@pytest.mark.usefixtures("missing_calendar_registration")
 def test_all_far_expiries_do_not_fetch_or_publish_history(tmp_path):
     gateway = Gateway()
     snapshot = fetch(gateway, tmp_path, expirations=(FAR, "2027-03-19"))
@@ -340,6 +348,7 @@ def _fixed_option_clock(stamp):
     return normalize
 
 
+@pytest.mark.usefixtures("missing_calendar_registration")
 def test_public_symbol_entry_keeps_near_rv_and_rejects_far_binding(monkeypatch, tmp_path):
     from datetime import datetime
     from domain.domain.engine.candidate_engine import (
@@ -366,6 +375,7 @@ def test_public_symbol_entry_keeps_near_rv_and_rejects_far_binding(monkeypatch, 
     assert _required_realized_volatility_error(snapshot, expirations=[NEAR, FAR]) is None
 
 
+@pytest.mark.usefixtures("missing_calendar_registration")
 def test_mixed_expiry_rv_survives_created_refreshed_request_merge(monkeypatch, tmp_path):
     from datetime import datetime
     from domain.domain.engine.candidate_engine import (
@@ -405,6 +415,7 @@ def test_mixed_expiry_rv_survives_created_refreshed_request_merge(monkeypatch, t
 
 
 @pytest.mark.parametrize("failure_kind", ["all_far", "calendar", "identity"])
+@pytest.mark.usefixtures("missing_calendar_registration")
 def test_public_symbol_entry_emits_typed_unavailable(monkeypatch, tmp_path, failure_kind):
     gateway = Gateway()
     expirations = (NEAR,)

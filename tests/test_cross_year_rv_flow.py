@@ -1,4 +1,4 @@
-"""Offline public fetch-plan/receipt/candidate/Brief integration for HK RV."""
+"""Offline public fetch-plan/receipt/candidate/Brief integration for shared HK/US RV."""
 
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -9,21 +9,24 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from test_hk_cross_year_rv import CalendarQuoteFixture, NEAR, JAN, MAR
+from test_cross_year_rv import CalendarQuoteFixture, NEAR, JAN, MAR
 
 
-NOW = datetime(2026, 10, 30, 5, 45, tzinfo=timezone.utc)
-SYMBOL = "0123.HK"
+MARKETS = {
+    "HK": ("0123.HK", "HK.00123", "HKD", "Asia/Hong_Kong", datetime(2026, 10, 30, 5, 45, tzinfo=timezone.utc)),
+    "US": ("NVDA", "US.NVDA", "USD", "America/New_York", datetime(2026, 10, 30, 14, 45, tzinfo=timezone.utc)),
+}
 
 
-def _public_fetch(monkeypatch, base, expirations, *, conflict=False):
+def _public_fetch(monkeypatch, base, expirations, *, market, conflict=False):
+    symbol, underlier, currency, zone, now = MARKETS[market]
     from src.application import opend_symbol_fetching as symbols
     from src.application.opend_market_snapshot_fetching import MarketSnapshotFetchResult
     from src.application.required_data_fetching import build_fetch_request_from_spec, execute_required_data_opend
     from src.application.required_data_planning import RequiredDataFetchSpec, OptionSideFetchPlan, StrikeWindowPlan
     from src.infrastructure import futu_gateway
 
-    fixture = CalendarQuoteFixture()
+    fixture = CalendarQuoteFixture(market)
     if conflict:
         fixture.future_rows = [{"time": "2027-01-04", "trade_date_type": "NON_TRADING"}]
     forbidden = {"broker": 0, "network": 0}
@@ -56,12 +59,12 @@ def _public_fetch(monkeypatch, base, expirations, *, conflict=False):
     class FrozenDateTime(datetime):
         @classmethod
         def now(cls, tz=None):
-            return NOW.astimezone(tz) if tz is not None else NOW.replace(tzinfo=None)
+            return now.astimezone(tz) if tz is not None else now.replace(tzinfo=None)
 
     monkeypatch.setattr(symbols, "datetime", FrozenDateTime)
-    monkeypatch.setattr(symbols, "_utc_now_iso", lambda: NOW.isoformat())
-    stamp = NOW.isoformat()
-    codes = [f"HK.TST{expiry.replace('-', '')[2:]}P100000" for expiry in expirations]
+    monkeypatch.setattr(symbols, "_utc_now_iso", lambda: now.isoformat())
+    stamp = now.isoformat()
+    codes = [f"{market}.TST{expiry.replace('-', '')[2:]}P100000" for expiry in expirations]
     chain = pd.DataFrame(
         [
             {
@@ -71,7 +74,7 @@ def _public_fetch(monkeypatch, base, expirations, *, conflict=False):
                 "option_type": "PUT",
                 "lot_size": 100,
                 "stock_type": "DRVT",
-                "stock_owner": "HK.00123",
+                "stock_owner": underlier,
                 "option_standard_type": "STANDARD",
                 "suspension": False,
             }
@@ -101,7 +104,7 @@ def _public_fetch(monkeypatch, base, expirations, *, conflict=False):
             "option_implied_volatility": 0.40,
             "option_delta": -0.3,
             "option_contract_multiplier": 100,
-            "stock_owner": "HK.00123",
+            "stock_owner": underlier,
             "stock_type": "DRVT",
             "sec_status": "NORMAL",
             "suspension": False,
@@ -130,7 +133,7 @@ def _public_fetch(monkeypatch, base, expirations, *, conflict=False):
 
     monkeypatch.setattr(symbols, "normalize_option_observation", _fixed_option_clock(stamp))
     spec = RequiredDataFetchSpec(
-        symbol=SYMBOL,
+        symbol=symbol,
         limit_expirations=0,
         host="127.0.0.1",
         port=11111,
@@ -161,13 +164,13 @@ def _public_fetch(monkeypatch, base, expirations, *, conflict=False):
         spot_override=100,
         underlier_observation={
             "schema_version": "opening_underlier_observation.v1",
-            "code": "HK.00123",
-            "market": "HK",
+            "code": underlier,
+            "market": market,
             "last_price": 100,
             "update_time": stamp,
             "observed_at_utc": stamp,
             "age_seconds": 0,
-            "market_state": "AFTERNOON",
+            "market_state": "AFTERNOON" if market == "HK" else "MORNING",
             "sec_status": "NORMAL",
             "suspension": False,
             "status": "ready",
@@ -179,8 +182,10 @@ def _public_fetch(monkeypatch, base, expirations, *, conflict=False):
     return payload, spec.to_debug_dict()
 
 
+@pytest.mark.parametrize("market", ["HK", "US"])
 @pytest.mark.parametrize("conflict", [False, True])
-def test_public_plan_fetch_publish_validate_candidate_brief_chain(tmp_path, monkeypatch, conflict):
+def test_public_plan_fetch_publish_validate_candidate_brief_chain(tmp_path, monkeypatch, conflict, market):
+    symbol, underlier, currency, zone, now = MARKETS[market]
     from domain.domain.engine import build_candidate_decision
     from src.application.candidate_scanning import calculation_rejection
     from src.application.scan_sell_put import compute_metrics, explain_metrics_rejection
@@ -211,50 +216,50 @@ def test_public_plan_fetch_publish_validate_candidate_brief_chain(tmp_path, monk
     for name in ("portfolio_context.json", "option_positions_context.json"):
         path = account_dir / "state" / name
         context = json.loads(path.read_text())
-        context["as_of_utc"] = NOW.isoformat()
+        context["as_of_utc"] = now.isoformat()
         if isinstance(context.get("exchange_rates"), dict):
-            context["exchange_rates"]["timestamp"] = NOW.isoformat()
+            context["exchange_rates"]["timestamp"] = now.isoformat()
         path.write_text(json.dumps(context))
     monkeypatch.setattr(
         "src.application.daily_decision_brief_service._pending_attribution_for_brief", lambda **_: ([], None)
     )
-    _write_close_report(account_dir, [], market="HK")
+    _write_close_report(account_dir, [], market=market)
     expirations = (NEAR, JAN, "2028-01-28")
-    payload, planned_request = _public_fetch(monkeypatch, tmp_path, expirations, conflict=conflict)
+    payload, planned_request = _public_fetch(monkeypatch, tmp_path, expirations, market=market, conflict=conflict)
     assert payload["meta"]["status"] == "ok"
     rows = {row["expiration"]: row for row in payload["rows"]}
     assert rows[NEAR]["term_matched_rv_status"] == "ok"
     assert rows[JAN]["term_matched_rv_status"] == ("data_unavailable" if conflict else "ok")
     assert rows["2028-01-28"]["term_matched_rv_reason"] == "calendar_coverage_incomplete"
 
-    plan = _fetch_plan(SYMBOL, observed_at=NOW.isoformat())
+    plan = _fetch_plan(symbol, observed_at=now.isoformat())
     plan["merged_requests"] = [planned_request]
     plan["projected_expirations"] = list(expirations)
     plan["expiration_discovery"]["expirations"] = list(expirations)
     plan["expiration_discovery"]["request_identity"]["trading_date"] = "2026-10-30"
     plan["side_plans"] = deepcopy(planned_request["side_plans"])
     contract = build_required_data_expected_fetch_contract(
-        symbol=SYMBOL, fetch_plan=plan, source="opend", host="127.0.0.1", port=11111
+        symbol=symbol, fetch_plan=plan, source="opend", host="127.0.0.1", port=11111
     )
     required_root = tmp_path / "output_runs" / run_id / "required_data"
-    raw, csv = save_outputs(tmp_path, SYMBOL, payload, output_root=required_root)
+    raw, csv = save_outputs(tmp_path, symbol, payload, output_root=required_root)
     receipt_path, _ = publish_required_data_quote_snapshot(
         runtime_root=tmp_path,
         producer_root=required_root,
         producer_run_id=run_id,
-        symbol=SYMBOL,
+        symbol=symbol,
         raw_path=raw,
         csv_path=csv,
         fetch_plan=plan,
         fetch_policy={"source": "opend", "host": "127.0.0.1", "port": 11111},
         expected_fetch_contract=contract,
-        source_observed_at=NOW,
-        completed_at=NOW,
-        now=NOW,
+        source_observed_at=now,
+        completed_at=now,
+        now=now,
     )
     plan_items = [
         {
-            "symbol": SYMBOL,
+            "symbol": symbol,
             "source": "opend",
             "fetch_plan": plan,
             "fetch_binding": contract["fetch_binding"],
@@ -280,10 +285,10 @@ def test_public_plan_fetch_publish_validate_candidate_brief_chain(tmp_path, monk
             "symbols": [],
             "results": [],
         },
-        sealed_at=NOW,
+        sealed_at=now,
     )
     evidence = resolve_frozen_required_data(
-        manifest_path=manifest, expected_run_id=run_id, symbol=SYMBOL, required_data_root=required_root, now=NOW
+        manifest_path=manifest, expected_run_id=run_id, symbol=symbol, required_data_root=required_root, now=now
     )
     original_manifest = manifest.read_bytes()
     frame = pd.read_csv(csv)
@@ -292,27 +297,28 @@ def test_public_plan_fetch_publish_validate_candidate_brief_chain(tmp_path, monk
         merged = _opening_row(
             **{
                 **raw_row,
-                "symbol": SYMBOL,
-                "stock_owner": "HK.00123",
-                "currency": "HKD",
+                "symbol": symbol,
+                "stock_owner": underlier,
+                "currency": currency,
                 "cny_per_hkd": 0.9,
-                "decision_now_utc": NOW.isoformat(),
-                "snapshot_received_at_utc": NOW.isoformat(),
+                "cny_per_usd": 7.0,
+                "decision_now_utc": now.isoformat(),
+                "snapshot_received_at_utc": now.isoformat(),
                 "cash_free_effective_native": 100000.0,
                 "cash_required_native": 10000.0,
-                "cash_native_currency": "HKD",
+                "cash_native_currency": currency,
                 "max_new_contracts": 10,
             }
         )
-        metric = compute_metrics(pd.Series(merged), now_utc=NOW)
+        metric = compute_metrics(pd.Series(merged), now_utc=now)
         rejects = (
             []
             if metric is not None
-            else [calculation_rejection(merged, explain_metrics_rejection(pd.Series(merged), now_utc=NOW))]
+            else [calculation_rejection(merged, explain_metrics_rejection(pd.Series(merged), now_utc=now))]
         )
         decision = build_candidate_decision(
             mode="put",
-            symbol=SYMBOL,
+            symbol=symbol,
             contract_symbol=merged["contract_symbol"],
             accepted=metric is not None,
             rejects=rejects,
@@ -333,14 +339,14 @@ def test_public_plan_fetch_publish_validate_candidate_brief_chain(tmp_path, monk
         base=tmp_path,
         run_id=run_id,
         account="lx",
-        market="HK",
-        physical_account=_physical_account("lx", "HK"),
+        market=market,
+        physical_account=_physical_account("lx", market),
         account_config_sha256="a" * 64,
         strategy_policy_sha256="b" * 64,
         dependencies=dependencies,
         scan_statuses=[
             {
-                "symbol": SYMBOL,
+                "symbol": symbol,
                 "strategy_mode": "put",
                 "status": "completed",
                 "reason": "partial_data",
@@ -351,19 +357,19 @@ def test_public_plan_fetch_publish_validate_candidate_brief_chain(tmp_path, monk
         final_candidates={"put": accepted},
         candidate_evaluations={"put": evaluations},
         run_mode={"scan_mode": "standard", "executable": True},
-        sealed_at=NOW,
+        sealed_at=now,
     )
     _publish_opening_manifest(tmp_path, snapshot)
     brief = assemble_daily_decision_brief(
         base=tmp_path,
         run_id=run_id,
         account="lx",
-        market="HK",
+        market=market,
         scheduler_decision={"in_run_window": True},
         account_result=_result(),
         pipeline_succeeded=True,
-        config=_config(timezone_name="Asia/Hong_Kong"),
-        now_utc=NOW,
+        config=_config(timezone_name=zone),
+        now_utc=now,
         opening_candidate_snapshot=snapshot,
     )
     assert brief["actionability"] != "blocked", json.dumps(
@@ -385,12 +391,13 @@ def test_public_plan_fetch_publish_validate_candidate_brief_chain(tmp_path, monk
     assert manifest.read_bytes() == original_manifest
 
 
-def test_separate_rv_request_binding_preserves_healthy_terms_and_each_source(tmp_path):
+@pytest.mark.parametrize("market", ["HK", "US"])
+def test_separate_rv_request_binding_preserves_healthy_terms_and_each_source(tmp_path, market):
     from src.application.required_data_fetching import _merged_realized_volatility_meta
-    from test_hk_cross_year_rv import fetch
+    from test_cross_year_rv import fetch
 
     cache = {}
-    fixture = CalendarQuoteFixture()
+    fixture = CalendarQuoteFixture(market)
     requests = []
     for expiry in (NEAR, JAN, MAR, "2028-01-28"):
         snapshot = fetch(fixture, tmp_path, (expiry,), facts_cache=cache)
