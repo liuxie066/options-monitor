@@ -11,6 +11,7 @@ from typing import Any, Iterable, Mapping
 
 
 OPENING_BROKER_SNAPSHOT_SCHEMA = "opening_candidate_snapshot.v4"
+OPENING_SINGLE_INPUT_SNAPSHOT_SCHEMA = "opening_candidate_snapshot.v5"
 BENIGN_OPENING_NOT_APPLICABLE_REASONS = frozenset(
     {"covered_call_underlying_not_held"}
 )
@@ -162,9 +163,9 @@ def current_candidate_owner_schema(owner: Any) -> str:
 
 
 def is_current_candidate_owner_schema(owner: str, schema: Any) -> bool:
-    """Opening v4 adds explicit broker identity; existing owner schemas remain frozen."""
+    """Accept sealed opening history and the single-input standard writer."""
     return schema == current_candidate_owner_schema(owner) or (
-        owner == "opening" and schema == OPENING_BROKER_SNAPSHOT_SCHEMA
+        owner == "opening" and schema in {OPENING_BROKER_SNAPSHOT_SCHEMA, OPENING_SINGLE_INPUT_SNAPSHOT_SCHEMA}
     )
 
 

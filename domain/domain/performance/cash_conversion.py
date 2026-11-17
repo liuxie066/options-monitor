@@ -190,7 +190,7 @@ def project_candidate_fx_facts(raw: bytes, *, run_id: str) -> dict[str, Any]:
         raise RunFXError("sealed candidate FX artifact is invalid") from exc
     if (
         not isinstance(candidate, dict)
-        or candidate.get("schema_version") != "opening_candidate_snapshot.v3"
+        or candidate.get("schema_version") not in {"opening_candidate_snapshot.v3", "opening_candidate_snapshot.v5"}
         or candidate.get("run_id") != run_id
         or not isinstance(candidate.get("dependencies"), list)
         or not isinstance(candidate.get("capacity_fx_evidence"), dict)

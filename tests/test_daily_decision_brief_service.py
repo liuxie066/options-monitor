@@ -21,6 +21,7 @@ from src.application.close_advice_report_manifest import (
     publish_close_advice_report_manifest,
 )
 from src.application.opening_candidate_snapshot import (
+    ranked_opening_candidates,
     seal_opening_candidate_snapshot,
 )
 
@@ -646,7 +647,7 @@ def _materialize_candidate_bundle_fixture(base: Path) -> None:
     for owner, snapshot in snapshots.items():
         counts: dict[tuple[str, str, str], int] = {}
         selected = (
-            snapshot.get("ranked_candidates")
+            ranked_opening_candidates(snapshot)
             if owner == "opening"
             else snapshot.get("ranked_pairs")
         ) or []

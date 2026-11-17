@@ -20,6 +20,7 @@ from src.application.opening_candidate_snapshot import (
     dependency_from_file,
     dependency_from_hash,
     load_opening_candidate_snapshot,
+    opening_candidate_input,
     ranked_opening_candidate_decisions,
     ranked_opening_candidates,
     rejected_opening_candidate_decisions,
@@ -242,7 +243,7 @@ def _seal(base: Path, *, run_id: str = "run-1", account: str = "lx") -> dict:
 def _publish_opening_manifest(base: Path, payload: dict) -> dict:
     account_dir = _account_dir(base, str(payload["run_id"]), str(payload["account"]))
     expected: list[dict[str, str]] = []
-    ranked = [dict(row) for row in payload.get("ranked_candidates") or []]
+    ranked = ranked_opening_candidates(payload)
     for raw in payload.get("scope_results") or []:
         scope = dict(raw)
         if scope.get("scope") != "strategy":
@@ -374,15 +375,15 @@ def test_snapshot_seals_final_candidate_order_and_account_binding(tmp_path: Path
     payload = _seal(tmp_path)
 
     assert payload["opening_status"] == "candidates_found"
-    assert [row["rank"] for row in payload["ranked_candidates"]] == [1, 2]
+    assert [row["rank"] for row in ranked_opening_candidates(payload)] == [1, 2]
     assert [
-        row["facts"]["contract_symbol"] for row in payload["ranked_candidates"]
+        row["facts"]["contract_symbol"] for row in ranked_opening_candidates(payload)
     ] == ["NVDA260918P00090000", "NVDA260918P00085000"]
     assert all(
         row["candidate_id"] in {
             decision["candidate_id"] for decision in payload["candidate_decisions"]
         }
-        for row in payload["ranked_candidates"]
+        for row in ranked_opening_candidates(payload)
     )
     assert [
         row["facts"]["contract_symbol"]
@@ -497,11 +498,11 @@ def test_account_execution_order_does_not_change_market_facts(tmp_path: Path) ->
         ]
 
     lx_decisions = {
-        row["normalized_input"]["contract_symbol"]: row
+        opening_candidate_input(row)["contract_symbol"]: row
         for row in forward["lx"]["candidate_decisions"]
     }
     sy_decisions = {
-        row["normalized_input"]["contract_symbol"]: row
+        opening_candidate_input(row)["contract_symbol"]: row
         for row in forward["sy"]["candidate_decisions"]
     }
     contract_symbol = "NVDA260918P00090000"
@@ -510,9 +511,7 @@ def test_account_execution_order_does_not_change_market_facts(tmp_path: Path) ->
     assert lx_decision["normalized_input_hash"] == sy_decision[
         "normalized_input_hash"
     ]
-    assert forward["lx"]["ranked_candidates"][0]["facts"] == forward["sy"][
-        "ranked_candidates"
-    ][0]["facts"]
+    assert ranked_opening_candidates(forward["lx"])[0]["facts"] == ranked_opening_candidates(forward["sy"])[0]["facts"]
     assert lx_decision["candidate_id"] != sy_decision["candidate_id"]
 
 
@@ -1169,7 +1168,7 @@ def test_incomplete_date_candidate_seals_with_ranges_and_incomplete_ranking(tmp_
         scan_statuses=[{**_scan_status("NVDA", "put", "completed", reason="partial_data"),
                         "required_data_coverage": coverage}],
     )
-    facts = payload["ranked_candidates"][0]["facts"]
+    facts = ranked_opening_candidates(payload)[0]["facts"]
     assert facts["required_data_expiration_status"] == "incomplete"
     assert facts["ranking_complete"] is False
     assert facts["partial_candidate_policy"] == "retain_and_mark"
@@ -1468,11 +1467,11 @@ def test_ranking_inputs_record_actual_preaggregate_order(tmp_path, monkeypatch):
         scan_statuses=[_scan_status(s, "put", "completed") for s in ("NVDA", "AMD")],
     )
     inputs = payload["ranking_inputs"]["put"]
-    by_id = {d["candidate_id"]: d["normalized_input"] for d in payload["candidate_decisions"]}
+    by_id = {d["candidate_id"]: opening_candidate_input(d) for d in payload["candidate_decisions"]}
     assert [by_id[cid] for cid in inputs["candidate_ids"]] == seen[0]
     assert [row["contract_symbol"] for row in seen[0]] == [r["contract_symbol"] for r in rows]
     assert inputs["profile"] == "current_tie_break"
-    assert [r["facts"]["contract_symbol"] for r in payload["ranked_candidates"]] != [r["contract_symbol"] for r in rows]
+    assert [r["facts"]["contract_symbol"] for r in ranked_opening_candidates(payload)] != [r["contract_symbol"] for r in rows]
 
 
 @pytest.mark.parametrize("invalid", ["null", "mode", "duplicate", "missing", "foreign", "profile", "shape"])
@@ -1748,9 +1747,9 @@ def test_delta_rejection_sealed_and_explained_without_rescan(tmp_path, monkeypat
     )
     assert payload["opening_status"] == ("data_unavailable" if unverifiable else "no_candidate")
     recorded = payload["candidate_decisions"][0]
-    assert recorded["normalized_input"]["delta"] == sign * 0.4001
-    assert recorded["normalized_input"]["policy_max_abs_delta"] == 0.4
-    assert recorded["normalized_input"]["snapshot_received_at_utc"] == NOW.isoformat()
+    assert opening_candidate_input(recorded)["delta"] == sign * 0.4001
+    assert opening_candidate_input(recorded)["policy_max_abs_delta"] == 0.4
+    assert opening_candidate_input(recorded)["snapshot_received_at_utc"] == NOW.isoformat()
     _publish_opening_manifest(tmp_path, payload)
 
     # Public explanation must read the sealed rejection without recomputing policy.

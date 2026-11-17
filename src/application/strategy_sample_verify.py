@@ -30,7 +30,9 @@ from src.application.sell_put_cash import (
 from src.application.pipeline_context import apply_sell_put_fx_status
 from src.application.portfolio_context_service import cash_snapshot_evidence_is_complete
 from src.application.candidate_snapshot_manifest import CandidateSnapshotManifestError
-from src.application.opening_candidate_snapshot import candidate_universe_summary
+from src.application.opening_candidate_snapshot import (
+    candidate_universe_summary, opening_candidate_input, ranked_opening_candidates,
+)
 from src.application.prepared_option_positions_context import (
     exchange_rate_scalars_from_option_context,
     load_prepared_option_positions_context,
@@ -190,7 +192,7 @@ def _quantity(row, mode, contexts, converter, *, snapshot=None, fx_error=None):
 def _decision_checks(decision, snapshot, contexts, rates, fx_error, checks):
     cid, mode = decision["candidate_id"], decision["strategy_mode"]
     loc = f"candidate_decisions/{cid}"
-    row, opening = decision["normalized_input"], decision["opening_decision"]
+    row, opening = opening_candidate_input(decision), decision["opening_decision"]
     try:
         decision_time_from_input(row)
         strategy = validate_strategy_identity(
@@ -275,8 +277,8 @@ def _ranking_checks(snapshot, eligible, checks):
         if not decisions or not all(d["candidate_id"] in eligible for d in decisions):
             _check(checks, "ranking", location, reason="complete compatible decision universe unavailable")
             continue
-        recorded = [r for r in snapshot["ranked_candidates"] if r["strategy_mode"] == mode]
-        by_id = {d["candidate_id"]: d["normalized_input"] for d in accepted}
+        recorded = ranked_opening_candidates(snapshot, mode=mode)
+        by_id = {d["candidate_id"]: opening_candidate_input(d) for d in accepted}
         for r in recorded:
             _check(checks, "ranking_facts", location + "/" + r["candidate_id"], r["facts"], by_id[r["candidate_id"]])
         if not accepted:
@@ -288,7 +290,7 @@ def _ranking_checks(snapshot, eligible, checks):
                 ids = input_evidence[mode]["candidate_ids"]
                 rows = [by_id[cid] for cid in ids]
             else:
-                rows = [d["normalized_input"] for d in accepted]
+                rows = [opening_candidate_input(d) for d in accepted]
             recomputed = rank_candidates(deepcopy(rows), mode=mode)
             expected = [r["facts"]["contract_symbol"] for r in recorded]
             actual = [r["contract_symbol"] for r in recomputed]
@@ -325,7 +327,7 @@ def verify_sample(*, base: Path, run_id: str, account: str) -> dict[str, Any]:
             raise ValueError("formal standard opening sample required")
         if not snapshot.get("candidate_decisions"):
             raise ValueError("no candidate calculations; empty scan is not replay evidence")
-        if any(d.get("schema_version") != "opening_candidate_decision.v1" for d in snapshot["candidate_decisions"]):
+        if any(d.get("schema_version") not in {"opening_candidate_decision.v1", "opening_candidate_decision.v2"} for d in snapshot["candidate_decisions"]):
             raise ValueError("complete candidate decision contract required")
     except (CandidateSnapshotManifestError, OSError, ValueError, KeyError, TypeError) as exc:
         _check(checks, "integrity", "bundle", reason=str(exc))

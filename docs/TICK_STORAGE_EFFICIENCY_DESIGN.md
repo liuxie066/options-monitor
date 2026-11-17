@@ -1,6 +1,6 @@
 # Tick 存储效率设计
 
-> 状态：当前源码已实现摘要投影及 opening、SP+LC、CC+LP snapshot 紧凑编码。历史性能数字保留为设计依据，生产容量与时延须按目标环境验证。
+> 状态：当前源码已实现摘要投影、两类组合快照紧凑编码及 opening v5 单输入持久化。历史性能数字保留为设计依据，生产容量与时延须按目标环境验证。
 > Commit、push、merge、release、deployment 和历史数据清理都是独立边界。
 
 ## 目标
@@ -14,7 +14,7 @@
 - Research 继续读取完整、可验证的 opening candidate 与 required-data 权威事实；
 - 新写入优化与历史数据清理保持分离。
 
-## 成功信号
+## 早期编码优化的成功信号（历史范围）
 
 - scheduled Tick 仍只执行一次跨账户 required-data prefetch；同一次完整结果继续先用于
   required-data manifest 封存。
@@ -37,7 +37,7 @@
 
 - 不改 OpenD 获取、缓存、rate-limit、并发或 required-data planning。
 - 不改候选归一化、过滤、排序、容量、决策结构或通知文案。
-- 不删除 opening snapshot 顶层与 `opening_decision` 之间的重复候选字段。
+- 早期编码优化不删除重复字段；2026-11-17 的 opening v5 工作单元按下节独立合同移除重复输入。
 - 不把 per-account prefetch summary 移到 run-level 共享路径。
 - 不给所有 JSON 增加 gzip，也不修改通用 JSON writer。
 - 不改 required-data canonical blob、receipt 或 manifest。
@@ -94,10 +94,44 @@ JSON，不依赖 snapshot 文件是否带缩进。
 同一 run 的文件字节 hash 与 `content_sha256`：新文件的字节 hash 会按新编码生成并在同一 run 内
 读回校验，语义 binding 不变。历史漂亮 JSON 不重写，现有 loader 继续接受。
 
-opening snapshot 中候选 facts 的重复属于 `opening_candidate_snapshot.v1` 语义合同，已经被
-Research 消费。本工作单元只改变物理编码。
+早期 opening 编码优化仅改变物理编码；历史 v3/v4 的重复输入仍按原合同读取。
+下面的 v5 工作单元独立变更持久化结构，不能套用早期“payload/content hash 不变”的结论。
 
 ## 选择的设计
+
+### Opening v5：每个候选只落盘一份输入
+
+标准模式的新 Futu 和 Longbridge 快照统一写 `opening_candidate_snapshot.v5`，broker 身份与
+凭证绑定校验不变。`candidate_decisions` 使用 `opening_candidate_decision.v2`，唯一输入是
+`opening_decision.normalized_input`；不再写 decision 外层的 `normalized_input` 或 ranked 行的
+`facts`。ranked 行保留 candidate ID、decision hash、顺序与解释，引用同快照中的候选。
+不增加 blob、数据库、压缩、跨 run 缓存或第二套格式。experience owner 不变。
+
+writer 输入契约、domain 决策、input hash、decision hash、候选身份、过滤/拒绝/排序不变。
+快照 schema/content hash 和文件 hash 必然改变；manifest 按实际新文件封存，不把新 hash 伪装成旧 hash。
+validator 要求完整 v5 合同，拒绝缺失输入、重复输入、无决策引用、重复排序与 v2 record 降级装入旧 schema。
+
+既有 ranked/accepted/rejected projection 在需要时返回原业务视图。新投影复制外层输入，
+避免消费者修改投影视图时改到唯一输入；不承诺整个历史嵌套对象都深拷贝。loader 不展开整树三份输入。
+manifest、Brief、Research、strike metrics、策略回放与 FX facade 通过 owner 读取，domain 层不反向依赖 application。
+
+历史 v3/v4 原件、hash、mtime 不改，loader 和历史投影保持原行为。新 writer 遇到旧 run 的既有
+v3/v4 文件拒绝重新封存并保留原件；相同 v5 请求可重试。旧 4.6.42 reader 不支持 v5，后续发布
+必须携带新版恢复 reader；回退到旧应用时保留新产物并用兼容 reader 恢复，不删除或重签原件。
+本次源码工作不自动授权发布、部署、历史转换或源删除。
+
+本地同输入基准（400 候选、独立进程、旧 4.6.42 与当前 writer/reader，三次交替计时中位数）：
+
+| 场景 | 旧逻辑 B | 新逻辑 B | 减少 | seal CPU 旧→新 ms | load CPU 旧→新 ms | 三类投影合计 CPU 旧→新 ms |
+|---|---:|---:|---:|---:|---:|---:|
+| 全入选 | 2,429,442 | 1,366,034 | 43.77% | 313.14→224.03 | 96.79→64.83 | 0.56→10.42 |
+| 100 入选/300 拒绝 | 1,828,042 | 1,162,684 | 36.40% | 279.13→220.74 | 83.79→64.65 | 0.35→6.58 |
+| 全拒绝 | 1,627,734 | 1,095,030 | 32.73% | 259.50→216.67 | 79.14→63.62 | 0.27→5.17 |
+
+独立 tracemalloc 轮次，seal/load 峰值降低约 33–46%；三类完整投影同时保留时，新增临时分配
+约 0.66–1.23 MiB。计时轮次的 macOS 进程 RSS 中位数分别减少约 10.22、8.38、6.72 MiB，
+该 RSS 含解释器/import/输入，不能视为单函数峰值或生产内存收益。三场景输入及业务视图摘要完全相同。
+本地 worker 复制、独立恢复及 manifest/owner 读回验收与生产回收分开；这些数据不外推日增长。
 
 ### SP+LC / CC+LP：相同事实采用紧凑编码
 

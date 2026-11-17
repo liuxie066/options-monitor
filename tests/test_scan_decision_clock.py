@@ -13,6 +13,7 @@ from om_strategy_core import calculate_metrics
 from src.application import candidate_scanning, scan_sell_call, scan_sell_put
 from src.application.opening_candidate_snapshot import (
     OpeningCandidateSnapshotError, load_opening_candidate_snapshot, validate_opening_candidate_snapshot,
+    opening_candidate_input,
 )
 from test_opening_candidate_snapshot import _candidate, _scan_status, _seal_snapshot, _snapshot_path
 
@@ -142,16 +143,16 @@ def test_real_scan_disk_roundtrip_account_isolation_and_replay(tmp_path):
         loaded = load_opening_candidate_snapshot(base=tmp_path, run_id="run-clock", account=account)
         assert loaded == expected
         assert json.loads(_snapshot_path(tmp_path, "run-clock", account).read_bytes()) == expected
-        assert {d["normalized_input"]["decision_now_utc"] for d in loaded["candidate_decisions"]} == {now.isoformat()}
+        assert {opening_candidate_input(d)["decision_now_utc"] for d in loaded["candidate_decisions"]} == {now.isoformat()}
         accepted = next(d for d in loaded["candidate_decisions"] if d["opening_decision"]["accepted"])
-        row = accepted["normalized_input"]
+        row = opening_candidate_input(accepted)
         assert calculate_metrics(row, mode="put") == calculate_metrics(row, mode="put", now_utc=now)
 
 
 @pytest.mark.parametrize("bad", [None, "", "invalid", "2026-08-06T09:30:00", False])
 def test_rehashed_invalid_clock_is_rejected_on_load(tmp_path, bad):
     payload = deepcopy(sealed_scan(tmp_path))
-    payload["candidate_decisions"][0]["normalized_input"]["decision_now_utc"] = bad
+    opening_candidate_input(payload["candidate_decisions"][0])["decision_now_utc"] = bad
     payload["content_sha256"] = canonical_sha256({k: v for k, v in payload.items() if k != "content_sha256"})
     with pytest.raises(OpeningCandidateSnapshotError, match="decision_now_utc"):
         validate_opening_candidate_snapshot(payload, expected_run_id="run-clock", expected_account="lx")
@@ -159,7 +160,7 @@ def test_rehashed_invalid_clock_is_rejected_on_load(tmp_path, bad):
 
 def test_clock_tampering_without_rehash_is_detected(tmp_path):
     payload = deepcopy(sealed_scan(tmp_path))
-    payload["candidate_decisions"][0]["normalized_input"]["decision_now_utc"] = (NOW + timedelta(seconds=1)).isoformat()
+    opening_candidate_input(payload["candidate_decisions"][0])["decision_now_utc"] = (NOW + timedelta(seconds=1)).isoformat()
     with pytest.raises(OpeningCandidateSnapshotError, match="hash mismatch"):
         validate_opening_candidate_snapshot(payload, expected_run_id="run-clock", expected_account="lx")
 
@@ -171,7 +172,7 @@ def test_legacy_archive_remains_readable_but_missing_clock_is_explicit(tmp_path)
     _seal_snapshot(tmp_path, run_id="legacy", final_candidates={"put": [candidate]},
                    scan_statuses=[_scan_status("NVDA", "put", "completed", snapshot_id="c" * 64, receipt="q.json")])
     snapshot = load_opening_candidate_snapshot(base=tmp_path, run_id="legacy", account="lx")
-    row = snapshot["candidate_decisions"][0]["normalized_input"]
+    row = opening_candidate_input(snapshot["candidate_decisions"][0])
     assert "decision_now_utc" not in row
     with pytest.raises(ValueError, match="missing decision_now_utc"):
         calculate_metrics(row, mode="put")

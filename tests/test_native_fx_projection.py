@@ -123,8 +123,11 @@ def project_candidate(value):
     return project_candidate_fx_facts(json.dumps(value).encode(), run_id="frozen-run")
 
 
-def test_candidate_observation_reuses_native_fact_owner():
-    result = project_candidate(candidate_snapshot())
+@pytest.mark.parametrize("schema", ["opening_candidate_snapshot.v3", "opening_candidate_snapshot.v5"])
+def test_candidate_observation_reuses_native_fact_owner(schema):
+    snapshot = candidate_snapshot()
+    snapshot["schema_version"] = schema
+    result = project_candidate(snapshot)
     assert result["facts"] == project(envelope())["facts"]
     assert result["status"] == "complete"
     assert result["source_kind"] == "candidate_snapshot"

@@ -21,6 +21,7 @@ from domain.domain.decision_state_fingerprint import canonical_sha256
 from om_strategy_core import ExchangeRates
 from domain.domain.strategy_identity import candidate_ranking_profile
 from src.application import strategy_sample_verify as audit
+from src.application.opening_candidate_snapshot import ranked_opening_candidates
 from test_opening_candidate_snapshot import _publish_opening_manifest, _snapshot_path
 from test_scan_decision_clock import NOW, quote
 
@@ -212,14 +213,14 @@ def test_full_prepared_pipeline_to_offline_replay(tmp_path, monkeypatch, capsys,
     assert set(payload["ranking_inputs"]) == {"put", "call"}
     by_id = {d["candidate_id"]: d for d in payload["candidate_decisions"]}
     for mode, inputs in payload["ranking_inputs"].items():
-        rows = [by_id[cid]["normalized_input"] for cid in inputs["candidate_ids"]]
+        rows = [by_id[cid]["opening_decision"]["normalized_input"] for cid in inputs["candidate_ids"]]
         assert [r["symbol"] for r in rows] == ["NVDA", "NVDA", "AMD", "AMD"]
         assert len(set(inputs["candidate_ids"])) == 4
         assert inputs["profile"] == candidate_ranking_profile(rows, mode=mode)
         check = next(c for c in report["checks"] if c["location"] == f"ranked_candidates/{mode}/order")
         assert check["status"] == "matched"
         assert check["recorded"] == check["recomputed"] == [
-            r["facts"]["contract_symbol"] for r in payload["ranked_candidates"] if r["strategy_mode"] == mode]
+            r["facts"]["contract_symbol"] for r in ranked_opening_candidates(payload, mode=mode)]
     before = _inventory(tmp_path)
     clock.now += timedelta(days=500)
     assert _verify(tmp_path) == report

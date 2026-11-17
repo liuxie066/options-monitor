@@ -11,7 +11,7 @@ from domain.domain.engine.candidate_engine import build_candidate_decision, eval
 from domain.domain.insurance_underwriting import evaluate_underwriting_candidate
 from domain.domain.strategy_identity import implementation_policy_hash, strategy_policy_hash
 from src.application.candidate_scanning import attach_strategy_identity
-from src.application.opening_candidate_snapshot import load_opening_candidate_snapshot, _snapshot_decisions
+from src.application.opening_candidate_snapshot import load_opening_candidate_snapshot, _snapshot_decisions, ranked_opening_candidates
 from src.application.agent_tools.candidate_rank_impl import candidate_rank_explain_tool
 from src.application.sell_put_steps import run_sell_put_scan_and_summarize
 from src.application.sell_call_steps import run_sell_call_scan_and_summarize
@@ -112,7 +112,7 @@ def test_replacement_real_steps_summary_seal_load_explanation_and_restore(frozen
     _publish_opening_manifest(frozen_scan, snapshot)
     loaded = load_opening_candidate_snapshot(base=frozen_scan, run_id='run-1', account='lx', require_current_contract=True)
     assert loaded == snapshot
-    assert [r['facts']['contract_symbol'] for r in loaded['ranked_candidates']] == [r['contract_symbol'] for r in ranked]
+    assert [r['facts']['contract_symbol'] for r in ranked_opening_candidates(loaded)] == [r['contract_symbol'] for r in ranked]
     for item in loaded['ranked_candidates']:
         assert item['ranking']['primary_drivers'] == ['strike']
         assert item['ranking']['rank_reason'] == _explain({}, mode=mode, cfg=None)['rank_reason']

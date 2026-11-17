@@ -30,6 +30,7 @@ from src.application.combo_yield_candidate_snapshot import (
     validate_combo_yield_candidate_snapshot,
 )
 from src.application.opening_candidate_snapshot import (
+    ranked_opening_candidates,
     OPENING_CANDIDATE_SNAPSHOT_FILE,
     OPENING_CANDIDATE_SNAPSHOT_SCHEMA,
     OpeningCandidateSnapshotError,
@@ -221,7 +222,7 @@ def _snapshot_strategy_scopes(
         key: 0 for key in expected_by_key
     }
     if owner == "opening":
-        selected_rows = snapshot.get("ranked_candidates") or []
+        selected_rows = ranked_opening_candidates(snapshot)
     elif owner == "wheel":
         selected_rows = [
             {
