@@ -48,7 +48,7 @@ def _emit_daily_brief_phase(
 
 
 @contextmanager
-def daily_brief_phase(phase: str, *, operation: str) -> Iterator[None]:
+def daily_brief_phase(phase: str, *, operation: str, measure_cpu: bool = False) -> Iterator[None]:
     """Time an actual owner boundary only inside account preparation.
 
     Durations are inclusive. A start without a terminal is incomplete, not ok.
@@ -64,6 +64,12 @@ def daily_brief_phase(phase: str, *, operation: str) -> Iterator[None]:
         started = monotonic()
     except Exception:
         started = None
+    cpu_started = None
+    if measure_cpu:
+        try:
+            cpu_started = process_time()
+        except Exception:
+            pass
     _emit_daily_brief_phase(runlog, "start", data=data)
     outcome = "ok"
     error_type = None
@@ -81,6 +87,14 @@ def daily_brief_phase(phase: str, *, operation: str) -> Iterator[None]:
             except Exception:
                 pass
         terminal = {**data, "outcome": outcome}
+        if measure_cpu:
+            # Inclusive current-process CPU, including other Python threads, not subprocesses.
+            terminal["process_cpu_ms"] = None
+            if cpu_started is not None:
+                try:
+                    terminal["process_cpu_ms"] = max(0, int((process_time() - cpu_started) * 1000))
+                except Exception:
+                    pass
         if error_type is not None:
             terminal["error_type"] = error_type
         _emit_daily_brief_phase(runlog, outcome, data=terminal, duration_ms=duration_ms)

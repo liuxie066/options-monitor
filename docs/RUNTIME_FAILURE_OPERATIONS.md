@@ -88,9 +88,23 @@ runlog 的 `daily_brief_prepare` 记录 `start` 和 `ok`/`error`，`tick_latency
 | `account_prepare` | 一个账户的普通或 delivery-only 日报准备 |
 | `assemble` | 单市场日报组装，包括它实际读取的封存产物 |
 | `history_validate` | 投递/恢复历史归一化、来源校验及其引用读取，或 current/revision 一致性校验 |
+| `state_read` | 日报仓库 JSON 文件存在性检查、读取及解码（含不存在返回） |
+| `delivery_observation` | 一次完整投递状态观察，包括复用命中时的逐日内容比较、权威历史重读及结果复制 |
+| `source_read` | 独立成功来源读取与验证，包括本次调用内的复用返回；匹配历史批观察内不逐来源记录 |
 | `persist` | 日报仓库每次原子 JSON 编码及写入 |
 | `render` | 固定日报、候选提醒、失败日报的文本或卡片 Markdown 渲染 |
 | `lock_wait` | 日报仓库锁获取，含目录/文件准备和等待；不含取得锁后的业务工作 |
+
+上述三个新增边界在已绑定的日报账户准备上下文中启用，终态额外记录
+`data.process_cpu_ms`。它是当前父 Python 进程的累计 CPU（含同进程其他线程，
+不含子进程），不是该函数独占 CPU；读取失败记 null。其余阶段不新增 CPU 字段。
+父子 wall/CPU 都是 inclusive，不能相加；wall 与 CPU 的差也不能推算网络、磁盘或锁等待。
+JSON 读取与后续 delivery 观察是相邻边界；观察内已有的历史归一化是其子阶段。
+`source_read` 的调用也可能直接复用内存结果，不是 SQL 次数或纯 IO 耗时。
+
+匹配 base/account/market 的历史批观察内部抑制逐来源事件，新增日志量不随批内来源条数增长。
+投递观察内的批成本归其父阶段；其他批观察由实际上层阶段（如 assemble attribution
+检查点）解释，未计时部分仍为 unknown。诊断不扩大历史快照、缓存或验证范围。
 
 阶段耗时包含嵌套操作，不能把这些值相加作为总耗时。同一账户同一阶段的多次操作按日志顺序
 配对；`operation` 区分具体责任函数。投递确认和 provider 发送不属于 `account_prepare`。
