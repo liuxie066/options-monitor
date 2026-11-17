@@ -83,7 +83,10 @@ def test_sigint_stops_real_descendant_before_tick_lock_is_released(tmp_path, mon
         timing_files = list(tmp_path.glob("output_runs/*/state/tick_process_timings.json"))
         assert len(timing_files) == 1
         phases = json.loads(timing_files[0].read_text())
-        assert set(phases) == {"business_wait_seconds", "diagnostic_seconds", "cleanup_seconds"}
+        assert {"business_wait_seconds", "diagnostic_seconds", "cleanup_seconds"} <= set(phases)
+        assert phases["observation_complete"] is True
+        assert phases["terminal_status"] == "cancelled"
+        assert phases["outer_elapsed_seconds"] >= phases["child_elapsed_seconds"]
         assert phases["business_wait_seconds"] > 0
         assert phases["diagnostic_seconds"] >= 0 and phases["cleanup_seconds"] >= 0
         with Path(plan.lock_path).open("a") as lock:

@@ -1021,6 +1021,35 @@ is not pure kernel flock wait. Error/cancellation events do not prove acquisitio
 or release succeeded. A held-work `ok` terminal also precedes unlock and does
 not prove release succeeded. No events are requested for the experience path.
 
+`tick-cron` extends the existing per-wrapper `state/tick_process_timings.json`
+with `wrapper_run_id`, market/accounts, UTC start/finish, `outer_elapsed_seconds`,
+`preflight_seconds`, `child_elapsed_seconds`, `postprocess_seconds`, effective
+`deadline_budget_seconds` and signed `deadline_remaining_seconds`. Timed phase
+ends also record remaining deadline. An absent phase was not reached/enabled;
+a null timing means its observation clock was unavailable. These are optional
+observations, not completion authority. `terminal_status=returned` and
+`return_code` describe wrapper execution, not confirmed scan or delivery.
+
+A child-end checkpoint may lack `observation_complete`; only the final snapshot
+sets it true. Outer elapsed ends before that final diagnostic write, includes
+lock release, and excludes OS process startup/exit and scheduling delay.
+Child elapsed includes process diagnostics and cleanup; the existing
+`business_wait_seconds`, `diagnostic_seconds` and `cleanup_seconds` are nested,
+not additive to it. Preflight failure/timeout/cancellation retain the same rc
+and exception contracts. Dry-run and market-lock skip create no run/summary.
+Observation failures preserve business results. No timeout budget is extended.
+
+`scan_result_available` records account/market qualification only after the
+reliable Brief source is persisted (`ok`, `available=true`), or after durable
+failure evidence (`error`, `available=false`). No event is emitted when that
+persistence fails. This is distinct from account computation finishing, scheduler
+target commit and notification confirmation. Join its inner run ID with the
+existing wrapper completion receipt; do not add another completion marker.
+For the actually required scan accounts, offline analysis may take the latest
+successful availability event only when all required outcomes qualify; a missing
+or failed account is partial/unknown, not a successful whole-run milestone.
+Delivery-only and nonselected accounts have no new availability event.
+
 Only these four phases opt into terminal `process_cpu_ms`, measuring the current
 Python process, including its threads but excluding subprocess CPU. Missing CPU
 is unknown. Concurrent threads can make CPU exceed wall time; wall minus CPU is
