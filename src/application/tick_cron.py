@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -343,6 +344,62 @@ def _preflight_runtime_config(
         raise SystemExit(str(exc)) from exc
 
 
+def _observation_clock() -> float | None:
+    try:
+        return time.monotonic()
+    except Exception:
+        return None
+
+
+@contextmanager
+def _observe_cron_phase(timings: dict[str, Any], name: str):
+    started = _observation_clock()
+    try:
+        yield
+    finally:
+        ended = _observation_clock()
+        timings[name] = max(0.0, ended - started) if started is not None and ended is not None else None
+        deadline = timings.get("_deadline")
+        timings[name.removesuffix("_seconds") + "_deadline_remaining_seconds"] = deadline - ended if deadline is not None and ended is not None else None
+
+
+def _save_cron_observation(timings: dict[str, Any]) -> None:
+    try:
+        target = timings.get("_target")
+        if target is not None:
+            atomic_write_json(target, {k: v for k, v in timings.items() if not k.startswith("_")})
+    except Exception:
+        # Observations must not change the wrapper's result or exception.
+        pass
+
+
+@contextmanager
+def _observe_tick_cron():
+    started = _observation_clock()
+    timings: dict[str, Any] = {"terminal_status": "running"}
+    try:
+        timings["started_at_utc"] = datetime.now(timezone.utc).isoformat()
+    except Exception:
+        timings["started_at_utc"] = None
+    try:
+        yield timings
+    except BaseException as exc:
+        timings["terminal_status"] = "cancelled" if isinstance(exc, KeyboardInterrupt) else "error"
+        timings.pop("return_code", None)
+        raise
+    finally:
+        ended = _observation_clock()
+        timings["outer_elapsed_seconds"] = max(0.0, ended - started) if started is not None and ended is not None else None
+        deadline = timings.get("_deadline")
+        timings["deadline_remaining_seconds"] = deadline - ended if deadline is not None and ended is not None else None
+        try:
+            timings["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
+        except Exception:
+            timings["finished_at_utc"] = None
+        timings["observation_complete"] = True
+        _save_cron_observation(timings)
+
+
 def run_tick_cron(
     *,
     market: str,
@@ -367,159 +424,170 @@ def run_tick_cron(
     environ: dict[str, str] | None = None,
     runtime_root: str | Path | None = None,
 ) -> int | dict[str, Any]:
-    plan = build_tick_cron_plan(
-        market=market,
-        accounts=accounts,
-        symbols=symbols,
-        timeout_seconds=timeout_seconds,
-        config_path=config_path,
-        lock_path=lock_path,
-        trigger_job_id=trigger_job_id,
-        trigger_job_name=trigger_job_name,
-        trigger_schedule=trigger_schedule,
-        no_send=no_send,
-        force=force,
-        debug=debug,
-        allow_stale_config=allow_stale_config,
-    )
-    if dry_run_command:
-        return {
-            "market": plan.market,
-            "config_path": plan.config_path,
-            "accounts": plan.accounts,
-            "symbols": plan.symbols,
-            "timeout_seconds": plan.timeout_seconds,
-            "lock_path": plan.lock_path,
-            "trigger_env": dict(plan.trigger_env),
-            "command": list(plan.tick_argv),
-        }
-    if stdout is None:
-        stdout = sys.stdout
-    if stderr is None:
-        stderr = sys.stderr
+    with _observe_tick_cron() as observation:
+        plan = build_tick_cron_plan(
+            market=market,
+            accounts=accounts,
+            symbols=symbols,
+            timeout_seconds=timeout_seconds,
+            config_path=config_path,
+            lock_path=lock_path,
+            trigger_job_id=trigger_job_id,
+            trigger_job_name=trigger_job_name,
+            trigger_schedule=trigger_schedule,
+            no_send=no_send,
+            force=force,
+            debug=debug,
+            allow_stale_config=allow_stale_config,
+        )
+        if dry_run_command:
+            return {
+                "market": plan.market,
+                "config_path": plan.config_path,
+                "accounts": plan.accounts,
+                "symbols": plan.symbols,
+                "timeout_seconds": plan.timeout_seconds,
+                "lock_path": plan.lock_path,
+                "trigger_env": dict(plan.trigger_env),
+                "command": list(plan.tick_argv),
+            }
+        if stdout is None:
+            stdout = sys.stdout
+        if stderr is None:
+            stderr = sys.stderr
 
-    lock_file = Path(plan.lock_path)
-    lock_file.parent.mkdir(parents=True, exist_ok=True)
-    with lock_file.open("a+", encoding="utf-8") as fh:
-        try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            _write_line(stdout, "SKIP_LOCKED")
-            return 0
-
-        env = dict(environ if environ is not None else os.environ)
-        base = resolve_runtime_root(
-            repo_root=Path(cwd).resolve() if cwd is not None else Path.cwd(),
-            runtime_root=runtime_root,
-            environ=env,
-            user_home=Path.home() if environ is None else None,
-        ).runtime_root
-        run_id = create_run_id()
-        env.update(plan.trigger_env)
-        deadline = resolve_tick_deadline(timeout_seconds=plan.timeout_seconds, environ=env)
-        env = tick_subprocess_env(deadline=deadline, environ=env)
-        env["OM_TICK_CRON_RUN_ID"] = run_id
-        trace_path = base / "output_runs" / run_id / "state" / "tick_hang_traceback.txt"
-        env["OM_TICK_HANG_TRACEBACK_PATH"] = str(trace_path)
-
-        if preflight_config_fn is not None:
+        lock_file = Path(plan.lock_path)
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+        with lock_file.open("a+", encoding="utf-8") as fh:
             try:
-                preflight_config_fn(
-                    plan=plan,
-                    cwd=cwd,
-                    allow_stale_config=allow_stale_config,
-                )
-            except Exception as exc:
-                _record_failure(base=base, run_id=run_id, plan=plan,
-                                code="TICK_PREFLIGHT_FAILED", stage="preflight", rc=1,
-                                message=f"{type(exc).__name__}: {exc}", stderr=stderr, cwd=cwd)
-                _write_line(stderr, "<3>EXEC_PREFLIGHT_FAILED_RC_1")
-                return 1
-            except SystemExit as exc:
-                _record_failure(base=base, run_id=run_id, plan=plan,
-                                code="TICK_PREFLIGHT_FAILED", stage="preflight", rc=1,
-                                message=str(exc), stderr=stderr, cwd=cwd)
-                _write_line(stderr, "<3>" + str(exc))
-                return 1
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                _write_line(stdout, "SKIP_LOCKED")
+                return 0
 
-        process_timings: dict[str, float] = {}
-        try:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise subprocess.TimeoutExpired(list(plan.tick_argv), plan.timeout_seconds)
-            if run_cmd is None:
-                proc = _run_tick_process_group(
-                    command=list(plan.tick_argv),
-                    cwd=cwd,
-                    env=env,
-                    timeout_seconds=plan.timeout_seconds,
-                    timings=process_timings,
-                )
-            else:
-                proc = run_cmd(
-                    list(plan.tick_argv),
-                    cwd=str(cwd) if cwd is not None else None,
-                    env=env,
-                    timeout=remaining,
-                    check=False,
-                )
-        except subprocess.TimeoutExpired:
-            _record_failure(base=base, run_id=run_id, plan=plan,
-                            code="TICK_TIMEOUT", stage="timeout", rc=124,
-                            message="tick child timed out", stderr=stderr, cwd=cwd)
-            _write_line(stderr, "<3>EXEC_TIMEOUT_RC_124")
-            return 124
-        except Exception as exc:
-            _record_failure(base=base, run_id=run_id, plan=plan,
-                            code="TICK_START_FAILED", stage="start", rc=1,
-                            message=f"{type(exc).__name__}: {exc}", stderr=stderr, cwd=cwd)
-            _write_line(stderr, "<3>EXEC_START_FAILED_RC_1")
-            return 1
-        finally:
-            if process_timings:
+            env = dict(environ if environ is not None else os.environ)
+            base = resolve_runtime_root(
+                repo_root=Path(cwd).resolve() if cwd is not None else Path.cwd(),
+                runtime_root=runtime_root,
+                environ=env,
+                user_home=Path.home() if environ is None else None,
+            ).runtime_root
+            run_id = create_run_id()
+            observation.update(
+                _target=base / "output_runs" / run_id / "state" / "tick_process_timings.json",
+                wrapper_run_id=run_id, market=plan.market, accounts=list(plan.accounts),
+            )
+            env.update(plan.trigger_env)
+            deadline = resolve_tick_deadline(timeout_seconds=plan.timeout_seconds, environ=env)
+            observation["_deadline"] = deadline
+            budget_at = _observation_clock()
+            observation["deadline_budget_seconds"] = deadline - budget_at if budget_at is not None else None
+            env = tick_subprocess_env(deadline=deadline, environ=env)
+            env["OM_TICK_CRON_RUN_ID"] = run_id
+            trace_path = base / "output_runs" / run_id / "state" / "tick_hang_traceback.txt"
+            env["OM_TICK_HANG_TRACEBACK_PATH"] = str(trace_path)
+
+            if preflight_config_fn is not None:
                 try:
-                    atomic_write_json(
-                        base / "output_runs" / run_id / "state" / "tick_process_timings.json",
-                        process_timings,
-                    )
-                except OSError:
-                    _write_line(stderr, "[WARN] tick process timings could not be saved")
-        rc = int(getattr(proc, "returncode", 1))
-        if rc != 0:
-            receipt = _completed_receipt(base, run_id, plan, rc=rc)
-            outcomes = receipt.get("account_outcomes") if receipt else None
-            failed_accounts = [row["account"] for row in outcomes if not row["scan_ok"] or row["notify_failed"]] if outcomes else None
-            notified_accounts = [row["account"] for row in outcomes if row["failure_notification_confirmed"]] if outcomes else None
-            _record_failure(base=base, run_id=run_id, plan=plan,
-                            code="TICK_EXEC_FAILED", stage="child_exit", rc=rc,
-                            message=f"tick child exited with rc={rc}", stderr=stderr, cwd=cwd,
-                            failed_accounts=failed_accounts, notified_accounts=notified_accounts)
-            _write_line(stderr, f"<3>EXEC_FAILED_RC_{rc}")
-        elif _full_account_scope(plan, cwd=cwd) and not plan.symbols and not no_send and _completed_receipt(base, run_id, plan):
-            config = read_json(_resolve_config_for_preflight(plan, cwd=cwd), {})
-            if isinstance(config, dict):
-                for account in plan.accounts or ["-"]:
-                    for code, stage in (("TICK_PREFLIGHT_FAILED", "preflight"),
-                                        ("TICK_TIMEOUT", "timeout"),
-                                        ("TICK_START_FAILED", "start"),
-                                        ("TICK_EXEC_FAILED", "child_exit")):
-                        try:
-                            report_system_recovery(
-                                base=base, config=config, unit=f"options-monitor-tick-{plan.market}.service",
-                                market=plan.market, account=account, failure_code=code, stage=stage,
-                            )
-                        except Exception as exc:
-                            _write_line(stderr, f"<3>ALERT_RECOVERY_RECORD_FAILED {type(exc).__name__}")
+                    with _observe_cron_phase(observation, "preflight_seconds"):
+                        preflight_config_fn(
+                            plan=plan,
+                            cwd=cwd,
+                            allow_stale_config=allow_stale_config,
+                        )
+                except Exception as exc:
+                    observation.update(terminal_status="preflight_failed", return_code=1)
+                    _record_failure(base=base, run_id=run_id, plan=plan,
+                                    code="TICK_PREFLIGHT_FAILED", stage="preflight", rc=1,
+                                    message=f"{type(exc).__name__}: {exc}", stderr=stderr, cwd=cwd)
+                    _write_line(stderr, "<3>EXEC_PREFLIGHT_FAILED_RC_1")
+                    return 1
+                except SystemExit as exc:
+                    observation.update(terminal_status="preflight_failed", return_code=1)
+                    _record_failure(base=base, run_id=run_id, plan=plan,
+                                    code="TICK_PREFLIGHT_FAILED", stage="preflight", rc=1,
+                                    message=str(exc), stderr=stderr, cwd=cwd)
+                    _write_line(stderr, "<3>" + str(exc))
+                    return 1
+
+            process_timings = observation
             try:
-                state_repo.write_shared_current_read_model(
-                    base, f"tick_cron_last_result.{plan.market}.current.json",
-                    {"status": "ok", "run_id": run_id, "market": plan.market,
-                     "accounts": plan.accounts, "event_at_utc": datetime.now(timezone.utc).isoformat()},
-                )
-            except Exception:
-                _write_line(stderr, "<3>FAILURE_RECORD_WRITE_FAILED stages=latest_success")
+                with _observe_cron_phase(observation, "child_elapsed_seconds"):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(list(plan.tick_argv), plan.timeout_seconds)
+                    if run_cmd is None:
+                        proc = _run_tick_process_group(
+                            command=list(plan.tick_argv),
+                            cwd=cwd,
+                            env=env,
+                            timeout_seconds=plan.timeout_seconds,
+                            timings=process_timings,
+                        )
+                    else:
+                        proc = run_cmd(
+                            list(plan.tick_argv),
+                            cwd=str(cwd) if cwd is not None else None,
+                            env=env,
+                            timeout=remaining,
+                            check=False,
+                        )
+            except subprocess.TimeoutExpired:
+                observation.update(terminal_status="timeout", return_code=124)
+                _record_failure(base=base, run_id=run_id, plan=plan,
+                                code="TICK_TIMEOUT", stage="timeout", rc=124,
+                                message="tick child timed out", stderr=stderr, cwd=cwd)
+                _write_line(stderr, "<3>EXEC_TIMEOUT_RC_124")
+                return 124
+            except Exception as exc:
+                observation.update(terminal_status="start_failed", return_code=1)
+                _record_failure(base=base, run_id=run_id, plan=plan,
+                                code="TICK_START_FAILED", stage="start", rc=1,
+                                message=f"{type(exc).__name__}: {exc}", stderr=stderr, cwd=cwd)
+                _write_line(stderr, "<3>EXEC_START_FAILED_RC_1")
                 return 1
-        return rc
+            finally:
+                # Keep a partial checkpoint if wrapper post-processing never finishes.
+                _save_cron_observation(observation)
+            with _observe_cron_phase(observation, "postprocess_seconds"):
+                rc = int(getattr(proc, "returncode", 1))
+                if rc != 0:
+                    receipt = _completed_receipt(base, run_id, plan, rc=rc)
+                    outcomes = receipt.get("account_outcomes") if receipt else None
+                    failed_accounts = [row["account"] for row in outcomes if not row["scan_ok"] or row["notify_failed"]] if outcomes else None
+                    notified_accounts = [row["account"] for row in outcomes if row["failure_notification_confirmed"]] if outcomes else None
+                    _record_failure(base=base, run_id=run_id, plan=plan,
+                                    code="TICK_EXEC_FAILED", stage="child_exit", rc=rc,
+                                    message=f"tick child exited with rc={rc}", stderr=stderr, cwd=cwd,
+                                    failed_accounts=failed_accounts, notified_accounts=notified_accounts)
+                    _write_line(stderr, f"<3>EXEC_FAILED_RC_{rc}")
+                elif _full_account_scope(plan, cwd=cwd) and not plan.symbols and not no_send and _completed_receipt(base, run_id, plan):
+                    config = read_json(_resolve_config_for_preflight(plan, cwd=cwd), {})
+                    if isinstance(config, dict):
+                        for account in plan.accounts or ["-"]:
+                            for code, stage in (("TICK_PREFLIGHT_FAILED", "preflight"),
+                                                ("TICK_TIMEOUT", "timeout"),
+                                                ("TICK_START_FAILED", "start"),
+                                                ("TICK_EXEC_FAILED", "child_exit")):
+                                try:
+                                    report_system_recovery(
+                                        base=base, config=config, unit=f"options-monitor-tick-{plan.market}.service",
+                                        market=plan.market, account=account, failure_code=code, stage=stage,
+                                    )
+                                except Exception as exc:
+                                    _write_line(stderr, f"<3>ALERT_RECOVERY_RECORD_FAILED {type(exc).__name__}")
+                    try:
+                        state_repo.write_shared_current_read_model(
+                            base, f"tick_cron_last_result.{plan.market}.current.json",
+                            {"status": "ok", "run_id": run_id, "market": plan.market,
+                             "accounts": plan.accounts, "event_at_utc": datetime.now(timezone.utc).isoformat()},
+                        )
+                    except Exception:
+                        _write_line(stderr, "<3>FAILURE_RECORD_WRITE_FAILED stages=latest_success")
+                        observation.update(terminal_status="finalization_failed", return_code=1)
+                        return 1
+                observation.update(terminal_status="returned", return_code=rc)
+                return rc
 
 
 def _install_tick_hang_diagnostics() -> None:
