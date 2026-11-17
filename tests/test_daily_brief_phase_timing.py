@@ -341,3 +341,78 @@ with daily_brief_timing_scope(runlog=log, account="lx", market="HK"):
     rows = [json.loads(line) for line in log_path.read_text().splitlines()]
     assert [r["data"]["phase"] for r in rows] == ["account_prepare", "assemble"]
     assert all(r["status"] == "start" and "duration_ms" not in r for r in rows)
+
+
+def test_cpu_measurement_is_opt_in_and_unscoped_phases_do_not_read_clocks(monkeypatch):
+    wall = [0.0]
+    cpu = [0.0]
+    cpu_calls = []
+    monkeypatch.setattr(audit, "monotonic", lambda: wall[0])
+
+    def process_clock():
+        cpu_calls.append(1)
+        return cpu[0]
+
+    monkeypatch.setattr(audit, "process_time", process_clock)
+    log = RunLog()
+    with audit.daily_brief_timing_scope(runlog=log, account="lx", market="HK"):
+        with audit.daily_brief_phase("source_read", operation="fixture", measure_cpu=True):
+            wall[0] = 2.0
+            cpu[0] = 0.5
+        with audit.daily_brief_phase("render", operation="legacy"):
+            pass
+    ends = [e for e in log.events if e["status"] == "ok"]
+    measured = next(e for e in ends if e["data"]["phase"] == "source_read")
+    assert measured["duration_ms"] == 2000
+    assert measured["data"]["process_cpu_ms"] == 500
+    assert len(cpu_calls) == 2
+    assert all("process_cpu_ms" not in e["data"] for e in ends if e is not measured)
+
+    def unavailable():
+        pytest.fail("unscoped timing read a clock")
+
+    monkeypatch.setattr(audit, "monotonic", unavailable)
+    monkeypatch.setattr(audit, "process_time", unavailable)
+    before = len(log.events)
+    with audit.daily_brief_phase("source_read", operation="outside", measure_cpu=True):
+        pass
+    assert len(log.events) == before
+
+
+@pytest.mark.parametrize("failure", ["cpu_start", "cpu_end", "wall", "logger"])
+@pytest.mark.parametrize("error", [None, ValueError("private body failure"), asyncio.CancelledError()])
+def test_cpu_diagnostic_failures_preserve_business(monkeypatch, failure, error):
+    calls = 0
+
+    def cpu_clock():
+        nonlocal calls
+        calls += 1
+        if (failure == "cpu_start" and calls == 1) or (failure == "cpu_end" and calls == 2):
+            raise OSError("clock unavailable")
+        return float(calls)
+
+    monkeypatch.setattr(audit, "process_time", cpu_clock)
+    if failure == "wall":
+        monkeypatch.setattr(audit, "monotonic", lambda: (_ for _ in ()).throw(OSError("wall unavailable")))
+    log = RunLog()
+    if failure == "logger":
+        monkeypatch.setattr(log, "safe_event", lambda *_a, **_kw: (_ for _ in ()).throw(OSError("log unavailable")))
+
+    def operation():
+        with audit.daily_brief_timing_scope(runlog=log, account="lx", market="HK"):
+            with audit.daily_brief_phase("source_read", operation="fixture", measure_cpu=True):
+                if error is not None:
+                    raise error
+                return 7
+
+    if error is None:
+        assert operation() == 7
+    else:
+        with pytest.raises(type(error)) as caught:
+            operation()
+        assert caught.value is error
+    if failure != "logger":
+        end = next(e for e in log.events if e["data"]["phase"] == "source_read" and e["status"] != "start")
+        assert end["data"]["process_cpu_ms"] == (None if failure.startswith("cpu") else 1000)
+        assert (end["duration_ms"] is None) == (failure == "wall")
+        assert "private body failure" not in str(log.events)

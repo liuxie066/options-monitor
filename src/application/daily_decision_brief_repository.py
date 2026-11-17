@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -279,6 +279,7 @@ def _brief_history_observation(*, base: Path, account: str, market: str) -> Iter
             _BRIEF_HISTORY_OBSERVATION.reset(token)
 
 
+@daily_brief_phase("delivery_observation", operation="validate_delivery_state", measure_cpu=True)
 def _observe_delivery_state(raw: Any, *, base: Path, path: Path, account: str, market: str) -> dict[str, Any]:
     validation = _DELIVERY_VALIDATION.get()
     normalize = validation.normalize if validation is not None else _normalize_delivery_state
@@ -2712,43 +2713,51 @@ def _read_validated_successful_revision_source(
     source_digest: str,
     successful_sources: _SuccessfulRevisionSources | None = None,
 ) -> tuple[dict[str, Any], Mapping[str, Any]]:
-    key = (str(base.resolve()), account, market, market_trading_date, revision, source_digest)
-    if successful_sources is not None and key in successful_sources:
-        return successful_sources[key]
-    revision_path = _revision_path(base, account, market, market_trading_date, revision)
-    raw = _history_raw(base=base, account=account, market=market, market_date=market_trading_date, revision=revision)
-    if raw is _MISSING:
-        raise DailyDecisionBriefStateError(f"daily brief delivery references a missing revision: {revision_path}")
-    if not isinstance(raw, Mapping):
-        raise DailyDecisionBriefStateError(f"daily brief state is not an object: {revision_path}")
-    observation_digest = _observed_source_content_hash(raw)
-    cache_key = (*key, observation_digest)
-    cached = _VALIDATED_BRIEF_CACHE.get(cache_key)
-    if cached is not None:
-        # Every read must hand back its own object: callers have always been
-        # free to copy-on-write a brief, and a shared instance would let one
-        # caller's edit leak into the next read.
-        brief, compatible_digests = deepcopy(cached[0]), cached[1]
-    else:
-        try:
-            brief, compatible_digests = normalize_persisted_daily_decision_brief_with_digests(raw)
-        except (TypeError, ValueError) as exc:
-            raise DailyDecisionBriefStateError(
-                f"daily brief state is incompatible: {revision_path}: {exc}"
-            ) from exc
-        if len(_VALIDATED_BRIEF_CACHE) >= _VALIDATED_BRIEF_CACHE_LIMIT:
-            del _VALIDATED_BRIEF_CACHE[next(iter(_VALIDATED_BRIEF_CACHE))]
-        # Store a copy: the caller owns the object it gets back.
-        _VALIDATED_BRIEF_CACHE[cache_key] = (deepcopy(brief), compatible_digests)
-    if brief["account"] != account or brief["market"] != market:
-        raise DailyDecisionBriefStateError(f"daily brief state identity mismatch: {revision_path}")
-    if brief["market_trading_date"] != market_trading_date or int(brief["revision"]) != revision:
-        raise DailyDecisionBriefStateError(f"daily brief delivery revision identity mismatch: {revision_path}")
-    if source_digest not in compatible_digests:
-        raise DailyDecisionBriefStateError(f"daily brief delivery source digest mismatch: {revision_path}")
-    if successful_sources is not None:
-        successful_sources[key] = (brief, raw)
-    return brief, raw
+    # Keep history batches at their enclosing owner; do not emit per-source events.
+    observation = _BRIEF_HISTORY_OBSERVATION.get()
+    timing = (
+        daily_brief_phase("source_read", operation="validated_successful_revision", measure_cpu=True)
+        if observation is None or not observation.matches(base=base, account=account, market=market)
+        else nullcontext()
+    )
+    with timing:
+        key = (str(base.resolve()), account, market, market_trading_date, revision, source_digest)
+        if successful_sources is not None and key in successful_sources:
+            return successful_sources[key]
+        revision_path = _revision_path(base, account, market, market_trading_date, revision)
+        raw = _history_raw(base=base, account=account, market=market, market_date=market_trading_date, revision=revision)
+        if raw is _MISSING:
+            raise DailyDecisionBriefStateError(f"daily brief delivery references a missing revision: {revision_path}")
+        if not isinstance(raw, Mapping):
+            raise DailyDecisionBriefStateError(f"daily brief state is not an object: {revision_path}")
+        observation_digest = _observed_source_content_hash(raw)
+        cache_key = (*key, observation_digest)
+        cached = _VALIDATED_BRIEF_CACHE.get(cache_key)
+        if cached is not None:
+            # Every read must hand back its own object: callers have always been
+            # free to copy-on-write a brief, and a shared instance would let one
+            # caller's edit leak into the next read.
+            brief, compatible_digests = deepcopy(cached[0]), cached[1]
+        else:
+            try:
+                brief, compatible_digests = normalize_persisted_daily_decision_brief_with_digests(raw)
+            except (TypeError, ValueError) as exc:
+                raise DailyDecisionBriefStateError(
+                    f"daily brief state is incompatible: {revision_path}: {exc}"
+                ) from exc
+            if len(_VALIDATED_BRIEF_CACHE) >= _VALIDATED_BRIEF_CACHE_LIMIT:
+                del _VALIDATED_BRIEF_CACHE[next(iter(_VALIDATED_BRIEF_CACHE))]
+            # Store a copy: the caller owns the object it gets back.
+            _VALIDATED_BRIEF_CACHE[cache_key] = (deepcopy(brief), compatible_digests)
+        if brief["account"] != account or brief["market"] != market:
+            raise DailyDecisionBriefStateError(f"daily brief state identity mismatch: {revision_path}")
+        if brief["market_trading_date"] != market_trading_date or int(brief["revision"]) != revision:
+            raise DailyDecisionBriefStateError(f"daily brief delivery revision identity mismatch: {revision_path}")
+        if source_digest not in compatible_digests:
+            raise DailyDecisionBriefStateError(f"daily brief delivery source digest mismatch: {revision_path}")
+        if successful_sources is not None:
+            successful_sources[key] = (brief, raw)
+        return brief, raw
 
 
 def _resolve_prepared_envelope(
@@ -3313,6 +3322,7 @@ def _candidate_identity_set(brief: Mapping[str, Any] | None) -> set[str]:
     return identities
 
 
+@daily_brief_phase("state_read", operation="json_read", measure_cpu=True)
 def _read_json_strict(path: Path) -> Any:
     if not path.exists():
         return _MISSING
