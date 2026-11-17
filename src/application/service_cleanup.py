@@ -223,6 +223,21 @@ def cleanup_shared_venvs(
     return result
 
 
+def retained_output_runs(
+    rows: list[tuple[str, datetime]], *, keep_days: int, keep_count: int, now: datetime, pointer: str | None = None
+) -> dict[str, str]:
+    """Pure retention owner shared by cleanup and non-applicable archive review."""
+    ordered = sorted(rows, key=lambda item: (item[1], item[0]), reverse=True)
+    protected = {name: "latest_keep_count" for name, _ in ordered[: max(1, int(keep_count))]}
+    if pointer is not None:
+        protected[pointer] = "last_run_dir_pointer"
+    cutoff = now - timedelta(days=max(0, int(keep_days)))
+    for name, mtime in ordered:
+        if name not in protected and mtime >= cutoff:
+            protected[name] = "within_keep_days"
+    return protected
+
+
 def _output_run_cleanup_plan(
     *,
     runtime_root: Path,
@@ -254,11 +269,15 @@ def _output_run_cleanup_plan(
         key=lambda item: (_mtime_utc(item), item.name),
         reverse=True,
     )
-    latest_protected = run_dirs[:keep_count_int]
-    protected: dict[Path, str] = {path: "latest_keep_count" for path in latest_protected}
     pointer = _latest_run_pointer(runtime_root, runs_root)
-    if pointer is not None:
-        protected[pointer.resolve()] = "last_run_dir_pointer"
+    protected_names = retained_output_runs(
+        [(item.name, _mtime_utc(item)) for item in run_dirs],
+        keep_days=keep_days_int,
+        keep_count=keep_count_int,
+        now=now,
+        pointer=pointer.name if pointer is not None else None,
+    )
+    protected = {item: protected_names[item.name] for item in run_dirs if item.name in protected_names}
     delete_runs: list[dict[str, Any]] = []
     protected_runs: list[dict[str, Any]] = []
     for run_dir in run_dirs:

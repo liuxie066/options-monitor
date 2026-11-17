@@ -257,6 +257,19 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
     pull.add_argument("--run-id", dest="run_ids", action="append", default=None)
     pull.add_argument("--no-logs", action="store_true")
     pull.add_argument("--rsync-path", default="rsync")
+    pull.add_argument(
+        "--ssh-compression", action="store_true", help="bounded SSH transport compression; archive bytes unchanged"
+    )
+    pull.add_argument(
+        "--no-fixed-shared", action="store_true", help="bounded mode: selected runs and referenced blobs only"
+    )
+    pull.add_argument("--existing-archive-root", default=None, help="read-only prior batch to reverify; never updated")
+    pull.add_argument("--expected-source-host", default=None, help="required host identity for bounded SSH source")
+    pull.add_argument(
+        "--limits-file",
+        default=None,
+        help="explicit local bounded batch budget; requires new root, no logs and run IDs",
+    )
     pull.add_argument("--write", action="store_true", help="execute rsync and write local sync/verify manifests")
 
     verify = archive_commands.add_parser(
@@ -597,19 +610,55 @@ def handle_research_command(
         if args.archive_command == "inventory":
             data = archive_inventory(repo_root=base, remote=args.remote, archive_root=args.archive_root)
         elif args.archive_command == "pull":
-            data = archive_pull(
-                repo_root=base,
-                remote=args.remote,
-                archive_root=args.archive_root,
-                source_root=args.source_root,
-                ssh_target=args.ssh_target,
-                remote_runtime_root=args.remote_runtime_root,
-                since_days=args.since_days,
-                run_ids=args.run_ids,
-                include_logs=not bool(args.no_logs),
-                write=bool(args.write),
-                rsync_path=args.rsync_path,
-            )
+            if args.limits_file is not None:
+                from src.application.research.archive_bounded import bounded_pull
+                from src.application.research.archive_stream import TransferError
+
+                if args.since_days is not None:
+                    raise AgentToolError(
+                        code="INPUT_ERROR", message="bounded mode requires explicit run IDs, not since-days"
+                    )
+                try:
+                    data = bounded_pull(
+                        repo_root=base,
+                        archive_root=args.archive_root,
+                        source_root=args.source_root,
+                        ssh_target=args.ssh_target,
+                        remote_runtime_root=args.remote_runtime_root,
+                        run_ids=args.run_ids,
+                        include_logs=not args.no_logs,
+                        write=args.write,
+                        limits_file=args.limits_file,
+                        expected_source_host=args.expected_source_host,
+                        existing_archive_root=args.existing_archive_root,
+                        ssh_compression=args.ssh_compression,
+                        include_fixed_shared=not args.no_fixed_shared,
+                    )
+                except (TransferError, OSError, ValueError) as exc:
+                    raise AgentToolError(
+                        code="INPUT_ERROR", message=f"bounded archive unavailable: {type(exc).__name__}"
+                    ) from exc
+            else:
+                if (
+                    args.ssh_compression
+                    or args.no_fixed_shared
+                    or args.expected_source_host
+                    or args.existing_archive_root
+                ):
+                    raise AgentToolError(code="INPUT_ERROR", message="bounded archive options require --limits-file")
+                data = archive_pull(
+                    repo_root=base,
+                    remote=args.remote,
+                    archive_root=args.archive_root,
+                    source_root=args.source_root,
+                    ssh_target=args.ssh_target,
+                    remote_runtime_root=args.remote_runtime_root,
+                    since_days=args.since_days,
+                    run_ids=args.run_ids,
+                    include_logs=not bool(args.no_logs),
+                    write=bool(args.write),
+                    rsync_path=args.rsync_path,
+                )
         elif args.archive_command == "verify":
             data = archive_verify(repo_root=base, remote=args.remote, archive_root=args.archive_root)
         elif args.archive_command == "prune-remote":
