@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from src.application import query_cursor
+from src.application import combo_yield_candidate_snapshot, query_cursor
+from src.application.payload_helpers import readable_json_bytes
 
 import hashlib
 import json
@@ -25,7 +26,10 @@ def _hashes(root: Path) -> dict:
             for p in root.rglob("*") if p.is_file()}
 
 
-def test_same_bytes_formal_bundle_and_facade(tmp_path, monkeypatch):
+@pytest.mark.parametrize("encoding", ["compact", "legacy_pretty"])
+def test_same_bytes_formal_bundle_and_facade(tmp_path, monkeypatch, encoding):
+    if encoding == "legacy_pretty":
+        monkeypatch.setattr(combo_yield_candidate_snapshot, "_canonical_json_bytes", readable_json_bytes)
     _seal_combo_bundle(tmp_path)
     before = _hashes(tmp_path)
     bundle = load_run_bundle(**_kwargs(tmp_path))
@@ -41,7 +45,11 @@ def test_same_bytes_formal_bundle_and_facade(tmp_path, monkeypatch):
     target = next(row["relative_name"] for row in listing["entries"] if "combo" in row["relative_name"])
     page = project_run_files(root, **kwargs, action="read", relative_name=target, max_lines=1)
     assert page["freshness"]["status"] == "historical"
-    assert page["next_cursor"]
+    if encoding == "legacy_pretty":
+        assert page["next_cursor"]
+    else:
+        assert page["next_cursor"] is None
+        assert page["body_complete"]
     chunks = [page["text"]]
     for _ in range(200):
         if not page["next_cursor"]:
@@ -106,6 +114,8 @@ def test_discovery_orders_entire_directory_and_continues(tmp_path):
 
 
 def test_account_cursor_cannot_cross_scope(tmp_path, monkeypatch):
+    # A historical multiline file ensures this scope test has a continuation.
+    monkeypatch.setattr(combo_yield_candidate_snapshot, "_canonical_json_bytes", readable_json_bytes)
     _seal_combo_bundle(tmp_path)
     monkeypatch.setattr(query_cursor, "resolve_secret", lambda *_: "fixture-key")
     root = RuntimeRootResolution(tmp_path, "argument")
@@ -171,7 +181,7 @@ def test_same_run_accounts_have_separate_validated_resources(tmp_path):
                                          strategy_policy_sha256=POLICY_HASH, sealed_at="2026-08-12T01:00:01Z")
     sy = load_run_bundle(**{**_kwargs(tmp_path), "account": "sy"})
     assert sy["scope"]["account"] == "sy" and len(sy["resources"]) == 2
-    assert all(b'"account": "sy"' in raw for raw in sy["resources"].values())
+    assert all(json.loads(raw)["account"] == "sy" for raw in sy["resources"].values())
     found = discover_runs(runtime_root=RuntimeRootResolution(tmp_path, "argument"), market="us",
                           authorized_accounts=["lx", "sy"])
     assert [row["account"] for row in found["entries"]] == ["lx", "sy"]
