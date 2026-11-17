@@ -1780,8 +1780,9 @@ def test_runtime_status_summarizes_runtime_files(tmp_path: Path) -> None:
     )
 
     assert out["ok"] is True
-    assert out["warnings"] == []
-    assert out["data"]["summary"]["ok"] is True
+    assert out["warnings"] == ["Trade attribution observation is unavailable or unverified; listener heartbeat is not query evidence."]
+    assert out["data"]["summary"]["ok"] is False
+    assert "ATTRIBUTION_OBSERVATION_UNKNOWN" in out["data"]["summary"]["warning_codes"]
     assert out["data"]["summary"]["latest_status"] == "ok"
     shared_compatibility = out["data"]["shared"]["compatibility_notification"]
     assert shared_compatibility["text"] == "shared notification\n"
@@ -2808,7 +2809,7 @@ def test_runtime_status_does_not_expect_scan_notification_for_auto_close_run(tmp
 
     assert "No symbols_notification.txt found for latest scanned run or legacy report paths." not in warnings
     assert "Auto-close user1 failed: missing_data_config." in warnings
-    assert data["summary"]["warning_codes"] == ["AUTO_CLOSE_FAILED"]
+    assert data["summary"]["warning_codes"] == ["ATTRIBUTION_OBSERVATION_UNKNOWN", "AUTO_CLOSE_FAILED"]
 
 
 def test_runtime_status_service_profile_does_not_default_to_us_when_market_is_ambiguous(tmp_path: Path) -> None:
@@ -3078,7 +3079,7 @@ def test_runtime_status_can_inspect_scanned_run_after_skipped_latest(tmp_path: P
     out = _execute_private_runtime_status(payload)
 
     assert out["ok"] is True
-    assert out["warnings"] == []
+    assert out["warnings"] == ["Trade attribution observation is unavailable or unverified; listener heartbeat is not query evidence."]
     data = out["data"]
     assert data["latest_run"]["path"].endswith("run-skip")
     assert data["latest_run_selection"]["source"] == "last_run_dir_or_mtime"
@@ -3215,8 +3216,9 @@ def test_runtime_status_does_not_warn_missing_notification_for_expected_skip(tmp
     )
 
     assert out["ok"] is True
-    assert out["warnings"] == []
-    assert out["data"]["summary"]["ok"] is True
+    assert out["warnings"] == ["Trade attribution observation is unavailable or unverified; listener heartbeat is not query evidence."]
+    assert out["data"]["summary"]["ok"] is False
+    assert "ATTRIBUTION_OBSERVATION_UNKNOWN" in out["data"]["summary"]["warning_codes"]
     assert out["data"]["latest_run"]["path"].endswith("run-skip")
 
 
@@ -3343,7 +3345,10 @@ def test_runtime_status_preserves_both_notification_health_signals(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cfg_path = tmp_path / "config.us.json"
-    cfg_path.write_text(json.dumps(_minimal_cfg()), encoding="utf-8")
+    cfg = _minimal_cfg()
+    # This test isolates notification health; no trade listener is configured.
+    cfg["trade_intake"] = {"enabled": False}
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
     shared_state_dir = tmp_path / "output_shared" / "state"
     shared_state_dir.mkdir(parents=True)
     runs_root = tmp_path / "output_runs"
@@ -3473,7 +3478,10 @@ def test_runtime_status_loads_service_profile_and_masks_external_paths(
     out = _execute_private_runtime_status({"profile_path": str(profile_path)})
 
     assert out["ok"] is True
-    assert out["warnings"] == ["Outer delivery.mode is none; the task runner will not announce run output."]
+    assert out["warnings"] == [
+        "Trade attribution observation is unavailable or unverified; listener heartbeat is not query evidence.",
+        "Outer delivery.mode is none; the task runner will not announce run output.",
+    ]
     assert "openclaw_profile" not in out["data"]
     assert out["data"]["service_profile"]["profile"]["loaded"] is True
     assert out["data"]["trigger_context"]["source"] == "om_direct"
