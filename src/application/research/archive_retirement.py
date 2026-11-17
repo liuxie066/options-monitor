@@ -246,7 +246,12 @@ def _retire_execute(
                 raise TransferError("retirement response budget; outcome unknown")
             limits["_evidence_remaining"] -= len(stdout) + len(stderr)
             if process.returncode:
-                raise TransferError("source retirement failed; inspect receipt before retry")
+                try:
+                    failure = json.loads(stdout)
+                except (ValueError, TypeError):
+                    failure = {}
+                reason = failure.get("reason") if failure.get("error_type") == "TransferError" else None
+                raise TransferError("source retirement failed: " + (reason or "unknown; inspect receipt before retry"))
             return json.loads(stdout)
         except subprocess.TimeoutExpired as exc:
             raise TransferError("retirement timeout; source outcome unknown; do not retry") from exc
@@ -303,7 +308,16 @@ def _worker():
             raise TransferError("source result budget; outcome unknown")
         print(encoded.decode())
     except Exception as exc:
-        print(json.dumps({"ok": False, "state": "unknown", "reason": type(exc).__name__}))
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "state": "unknown",
+                    "error_type": type(exc).__name__,
+                    "reason": str(exc) if isinstance(exc, TransferError) else "source operation failed",
+                }
+            )
+        )
         raise SystemExit(2)
 
 

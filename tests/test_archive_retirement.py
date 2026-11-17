@@ -6,6 +6,7 @@ import pytest
 
 from src.application.research.archive_bounded import bounded_pull, restore_batch
 from src.application.research.archive_retirement import retire_batch
+from src.application.research.archive_stream import TransferError
 from tests.test_archive_bounded import limits_file
 
 
@@ -62,7 +63,7 @@ def ready(tmp_path, canonical=False):
 def test_real_archive_restore_preview_and_exact_retirement(tmp_path):
     args = ready(tmp_path)
     preview = retire_batch(**args)
-    assert preview["ok"] and not preview["source_deleted"]
+    assert preview["ok"] and not preview["source_deleted"], preview
     assert (args["source_root"] / "output_runs/old-a").exists()
     result = retire_batch(**args, confirm=True, expected_plan_sha256=preview["plan_sha256"])
     assert result["ok"] and result["source_deleted"]
@@ -276,3 +277,29 @@ def test_new_receipt_parent_fsync_failure_precedes_delete(tmp_path, monkeypatch)
                 evidence_bytes=50000,
             )
     assert (root / "output_runs/old").exists()
+
+
+@pytest.mark.parametrize(
+    "error,expected",
+    [
+        (TransferError("source reference unknown"), "source reference unknown"),
+        (OSError("private-path-or-message"), "source operation failed"),
+    ],
+)
+def test_source_worker_reports_safe_failure_reason(monkeypatch, capsys, error, expected):
+    import io
+    from src.application.research import archive_retirement as owner
+
+    class Input:
+        buffer = io.BytesIO(json.dumps({"limits": {"evidence_bytes": 4096}}).encode())
+
+    monkeypatch.setattr(owner.sys, "stdin", Input())
+
+    def fail(request):
+        raise error
+
+    monkeypatch.setattr(owner, "_source_retire", fail)
+    with pytest.raises(SystemExit):
+        owner._worker()
+    result = json.loads(capsys.readouterr().out)
+    assert result["reason"] == expected
