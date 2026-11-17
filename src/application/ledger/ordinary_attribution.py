@@ -42,6 +42,50 @@ def ordinary_attribution_is_unopposed(*, fact: Mapping[str, Any], facts: Sequenc
     )
 
 
+def ordinary_attribution_observation_complete(
+    observation: Mapping[str, Any], *, scope: Mapping[str, Any], now_ms: int,
+) -> bool:
+    """Qualify the broker observation envelope, without deciding trade eligibility."""
+    try:
+        evidence = observation.get("ordinary_evidence") or {}
+        ref = scope
+        if (evidence.get("error") or evidence.get("scope") != scope
+                or ref.get("environment") != "REAL" or ref.get("broker_id") != "futu"
+                or not 0 <= now_ms - evidence["observed_at_ms"] <= 60_000
+                or not evidence["window_start_ms"] <= evidence["window_end_ms"] <= evidence["observed_at_ms"]
+                or not isinstance(evidence.get("executions"), list)):
+            return False
+        snapshot = (observation.get("portfolio") or {}).get("position_snapshot_input") or {}
+        snapshot_ms = execution_instant_milliseconds(snapshot.get("observed_at_utc"))
+        if snapshot_ms is None or snapshot_ms < evidence["observed_at_ms"]:
+            return False
+        history = evidence["history"]
+        accounts = history["account_results"]
+        if (history.get("dataset") != "executions" or history.get("trd_env") != ref["environment"]
+                or len(accounts) != 1 or accounts[0].get("futu_account_id") != ref["external_account_id"]
+                or any(accounts[0].get(key) is not True for key in ("coverage_complete", "pagination_complete"))
+                or accounts[0].get("coverage_status") != "complete"
+                or accounts[0].get("trd_env") != ref["environment"]
+                or execution_instant_milliseconds(accounts[0].get("covered_start_utc")) != evidence["window_start_ms"]
+                or execution_instant_milliseconds(accounts[0].get("covered_end_utc")) != evidence["window_end_ms"]
+                or accounts[0].get("truncated") is True
+                or accounts[0].get("accepted_row_count") != len(evidence["executions"])
+                or accounts[0].get("row_count") != len(evidence["executions"])
+                or accounts[0].get("error") or accounts[0].get("rejected_rows")
+                or execution_instant_milliseconds(history["window_start_utc"]) != evidence["window_start_ms"]
+                or execution_instant_milliseconds(history["window_end_utc"]) != evidence["window_end_ms"]):
+            return False
+        for receipt in (evidence["current_orders"], evidence["history_orders"]):
+            if (receipt.get("scope") != evidence["scope"] or receipt.get("coverage_complete") is not True
+                    or receipt.get("pagination_complete") is not True or receipt.get("truncated") is True
+                    or receipt.get("error") or receipt.get("retcode") not in (0, "0")
+                    or not isinstance(receipt.get("rows"), list)):
+                return False
+        return True
+    except (KeyError, TypeError, ValueError, ArithmeticError, OverflowError, AttributeError):
+        return False
+
+
 def ordinary_attribution_basis(
     *, fact: Mapping[str, Any], facts: Sequence[Mapping[str, Any]], events: Sequence[Mapping[str, Any]],
     proposals: Sequence[Mapping[str, Any]], exposures: Sequence[Mapping[str, Any]],
@@ -62,32 +106,11 @@ def ordinary_attribution_basis(
             return None
         evidence = observation.get("ordinary_evidence") or {}
         ref = fact["broker_account_ref"]
-        if (evidence.get("scope") != {**ref, "account": fact["account"]}
-                or ref.get("environment") != "REAL" or ref.get("broker_id") != "futu"
-                or not 0 <= now_ms - evidence["observed_at_ms"] <= 60_000
-                or evidence["window_start_ms"] > start
-                or not cutoff <= evidence["window_end_ms"] <= evidence["observed_at_ms"]):
-            return None
-        snapshot = (observation.get("portfolio") or {}).get("position_snapshot_input") or {}
-        snapshot_ms = execution_instant_milliseconds(snapshot.get("observed_at_utc"))
-        if snapshot_ms is None or snapshot_ms < evidence["observed_at_ms"]:
+        if (not ordinary_attribution_observation_complete(
+                observation, scope={**ref, "account": fact["account"]}, now_ms=now_ms)
+                or evidence["window_start_ms"] > start or evidence["window_end_ms"] < cutoff):
             return None
         history = evidence["history"]
-        accounts = history["account_results"]
-        if (history.get("dataset") != "executions" or history.get("trd_env") != ref["environment"]
-                or len(accounts) != 1 or accounts[0].get("futu_account_id") != ref["external_account_id"]
-                or any(accounts[0].get(key) is not True for key in ("coverage_complete", "pagination_complete"))
-                or accounts[0].get("coverage_status") != "complete"
-                or accounts[0].get("trd_env") != ref["environment"]
-                or execution_instant_milliseconds(accounts[0].get("covered_start_utc")) != evidence["window_start_ms"]
-                or execution_instant_milliseconds(accounts[0].get("covered_end_utc")) != evidence["window_end_ms"]
-                or accounts[0].get("truncated") is True
-                or accounts[0].get("accepted_row_count") != len(evidence["executions"])
-                or accounts[0].get("row_count") != len(evidence["executions"])
-                or accounts[0].get("error") or accounts[0].get("rejected_rows")
-                or execution_instant_milliseconds(history["window_start_utc"]) != evidence["window_start_ms"]
-                or execution_instant_milliseconds(history["window_end_utc"]) != evidence["window_end_ms"]):
-            return None
         executions = evidence["executions"]
         seen: dict[str, Mapping[str, Any]] = {}
         order_quantities: dict[str, Decimal] = defaultdict(Decimal)
@@ -145,10 +168,6 @@ def ordinary_attribution_basis(
                     return None
         orders = {}
         for receipt in (evidence["current_orders"], evidence["history_orders"]):
-            if (receipt.get("scope") != evidence["scope"] or receipt.get("coverage_complete") is not True
-                    or receipt.get("pagination_complete") is not True or receipt.get("truncated") is True
-                    or receipt.get("error") or receipt.get("retcode") not in (0, "0")):
-                return None
             for row in receipt["rows"]:
                 order_id = row["order_id"]
                 if (not order_id or row["status"] not in {"terminal_with_fill", "terminal_no_fill"}

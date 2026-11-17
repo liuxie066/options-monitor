@@ -412,11 +412,15 @@ from .wheel_policy_binding import (
     WheelPolicyBindingReplayError, build_wheel_policy_binding_request, record_wheel_policy_binding, wheel_policy_file_identity,
 )
 
-from .ordinary_attribution import ordinary_attribution_window as ordinary_attribution_window
+from .ordinary_attribution import (
+    ordinary_attribution_window as ordinary_attribution_window,
+    ordinary_attribution_observation_complete as ordinary_attribution_observation_complete,
+)
 
 __all__ = [
     "read_position_projection_inputs",
     "ordinary_attribution_window",
+    "ordinary_attribution_observation_complete",
     'WheelPolicyBindingReplayError',
     'build_wheel_policy_binding_request',
     'record_wheel_policy_binding',

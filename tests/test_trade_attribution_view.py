@@ -737,7 +737,7 @@ def test_put_capacity_reuses_fx_pool_and_rejects_wrong_contract_units(monkeypatc
     assert "broker_ledger_positions_mismatch" in trade_attribution_capacity_check(**args)["reason_codes"]
 
 
-def _blocked_capacity_worker(connection, config, account, runtime_root):
+def _blocked_capacity_worker(connection, config, account, runtime_root, *args):
     import time
     time.sleep(60)
 

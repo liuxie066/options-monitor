@@ -20,6 +20,7 @@ from decimal import Decimal, InvalidOperation
 from importlib import metadata as importlib_metadata
 from importlib import util as importlib_util
 import logging
+import math
 import multiprocessing
 from numbers import Integral
 import os
@@ -294,6 +295,35 @@ def _ensure_futu_api_importable() -> None:
 
 
 _FETCH_CONTROL: ContextVar[tuple[Any, Any] | None] = ContextVar("futu_fetch_control", default=None)
+_SDK_WORKER_OWNER: tuple[int, float] | None = None
+
+
+def own_futu_sdk_in_current_worker(*, deadline: float) -> None:
+    """Use the caller's disposable process as the SDK isolation boundary.
+
+    Only the attribution/prefetch spawn entries opt in: their parents enforce
+    the deadline and reap this entire process, including SDK-owned threads.
+    Process-wide ownership also covers the prefetch worker's query threads.
+    """
+    global _SDK_WORKER_OWNER
+    if (not multiprocessing.current_process().daemon
+            or multiprocessing.parent_process() is None
+            or threading.current_thread() is not threading.main_thread()):
+        raise RuntimeError("SDK ownership requires a supervised daemon worker entry")
+    if not math.isfinite(deadline):
+        raise ValueError("SDK worker deadline must be finite")
+    check_fetch_control(deadline)
+    owner = (os.getpid(), deadline)
+    if _SDK_WORKER_OWNER is not None and _SDK_WORKER_OWNER != owner:
+        raise RuntimeError("SDK worker ownership is already bound")
+    _SDK_WORKER_OWNER = owner
+
+
+def _sdk_worker_deadline(deadline: float | None) -> float | None:
+    owner = _SDK_WORKER_OWNER
+    if owner is not None and owner[0] == os.getpid():
+        return owner[1] if deadline is None else min(deadline, owner[1])
+    return deadline
 
 
 def _with_fetch_control(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -438,6 +468,14 @@ def _start_futu_query_context(
     kind: str, kwargs: dict[str, Any], *, deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> Any:
+    deadline = _sdk_worker_deadline(deadline)
+    check_fetch_control(deadline, cancelled)
+    if _SDK_WORKER_OWNER is not None and _SDK_WORKER_OWNER[0] == os.getpid():
+        return _FutuQueryContext(
+            _create_futu_sdk_context(kind, kwargs), deadline=deadline, cancelled=cancelled,
+        )
+    if multiprocessing.current_process().daemon:
+        raise RuntimeError("SDK query requires explicit supervised worker ownership")
     remote = _FutuContextProcess(kind, kwargs)
     context = _FutuQueryContext(remote, deadline=deadline, cancelled=cancelled)
     try:
@@ -482,6 +520,7 @@ class _FutuQueryContext:
         deadline, cancelled = controls if controls is not None else (self._deadline, self._cancelled)
         if name == "close":
             deadline, cancelled = None, None
+        deadline = _sdk_worker_deadline(deadline)
         check_fetch_control(deadline, cancelled)
         if self._unavailable is not None:
             raise FutuGatewayTransientError(self._unavailable)

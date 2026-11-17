@@ -6,7 +6,9 @@ from typing import Any
 from src.application.quality.intake_checks import trade_intake_runtime_evidence_available
 from src.application.quality.model import check_result, evidence_ref
 from src.application.payload_helpers import parse_utc as _parse_utc
-from src.application.trades.listener_status import NONWORKING_LISTENER_STATUSES
+from src.application.trades.listener_status import (
+    NONWORKING_LISTENER_STATUSES, attribution_observation_health, DEFAULT_LISTENER_HEARTBEAT_SECONDS,
+)
 
 
 def build_runtime_checks(
@@ -14,7 +16,7 @@ def build_runtime_checks(
     runtime_statuses: list[dict[str, Any]],
     observed_at_utc: str,
     now: datetime,
-    heartbeat_expected_seconds: int = 300,
+    heartbeat_expected_seconds: int = DEFAULT_LISTENER_HEARTBEAT_SECONDS,
     runtime_status_errors: list[dict[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
@@ -136,7 +138,38 @@ def build_runtime_checks(
                 evidence_refs=[],
             )
         )
-    for row in source_rows:
+    # HK/US runtime reads can refer to the same source status artifact. Keep
+    # separate instances separate, and do not count one source twice.
+    def heartbeat_severity(summary: dict[str, Any]) -> tuple[int, float]:
+        instant = _parse_utc(summary.get("last_heartbeat_utc"))
+        if instant is None:
+            return (2, 0)
+        age = (now.astimezone(timezone.utc) - instant).total_seconds()
+        return (3 if age > heartbeat_expected_seconds * 5 else
+                1 if age > heartbeat_expected_seconds * 2 else 0, age)
+
+    unique_sources: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for index, row in enumerate(source_rows):
+        identity = row.get("runtime_identity")
+        key = (identity, row.get("id"), row.get("account")) if identity else (index,)
+        if key in unique_sources:
+            existing = unique_sources[key]
+            existing_summary = existing["summary"]
+            other = row.get("summary") or {}
+            observations = list(existing_summary.get("attribution_observations", []))
+            for observation in other.get("attribution_observations", []):
+                if observation not in observations:
+                    observations.append(observation)
+            existing_summary["attribution_observations"] = observations
+            if heartbeat_severity(other) > heartbeat_severity(existing_summary):
+                existing_summary["last_heartbeat_utc"] = other.get("last_heartbeat_utc")
+            # A later read cannot silently erase an observed listener failure.
+            other_status = str(other.get("listener_status") or "").strip().lower()
+            if other_status in NONWORKING_LISTENER_STATUSES | {"failed"}:
+                existing_summary["listener_status"] = other_status
+        else:
+            unique_sources[key] = {**row, "summary": dict(row.get("summary") or {})}
+    for row in unique_sources.values():
         summary = row.get("summary") if isinstance(row.get("summary"), dict) else {}
         heartbeat = _parse_utc(summary.get("last_heartbeat_utc"))
         age = (now.astimezone(timezone.utc) - heartbeat).total_seconds() if heartbeat else None
@@ -151,6 +184,13 @@ def build_runtime_checks(
                 )
             else:
                 status, reason, message = "pass", "LISTENER_HEARTBEAT_FRESH", "Trade intake heartbeat is fresh."
+                observation_health = attribution_observation_health(
+                    summary.get("attribution_observations", []), now=now,
+                    max_age_seconds=heartbeat_expected_seconds * 2)
+                if observation_health != "pass":
+                    status = observation_health
+                    reason = "ATTRIBUTION_OBSERVATION_UNAVAILABLE" if status == "warn" else "ATTRIBUTION_OBSERVATION_UNKNOWN"
+                    message = "Listener heartbeat is fresh but trade attribution observation is unavailable or unverified."
         elif age <= heartbeat_expected_seconds * 5:
             status, reason, message = "warn", "LISTENER_HEARTBEAT_DELAYED", "Trade intake heartbeat is delayed."
         else:
@@ -162,6 +202,7 @@ def build_runtime_checks(
                 "source": row.get("id"),
                 "listener_status": listener_status or None,
                 "heartbeat_age_seconds": age,
+                "attribution_observations": summary.get("attribution_observations", []),
             },
             artifact_ref=f"om-evidence:listener:{str(row.get('id') or 'unknown')}",
         )
@@ -173,7 +214,8 @@ def build_runtime_checks(
                 observed_at_utc=observed_at_utc,
                 reason_code=reason,
                 message=message,
-                observed={"heartbeat_age_seconds": age, "listener_status": listener_status or None},
+                observed={"heartbeat_age_seconds": age, "listener_status": listener_status or None,
+                          "attribution_observations": summary.get("attribution_observations", [])},
                 thresholds={
                     "healthy_max_seconds": heartbeat_expected_seconds * 2,
                     "unhealthy_after_seconds": heartbeat_expected_seconds * 5,

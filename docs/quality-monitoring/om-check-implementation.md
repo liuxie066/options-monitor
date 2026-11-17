@@ -9,7 +9,7 @@
 | ID | 实现入口 | 当前证据 | 本地结论边界 |
 |---|---|---|---|
 | `RT-OM-001` | `src/application/quality/runtime_checks.py::build_runtime_checks` | `tests/quality/test_om_quality_service.py` | 复用 `runtime_status` service profile |
-| `RT-OM-002` | `src/application/quality/runtime_checks.py::build_runtime_checks` | `tests/quality/test_om_quality_service.py` | 按 account/source 判断 listener heartbeat、stage、last error |
+| `RT-OM-002` | `src/application/quality/runtime_checks.py::build_runtime_checks` | `tests/quality/test_om_quality_service.py` | 按 account/source 判断 listener heartbeat、stage、last error 与归因观察摘要 |
 | `RT-OM-003` | `src/application/quality/runtime_checks.py::build_runtime_checks` | `tests/quality/test_om_quality_service.py` | 读取现有 timer/run receipt |
 | `RT-OM-004` | `src/application/quality/position_checks.py::build_opend_runtime_check` | `tests/quality/test_om_quality_service.py`、`tests/quality/test_om_quality_checks.py` | 要求 REAL、显式账户、`refresh_cache=True`、snapshot complete |
 
@@ -26,8 +26,15 @@ OpenD 持仓质量适配器使用现有 `get_trading_days_with_receipt`：日历
 `RT-OM-002` 复用 `trades/listener_status.py` 的已知非工作状态
 `blocked/error/reconnecting/stopped`，并保留质检既有的 `failed` 兼容。
 心跳在正常时间窗内但状态为上述值时，报告 `warn/LISTENER_NOT_WORKING`；
-`listening/starting/once` 保持正常。心跳缺失仍为 unknown，延迟与过期仍按
-原有时间宽限判定；未知状态和未来时间戳政策不在本次修复范围内。
+`listening/starting/once` 继续检查归因观察，不再仅凭心跳判整体 pass。
+观察 `partial/unavailable` 给 `warn/ATTRIBUTION_OBSERVATION_UNAVAILABLE`，缺失、损坏、
+取消、未来观察时间或过期给 `unknown/ATTRIBUTION_OBSERVATION_UNKNOWN`。已知失败即使过期仍保留 warn；
+只有全部已知 `ok/not_required` 且在两倍 heartbeat 周期内才通过观察维度
+（默认 heartbeat 300 秒，即 600 秒；不是金融持仓 60 秒资格）。
+心跳缺失仍为 unknown，延迟与过期仍按原有时间宽限判定，优先级高于观察维度。
+同一 runtime/source/account 的跨市场读取合并成一个 listener check，保留最差心跳证据和各市场观察。
+未知 listener stage 与未来 heartbeat 的兼容政策不变；观察时间单独检查，不由 heartbeat 刷新。
+回归见 `tests/test_attribution_observation_status.py`，覆盖公开 facade、质量检查、账户/市场隔离与脱敏。
 告警 watchdog 只共享四个状态词汇，保留自身时间窗及发送规则。
 
 只有存在布尔 `enabled=false` 且没有 `config_error` 的接入运行证据才支持

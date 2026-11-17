@@ -1358,7 +1358,9 @@ def _listener_runtime(sources: list[dict], *, enabled: bool = True, market: str 
 def _listener_source(label: str, *, heartbeat: str | None, enabled: bool = True,
                      account: str = "reviewer", source: str = "synthetic") -> dict:
     return {"id": source, "account": account, "enabled": enabled,
-            "summary": {"listener_status": label, "last_heartbeat_utc": heartbeat}}
+            "summary": {"listener_status": label, "last_heartbeat_utc": heartbeat,
+                        "attribution_observations": [{"account": account, "market": "us",
+                            "status": "ok", "observed_at_utc": "2026-07-13T10:00:00+00:00"}]}}
 
 
 @pytest.mark.parametrize("intake", [
@@ -1510,6 +1512,8 @@ def test_listener_quality_status_and_existing_time_grace(
     assert listener["observed"] == {
         "heartbeat_age_seconds": age if isinstance(age, int) else None,
         "listener_status": label.strip().lower() or None,
+        "attribution_observations": [{"account": "reviewer", "market": "us", "status": "ok",
+                                     "observed_at_utc": now.isoformat()}],
     }
     assert listener["scope"] == {"account": "reviewer", "source": "synthetic"}
     assert listener["thresholds"] == {"healthy_max_seconds": 600, "unhealthy_after_seconds": 1500}
