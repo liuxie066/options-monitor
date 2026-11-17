@@ -163,3 +163,30 @@
 - 本地运行 `./.venv/bin/python scripts/guardrails_check.py --check-doc-wording`；同一检查已接入 commit hook 与 CI。门禁确认入口引用存在，业务复用是否正确由调用链、契约及相应测试证明。仓库已有 import boundaries 继续约束层间访问。
 
 本页不定义新的权限：生产写入、发送、发布和升级按 [AGENTS](https://github.com/liuxie066/options-monitor/blob/main/AGENTS.md) 与各自受控流程执行。
+
+### 显式限额历史归档
+
+CLI显式传`--limits-file`时选择`research/archive_bounded.py::bounded_pull`；
+缺省仍走`research/archive.py::archive_pull`原归档协议，原Python接口不变。CLI为
+`research archive pull --limits-file <本机JSON> --archive-root <全新目录> --run-id <ID> --no-logs --write`；
+`--expected-source-host` 绑定 SSH 源主机，`--existing-archive-root` 仅只读核验旧批次，结果写入新批次。
+这些是接口合同示意，未绑定目标/预算时不可执行；此本地开发状态不代表生产准入。
+有界单批接受1—738个显式run，仍受累计条目/字节/时间/RSS预算限制。
+Python调用可显式传`include_fixed_shared=False`，只带所选run及清单引用canonical blob；
+缺省True保留原两个fixedshared根范围；CLI用`--no-fixed-shared`明确选择仅run及引用依赖，且必须同时给`--limits-file`。该模式不证明生产历史全部依赖已验证。
+SSH可显式加`--ssh-compression`使用传输压缩，缺省关闭；只作用于有界SSH，不改变落盘字节/hash/归档格式，不保证吞吐或CPU收益。
+同owner `restore_batch(archive_root, target, limits_file)`从已发布回执向全新本地目录独立复制，
+复用一次多文件流、监督worker和纯证据owner核验，不连接原源端；每文件仍核恢复副本的身份/长度及原回执hash。调用方可在非仓库cwd运行；当前为Python关键字接口，无新增CLI。
+
+预算 JSON 必须完整指定 `seconds`、`grace_seconds`、`max_bytes`、`max_entries`、
+`max_file_bytes`、`max_rss_bytes`、`evidence_bytes`、`reserve_bytes`、`stderr_bytes`，均为正有限值，
+字节/条目为整数，证据额度至少4096字节；无生产安全默认值。
+有界路径冻结所选 run、固定 shared 目录及 canonical blob 的文件身份、长度与 hash，
+单连接按冻结清单顺序连续传输，以冻结长度划分每文件并校验hash；拒绝增长、替换、缺失、超额输出；不 resume/retry，不覆盖既有批次。
+保留选择复用 `service_cleanup.retained_output_runs` 的30天 OR 最近200次及 last-run pointer 保护。
+候选表 `retirement-review.json` 只供审阅，`apply_supported=false`，没有删除 token；不调用 prune。
+
+验证回执、内容同步后以不可覆盖 rename 发布，再同步父目录及回读；发布后同步失败是 unknown，保留副本。
+进程树 RSS/空间是观测停止阈值，存在采样/操作系统退出延迟，不是零超调硬实时保证。
+`ps` 进程观测必须可用；SSH只读命令依赖目标已有Python/timeout；观察超时或退出核定失败返回unknown；调用方须保存CLI输出/返回值，父监督被迫终止时worker结果文件可能不存在，不当作进程已退出。现有小文件SSH核定不代替整批Linux故障/恢复验证，传输压缩尚无生产收益数据。
+不含源删除、服务/配置变更；现有归档和生产数据不作本地验证 fixture。

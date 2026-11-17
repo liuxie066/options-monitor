@@ -1011,6 +1011,16 @@ and `required_data_publish_cleanup` (account summaries, shadow retirement and
 success audit). These sequential spans do not overlap; a skipped calendar emits
 no span. Parent time minus executed child durations is an uncovered residual,
 including surrounding control/logging overhead; do not force it to zero.
+The prefetch call additionally emits nested `required_data_lock_wait` (entering
+its existing lock context, including private-file preparation and acquisition)
+and `required_data_lock_held` (business work after acquisition, ending before
+unlock). These use wall time only. Their sum excludes lock-front control checks,
+unlock, and diagnostic boundary overhead; keep that residual within the parent
+`required_data_fetch`, rather than assigning it to contention. Acquisition time
+is not pure kernel flock wait. Error/cancellation events do not prove acquisition
+or release succeeded. A held-work `ok` terminal also precedes unlock and does
+not prove release succeeded. No events are requested for the experience path.
+
 Only these four phases opt into terminal `process_cpu_ms`, measuring the current
 Python process, including its threads but excluding subprocess CPU. Missing CPU
 is unknown. Concurrent threads can make CPU exceed wall time; wall minus CPU is
