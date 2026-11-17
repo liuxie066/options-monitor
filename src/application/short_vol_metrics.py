@@ -26,8 +26,19 @@ TERM_MATCHED_RV_SCHEMA = "term_matched_rv.v1"
 QFQ_HISTORY_CACHE_SCHEMA = "opend_qfq_history_cache.v2"
 QFQ_HISTORY_AUTYPE = "QFQ"
 QFQ_RECHECK_SESSIONS = 5
-_HKEX_2027_PATH = Path(__file__).with_name("hkex_hk_securities_2027.json")
-_HKEX_2027_DATASET_HASH = "e463ac66d3805e33180a0286dc392e2f3fa49c5c08b899106314828b39de20e2"
+# Pinned, reviewed schedules only; market differences live in these data snapshots.
+_SCHEDULED_CALENDARS = {
+    ("HK", 2027): (
+        Path(__file__).with_name("hkex_hk_securities_2027.json"),
+        "e463ac66d3805e33180a0286dc392e2f3fa49c5c08b899106314828b39de20e2",
+        "hkex_scheduled_securities",
+    ),
+    ("US", 2027): (
+        Path(__file__).with_name("us_equities_2027.json"),
+        "e9015474bb3d792ceaa982d6a3cb039e3d529200116f32a228ba50847a3e8d4c",
+        "nyse_scheduled_equities_broker_nasdaq_applicability",
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -227,9 +238,12 @@ def fetch_realized_volatility_snapshot(
         "requested_end": requested_calendar_end.isoformat(),
         "coverage_end": calendar_end.isoformat(),
     }
+    next_year = trading_day.year + 1
+    future_start, future_limit = date(next_year, 1, 1), date(next_year, 12, 31)
     supplement_future = (
-        market_code == "HK" and str(underlier_code).upper().startswith("HK.")
-        and trading_day.year == 2026 and requested_calendar_end > calendar_end
+        str(underlier_code).upper().startswith(f"{market_code}.")
+        and (market_code, next_year) in _SCHEDULED_CALENDARS
+        and requested_calendar_end > calendar_end
     )
     if not supplement_future and all(expiration > calendar_end for expiration in expiration_dates.values()):
         return _unavailable_term_snapshot(
@@ -272,22 +286,22 @@ def fetch_realized_volatility_snapshot(
 
     future_reason = None
     if supplement_future:
-        future_end = min(requested_calendar_end, date(2027, 12, 31))
+        future_end = min(requested_calendar_end, future_limit)
         try:
-            schedule, source_evidence = _hkex_2027_schedule()
+            schedule, source_evidence = _scheduled_calendar(market_code, next_year)
         except (OSError, ValueError, TypeError, KeyError):
             future_reason = "calendar_source_integrity_error"
-            calendar_evidence["sources"].append({"source": "hkex_scheduled_securities", "status": "unavailable",
-                "coverage_start": "2027-01-01", "coverage_end": future_end.isoformat(), "reason": future_reason})
+            calendar_evidence["sources"].append({"source": _SCHEDULED_CALENDARS[(market_code, next_year)][2], "status": "unavailable",
+                "coverage_start": future_start.isoformat(), "coverage_end": future_end.isoformat(), "reason": future_reason})
         else:
             try:
                 future_rows = _provider_calendar_rows(gateway, market=market_code,
-                    trading_year=trading_day.year, start=date(2027, 1, 1), end=future_end,
+                    trading_year=trading_day.year, start=future_start, end=future_end,
                     facts_cache=facts_cache, cache_key="calendar_future", deadline=deadline, cancelled=cancelled)
             except Exception as exc:
                 check_fetch_control(deadline, cancelled)
                 future_reason = f"trading_calendar_error:{type(exc).__name__}"
-                calendar_evidence["future_opend"] = {"source": "opend", "start": "2027-01-01",
+                calendar_evidence["future_opend"] = {"source": "opend", "start": future_start.isoformat(),
                     "end": future_end.isoformat(), "status": "error", "reason": future_reason}
             else:
                 if not _future_calendar_agrees(future_rows, schedule):
@@ -297,11 +311,11 @@ def fetch_realized_volatility_snapshot(
                     calendar_dates.extend(day for day in schedule if day <= future_end)
                     calendar_dates = sorted(set(calendar_dates))
                 calendar_evidence["future_opend"] = {
-                    "source": "opend", "start": "2027-01-01", "end": future_end.isoformat(),
+                    "source": "opend", "start": future_start.isoformat(), "end": future_end.isoformat(),
                     "status": "rows" if future_rows else "empty", "input_hash": _hash_values(future_rows),
                 }
             calendar_evidence["sources"].append({**source_evidence,
-                "coverage_start": "2027-01-01", "coverage_end": future_end.isoformat(),
+                "coverage_start": future_start.isoformat(), "coverage_end": future_end.isoformat(),
                 "status": "unavailable" if future_reason else "ok"})
         calendar_evidence.update({"end": calendar_end.isoformat(), "coverage_end": calendar_end.isoformat(),
             "session_count": len(calendar_dates), "input_hash": _hash_values([day.isoformat() for day in calendar_dates])})
@@ -349,7 +363,7 @@ def fetch_realized_volatility_snapshot(
     )
     if future_reason:
         for expiration, expiration_date in expiration_dates.items():
-            if provider_end < expiration_date <= date(2027, 12, 31):
+            if provider_end < expiration_date <= future_limit:
                 term_matched[expiration] = _missing_term_observation(expiration=expiration,
                     reason=future_reason, remaining_sessions=None, lookback_sessions=None)
     missing = [
@@ -501,7 +515,7 @@ def _provider_calendar_rows(gateway: Any, *, market: str, trading_year: int,
                 raise ValueError("future trading calendar row is outside requested range")
         rows.extend(incoming)
     if facts_cache is not None:
-        # Only raw OpenD rows enter the run cache; official supplements are recomputed.
+        # Only raw OpenD rows enter the run cache; reviewed supplements are recomputed.
         facts_cache[cache_key] = {"market": market, "trading_year": trading_year,
             "start": min(start, cached["start"]) if cached else start,
             "end": max(end, cached["end"]) if cached else end, "rows": rows}
@@ -512,11 +526,14 @@ def _calendar_row_date(row: dict[str, Any]) -> str:
     return str(row.get("time") or row.get("date") or row.get("trade_date") or "").strip()[:10]
 
 
-def _hkex_2027_schedule() -> tuple[dict[date, str], dict[str, Any]]:
-    payload = json.loads(_HKEX_2027_PATH.read_text(encoding="utf-8"))
-    if _hash_values(payload) != _HKEX_2027_DATASET_HASH:
-        raise ValueError("HKEX 2027 source snapshot integrity mismatch")
+def _scheduled_calendar(market: str, year: int) -> tuple[dict[date, str], dict[str, Any]]:
+    path, expected_hash, source = _SCHEDULED_CALENDARS[(market, year)]
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if _hash_values(payload) != expected_hash:
+        raise ValueError("scheduled calendar source snapshot integrity mismatch")
     start, end = date.fromisoformat(payload["coverage_start"]), date.fromisoformat(payload["coverage_end"])
+    if payload["market"] != market or start != date(year, 1, 1) or end != date(year, 12, 31):
+        raise ValueError("scheduled calendar market/year coverage mismatch")
     closed = {date.fromisoformat(value) for value in payload["closed_dates"]}
     half = {date.fromisoformat(value) for value in payload["half_days"]}
     sessions = {}
@@ -525,8 +542,8 @@ def _hkex_2027_schedule() -> tuple[dict[date, str], dict[str, Any]]:
         if cursor.weekday() not in payload["weekend_closed"] and cursor not in closed:
             sessions[cursor] = "HALF" if cursor in half else "WHOLE"
         cursor += timedelta(days=1)
-    return sessions, {"source": "hkex_scheduled_securities", "dataset_version": payload["dataset_version"],
-        "dataset_hash": _HKEX_2027_DATASET_HASH, "source_document": payload["source"],
+    return sessions, {"source": source, "dataset_version": payload["dataset_version"],
+        "dataset_hash": expected_hash, "source_document": payload["source"],
         "attested_coverage_start": start.isoformat(), "attested_coverage_end": end.isoformat(),
         "session_type_granularity": "full_or_half", "scheduled_session_count": len(sessions),
         "input_hash": _hash_values([[day.isoformat(), kind] for day, kind in sessions.items()])}

@@ -1,0 +1,55 @@
+{
+  "schema_version": "us_equities_scheduled_calendar.v1",
+  "dataset_version": "NYSE_2027_TRADESTATION_20261109_v1",
+  "market": "US",
+  "venue": "NYSE_NASDAQ_EQUITIES",
+  "timezone": "America/New_York",
+  "coverage_start": "2027-01-01",
+  "coverage_end": "2027-12-31",
+  "schedule_basis": "NYSE official 2027 equity holiday and early-close dates, with TradeStation's published NYSE/Nasdaq applicability statement; not independently confirmed by Nasdaq.",
+  "weekend_closed": [
+    5,
+    6
+  ],
+  "closed_dates": [
+    "2027-01-01",
+    "2027-01-18",
+    "2027-02-15",
+    "2027-03-26",
+    "2027-05-31",
+    "2027-06-18",
+    "2027-07-05",
+    "2027-09-06",
+    "2027-11-25",
+    "2027-12-24"
+  ],
+  "half_days": [
+    "2027-11-26"
+  ],
+  "limits": [
+    "Scheduled regular underlying-equity close-to-close sessions, not options, bonds or overnight trading.",
+    "NYSE dates plus a brokerage applicability declaration, not two independent official sources or Nasdaq official confirmation.",
+    "TradeStation's date-for-date FAQ statement explicitly covers 2026 only; 2027 applicability comes from its opening, general FAQ and key takeaways, with dates sourced from NYSE.",
+    "Half-day equity close is 13:00 America/New_York and counts as one daily close session.",
+    "No prediction of unscheduled closures, and no extrapolation to 2028. December 31, 2027 is a regular session."
+  ],
+  "source": {
+    "publisher": "New York Stock Exchange",
+    "title": "Holidays & Trading Hours",
+    "url": "https://www.nyse.com/trade/hours-calendars",
+    "visible_text_sha256": "bcdc6342dbbfd670892da7dfb7b041dbc239f724786d7786c0c5b2c06f9e4d37",
+    "retrieved_at_utc": "2026-11-17T01:33:24Z",
+    "hash_representation": "Saved UTF-8 visible webpage text; not raw HTML or PDF bytes.",
+    "evidence_basis": "nyse_official_dates_broker_nasdaq_applicability",
+    "nasdaq_applicability": {
+      "publisher": "TradeStation Education Team",
+      "title": "Stock Market Holidays 2026 and 2027: When the NYSE and Nasdaq Close",
+      "url": "https://www.tradestation.com/learn/market-hours/stock-market-holidays/",
+      "published_at": "2026-11-09",
+      "visible_text_sha256": "2762aa357ce538bb5c31670dc3cd279f9338f07755661a80dd51d7a1570567ee",
+      "retrieved_at_utc": "2026-11-17T01:33:24Z",
+      "scope": "Opening, general FAQ and key takeaways cover NYSE/Nasdaq 2027; detailed dates cite NYSE. The date-for-date FAQ statement is limited to 2026.",
+      "independent_nasdaq_official_confirmation": false
+    }
+  }
+}
