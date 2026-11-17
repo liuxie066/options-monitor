@@ -308,6 +308,11 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
     retire.add_argument("--remote-runtime-root", default="/var/lib/options-monitor")
     retire.add_argument("--expected-plan-sha256", default=None)
     retire.add_argument("--confirm", action="store_true")
+    retire.add_argument(
+        "--reference-check-sudo",
+        action="store_true",
+        help="explicit Linux-only sudo metadata observer; never automatic",
+    )
     return research
 
 
@@ -702,6 +707,7 @@ def handle_research_command(
                         remote_runtime_root=args.remote_runtime_root,
                         confirm=args.confirm,
                         expected_plan_sha256=args.expected_plan_sha256,
+                        reference_check_sudo=args.reference_check_sudo,
                     )
             except (TransferError, OSError, ValueError, KeyError) as exc:
                 raise AgentToolError(

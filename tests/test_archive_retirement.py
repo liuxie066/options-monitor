@@ -2,6 +2,7 @@ from pathlib import Path
 import json
 import os
 import time
+import sys
 import pytest
 
 from src.application.research.archive_bounded import bounded_pull, restore_batch
@@ -57,7 +58,13 @@ def ready(tmp_path, canonical=False):
     assert result["ok"], result
     result = restore_batch(archive_root=archive, target=restored, limits_file=limit)
     assert result["ok"], result
-    return dict(archive_root=archive, restore_root=restored, source_root=source, limits_file=limit)
+    return dict(
+        archive_root=archive,
+        restore_root=restored,
+        source_root=source,
+        limits_file=limit,
+        reference_check_sudo=sys.platform.startswith("linux"),
+    )
 
 
 def test_real_archive_restore_preview_and_exact_retirement(tmp_path):
@@ -206,7 +213,8 @@ def test_open_run_reference_refuses_retirement(tmp_path):
     assert (args["source_root"] / "output_runs/old-a").exists()
 
 
-def test_retirement_cli_uses_owner_and_confirmation(tmp_path, monkeypatch):
+@pytest.mark.parametrize("sudo", [False, True])
+def test_retirement_cli_uses_owner_and_confirmation(tmp_path, monkeypatch, sudo):
     import argparse
     from src.interfaces.cli.research import add_research_commands, handle_research_command
     from src.application.research import archive_retirement
@@ -238,9 +246,30 @@ def test_retirement_cli_uses_owner_and_confirmation(tmp_path, monkeypatch):
             "a" * 64,
         ]
     )
+    if sudo:
+        args = parser.parse_args(
+            [
+                "research",
+                "archive",
+                "retire-batch",
+                "--archive-root",
+                "A",
+                "--restore-root",
+                "C",
+                "--limits-file",
+                "L",
+                "--source-root",
+                "S",
+                "--confirm",
+                "--expected-plan-sha256",
+                "a" * 64,
+                "--reference-check-sudo",
+            ]
+        )
     handle_research_command(args, repo_base_fn=lambda: tmp_path)
     assert calls[0]["confirm"] is True and calls[0]["expected_plan_sha256"] == "a" * 64
     assert calls[0]["source_root"] == "S"
+    assert calls[0]["reference_check_sudo"] is sudo
 
 
 def test_new_receipt_parent_fsync_failure_precedes_delete(tmp_path, monkeypatch):
@@ -303,3 +332,86 @@ def test_source_worker_reports_safe_failure_reason(monkeypatch, capsys, error, e
         owner._worker()
     result = json.loads(capsys.readouterr().out)
     assert result["reason"] == expected
+
+
+def test_sudo_reference_option_is_explicit_and_observer_only(tmp_path, monkeypatch):
+    from src.application.research import archive_retirement as owner
+    import subprocess
+
+    class Proc:
+        def is_dir(self):
+            return True
+
+    real_path = owner.Path
+    monkeypatch.setattr(owner, "Path", lambda p: Proc() if p == "/proc" else real_path(p))
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, json.loads(kwargs["input"])))
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            json.dumps({"hit": False, "unknown": False, "stop_reason": None, "processes": 1, "links": 2}).encode(),
+            b"",
+        )
+
+    monkeypatch.setattr(owner.subprocess, "run", run)
+    owner._active_references(tmp_path, ["run-a"], time.monotonic() + 5)
+    assert calls[-1][0][0] == sys.executable
+    owner._active_references(tmp_path, ["run-a"], time.monotonic() + 5, reference_check_sudo=True)
+    command, request = calls[-1]
+    assert command[:3] == ["sudo", "-n", "/usr/bin/python3"]
+    assert command[3:6] == ["-I", "-S", "-B"]
+    assert request["uid"] == os.getuid()
+    assert request["targets"] == [str(tmp_path / "output_runs/run-a")]
+    assert command[-1] == owner.LINUX_REFERENCE_PROBE
+
+
+@pytest.mark.parametrize("mode", ["permission", "hit", "unavailable"])
+def test_sudo_observer_still_refuses_unknown_hits_and_failure(tmp_path, monkeypatch, mode):
+    from src.application.research import archive_retirement as owner
+    import subprocess
+
+    class Proc:
+        def is_dir(self):
+            return True
+
+    real_path = owner.Path
+    monkeypatch.setattr(owner, "Path", lambda p: Proc() if p == "/proc" else real_path(p))
+
+    def run(command, **kwargs):
+        out = {
+            "hit": mode == "hit",
+            "unknown": mode == "permission",
+            "stop_reason": "permission" if mode == "permission" else None,
+            "processes": 1,
+            "links": 0,
+        }
+        return subprocess.CompletedProcess(command, 1 if mode == "unavailable" else 0, json.dumps(out).encode(), b"")
+
+    monkeypatch.setattr(owner.subprocess, "run", run)
+    with pytest.raises(TransferError):
+        owner._active_references(tmp_path, ["a"], time.monotonic() + 5, reference_check_sudo=True)
+
+
+def test_linux_observer_probe_real_local_closed_and_open_file(tmp_path):
+    if not sys.platform.startswith("linux"):
+        pytest.skip("real /proc observer is Linux-only; CI executes this, no macOS substitute")
+    from src.application.research.archive_retirement import _active_references
+
+    source = tmp_path / "source"
+    run = source / "output_runs/old"
+    run.mkdir(parents=True)
+    file = run / "x"
+    file.write_text("synthetic")
+    _active_references(source, ["old"], time.monotonic() + 5, reference_check_sudo=True)
+    with file.open():
+        with pytest.raises(TransferError, match="actively referenced"):
+            _active_references(source, ["old"], time.monotonic() + 5, reference_check_sudo=True)
+
+
+def test_reference_privilege_rejects_truthy_non_boolean(tmp_path):
+    from src.application.research.archive_retirement import _active_references
+
+    with pytest.raises(TransferError, match="explicit boolean"):
+        _active_references(tmp_path, ["a"], time.monotonic() + 5, reference_check_sudo="false")

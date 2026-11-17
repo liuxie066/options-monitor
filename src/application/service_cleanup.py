@@ -363,12 +363,13 @@ def cleanup_output_runs_for_ids(
             raise ValueError("confirmed output run plan changed")
         if before_delete is None:
             raise ValueError("archive source validation required")
-        before_delete()
+        remaining_evidence = before_delete()
+        journal_budget = min(evidence_bytes, remaining_evidence) if type(remaining_evidence) is int else evidence_bytes
         if _output_runs_plan_sha256(plan()) != digest:
             raise ValueError("output run plan changed during validation")
         if not archive_binding_sha256 or not re.fullmatch("[0-9a-f]{64}", archive_binding_sha256):
             raise ValueError("archive binding required")
-        if evidence_bytes < (len(run_ids) * 16384 + 4096):
+        if journal_budget < (len(run_ids) * 16384 + 4096):
             raise ValueError("retirement progress evidence budget")
         journal_dir = runtime / "output_shared" / "state" / "run_retirements"
         for parent in [runtime / "output_shared", runtime / "output_shared" / "state", journal_dir]:
@@ -393,7 +394,7 @@ def cleanup_output_runs_for_ids(
             def record(event):
                 nonlocal written
                 wire = (json.dumps(event, separators=(",", ":")) + "\n").encode()
-                if written + len(wire) > evidence_bytes:
+                if written + len(wire) > journal_budget:
                     raise ValueError("progress evidence budget; inspect source receipt")
                 handle.write(wire)
                 handle.flush()

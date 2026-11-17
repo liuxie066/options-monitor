@@ -75,10 +75,52 @@ def _validate_copies(archive_root, restore_root, limits, deadline):
     return receipt, sha
 
 
-def _active_references(runtime, ids, deadline):
+# A fixed standard-library observer: no writes and no arbitrary paths/commands.
+LINUX_REFERENCE_PROBE = r"""
+import os,json,time,sys
+raw=sys.stdin.buffer.read(1048577)
+if len(raw)>1048576:raise SystemExit(2)
+r=json.loads(raw);targets=r['targets'];uid=r['uid'];deadline=time.monotonic()+r['seconds']
+if not isinstance(uid,int) or uid<0 or not targets or any(not isinstance(v,str) or not v.startswith('/') for v in targets):raise SystemExit(2)
+o={'hit':False,'unknown':False,'stop_reason':None,'processes':0,'links':0}
+try:
+    with os.scandir('/proc') as entries:
+        for item in entries:
+            if time.monotonic()>=deadline:raise TimeoutError()
+            if not item.name.isdigit():continue
+            try:
+                if item.stat(follow_symlinks=False).st_uid!=uid:continue
+                o['processes']+=1
+                if o['processes']>256 or time.monotonic()>=deadline:raise TimeoutError()
+                directory='/proc/'+item.name
+                for name in ('cwd','exe'):
+                    try:value=os.readlink(directory+'/'+name)
+                    except FileNotFoundError:continue
+                    o['links']+=1
+                    if any(value==v or value.startswith(v+'/') for v in targets):o['hit']=True
+                with os.scandir(directory+'/fd') as descriptors:
+                    for descriptor in descriptors:
+                        o['links']+=1
+                        if o['links']>8192 or time.monotonic()>=deadline:raise TimeoutError()
+                        try:value=os.readlink(descriptor.path)
+                        except FileNotFoundError:continue
+                        if any(value==v or value.startswith(v+'/') for v in targets):o['hit']=True
+            except FileNotFoundError:continue
+except PermissionError:o.update(unknown=True,stop_reason='permission')
+except TimeoutError:o.update(unknown=True,stop_reason='budget')
+except OSError:o.update(unknown=True,stop_reason='observation_error')
+print(json.dumps(o))
+"""
+
+
+def _active_references(runtime, ids, deadline, *, reference_check_sudo=False, evidence_bytes=1048576):
     """Known source UID only; permission unknown fails closed, never emit process data."""
+    if type(reference_check_sudo) is not bool:
+        raise TransferError("reference check sudo must be explicit boolean")
     proc = Path("/proc")
     if not proc.is_dir():
+        if reference_check_sudo:
+            raise TransferError("privileged reference check requires Linux")
         observer = Path("/usr/sbin/lsof")
         if not observer.is_file():
             raise TransferError("source reference observation unavailable")
@@ -93,34 +135,33 @@ def _active_references(runtime, ids, deadline):
             )
             if result.stdout or result.stderr or result.returncode not in (0, 1):
                 raise TransferError("selected run referenced or reference unknown")
-        return
-    targets = [str(runtime / "output_runs" / name) for name in ids]
-    count = fds = 0
-    for path in proc.iterdir():
-        if not path.name.isdigit():
-            continue
-        try:
-            if path.stat().st_uid != os.getuid():
-                continue
-            count += 1
-            if count > 256 or time.monotonic() >= deadline:
-                raise TransferError("source reference budget")
-            links = [path / "cwd", path / "exe"]
-            links.extend((path / "fd").iterdir())
-            for link in links:
-                fds += 1
-                if fds > 8192:
-                    raise TransferError("source reference budget")
-                try:
-                    value = os.readlink(link)
-                except FileNotFoundError:
-                    continue
-                if any(value == target or value.startswith(target + "/") for target in targets):
-                    raise TransferError("selected run actively referenced")
-        except FileNotFoundError:
-            continue
-        except PermissionError as exc:
-            raise TransferError("source reference unknown") from exc
+        return 0
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TransferError("source reference deadline")
+    payload = json.dumps(
+        {"uid": os.getuid(), "seconds": remaining, "targets": [str(runtime / "output_runs" / name) for name in ids]}
+    ).encode()
+    if len(payload) > min(evidence_bytes, 1048576):
+        raise TransferError("source reference request budget")
+    command = ["sudo", "-n", "/usr/bin/python3"] if reference_check_sudo else [sys.executable]
+    command.extend(["-I", "-S", "-B", "-c", LINUX_REFERENCE_PROBE])
+    result = subprocess.run(command, input=payload, capture_output=True, timeout=remaining)
+    if result.returncode or result.stderr or len(result.stdout) + len(payload) > evidence_bytes:
+        raise TransferError("source reference observer unavailable")
+    try:
+        observed = json.loads(result.stdout)
+        if set(observed) != {"hit", "unknown", "stop_reason", "processes", "links"}:
+            raise ValueError()
+        if type(observed["hit"]) is not bool or type(observed["unknown"]) is not bool:
+            raise ValueError()
+    except (TypeError, ValueError) as exc:
+        raise TransferError("source reference result invalid") from exc
+    if observed["unknown"]:
+        raise TransferError("source reference unknown")
+    if observed["hit"]:
+        raise TransferError("selected run actively referenced")
+    return len(payload) + len(result.stdout)
 
 
 def _source_retire(request):
@@ -147,7 +188,15 @@ def _source_retire(request):
         ):
             raise TransferError("source changed since archive")
         bounded._retention_check(snap, ids, time.time())
-        _active_references(runtime, ids, deadline)
+        spent = _active_references(
+            runtime,
+            ids,
+            deadline,
+            reference_check_sudo=request.get("reference_check_sudo", False),
+            evidence_bytes=limits["_evidence_remaining"],
+        )
+        limits["_evidence_remaining"] -= spent
+        return limits["_evidence_remaining"]
 
     # Preview validates source too; apply repeats validation inside the transition guard.
     if not request["confirm"]:
@@ -176,10 +225,13 @@ def _retire_execute(
     expected_plan_sha256=None,
     confirm=False,
     deadline_override=None,
+    reference_check_sudo=False,
 ):
     """Default preview; confirm requires its digest and revalidates both local copies."""
     from src.application.research import archive
 
+    if type(reference_check_sudo) is not bool:
+        raise TransferError("reference check sudo must be explicit boolean")
     limits = bounded.read_limits(Path(limits_file))
     deadline = deadline_override if deadline_override is not None else time.monotonic() + limits["seconds"]
     limits["_evidence_remaining"] = limits["evidence_bytes"]
@@ -193,6 +245,7 @@ def _retire_execute(
         "archive_receipt": receipt,
         "runtime_root": source["runtime_root"],
         "confirm": False,
+        "reference_check_sudo": reference_check_sudo,
         "limits": {k: v for k, v in limits.items() if not k.startswith("_")},
     }
 
@@ -267,6 +320,7 @@ def _retire_execute(
         "restore_root": str(Path(restore_root).absolute()),
         "source": source,
         "cleanup_sha256": preview["plan_sha256"],
+        "reference_check_sudo": reference_check_sudo,
         "run_ids": receipt["run_ids"],
     }
     digest = _digest(binding)
