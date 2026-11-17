@@ -50,7 +50,8 @@ def _observe_messages(monkeypatch, tmp_path, messages, *, history=True, dead_at=
 
         def __init__(self, *, target, args, daemon):
             assert target is capacity._attribution_capacity_worker and daemon
-            assert len(args) == (5 if history else 4)
+            assert len(args) == 6 and args[-1] == 10
+            assert (args[-2] is not None) == history
 
         def start(self):
             self.pid = 1
@@ -204,3 +205,56 @@ def test_actual_worker_does_not_pair_history_with_failed_fresh_read(monkeypatch,
     capacity._attribution_capacity_worker(connection, {}, "qa", tmp_path, 1)
     assert messages == ([BASE, {"error": "TimeoutError"}] if failed_read == "fresh" else [{"error": "TimeoutError"}])
     assert calls == (["base", "history", "fresh"] if failed_read == "fresh" else ["base"])
+
+
+@pytest.mark.parametrize('failure', ['start', 'terminate', 'kill'])
+def test_observer_cleanup_failures_are_bounded_and_explicit(monkeypatch, tmp_path, failure):
+    import multiprocessing
+    calls = []
+
+    class Process:
+        pid = None
+        alive = False
+
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            if failure == 'start':
+                raise OSError('synthetic start failure')
+            self.pid, self.alive = 1, True
+
+        def is_alive(self):
+            return self.alive
+
+        def terminate(self):
+            calls.append('terminate')
+
+        def join(self, timeout):
+            assert timeout == 0.5
+            calls.append('join')
+
+        def kill(self):
+            calls.append('kill')
+            self.alive = failure == 'kill'
+
+        def close(self):
+            assert not self.alive
+            calls.append('process.close')
+
+    receiver = SimpleNamespace(poll=lambda _: True, recv=lambda: BASE,
+                               close=lambda: calls.append('receiver.close'))
+    sender = SimpleNamespace(close=lambda: calls.append('sender.close'))
+    context = SimpleNamespace(Pipe=lambda **_: (receiver, sender), Process=Process)
+    monkeypatch.setattr(multiprocessing, 'get_context', lambda _: context)
+    if failure == 'kill':
+        with pytest.raises(RuntimeError, match='cleanup failed'):
+            capacity.observe_trade_attribution_capacity(config={}, account='qa', runtime_root=tmp_path)
+        assert 'process.close' not in calls
+    else:
+        result = capacity.observe_trade_attribution_capacity(config={}, account='qa', runtime_root=tmp_path)
+        assert result == ({'error': 'provider_unavailable'} if failure == 'start' else BASE)
+        assert 'process.close' in calls
+    assert 'receiver.close' in calls and 'sender.close' in calls
+    if failure != 'start':
+        assert calls.count('join') == 2 and 'kill' in calls

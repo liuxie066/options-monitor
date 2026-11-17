@@ -241,13 +241,15 @@ def test_source_coordinator_cancellation_stops_before_remaining_markets(tmp_path
     recovery = _run_coordinator(repo, source_config, runtime_root, combo_mode="confirm",
         cursors=cursors, stop_event=stop)
     assert attempted == ["us"]
-    assert set(recovery["lx"]) == {"us"}
+    assert set(recovery["lx"]) == {"us", "hk"}
+    assert recovery["lx"]["hk"]["observation"]["status"] == "cancelled"
     assert "lx:hk" not in cursors
 
     stop_before = Event()
     stop_before.set()
-    assert _run_coordinator(repo, source_config, runtime_root, combo_mode="confirm",
-        cursors={}, stop_event=stop_before) == {}
+    stopped = _run_coordinator(repo, source_config, runtime_root, combo_mode="confirm",
+        cursors={}, stop_event=stop_before)
+    assert stopped["lx"]["us"]["observation"]["status"] == "cancelled"
     assert attempted == ["us"]
 
 
