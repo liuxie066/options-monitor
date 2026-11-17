@@ -1,6 +1,6 @@
 # Tick 存储效率设计
 
-> 状态：当前源码已实现摘要投影与 opening snapshot 紧凑编码。历史性能数字保留为设计依据，生产容量与时延须按目标环境验证。
+> 状态：当前源码已实现摘要投影及 opening、SP+LC、CC+LP snapshot 紧凑编码。历史性能数字保留为设计依据，生产容量与时延须按目标环境验证。
 > Commit、push、merge、release、deployment 和历史数据清理都是独立边界。
 
 ## 目标
@@ -98,6 +98,25 @@ opening snapshot 中候选 facts 的重复属于 `opening_candidate_snapshot.v1`
 Research 消费。本工作单元只改变物理编码。
 
 ## 选择的设计
+
+### SP+LC / CC+LP：相同事实采用紧凑编码
+
+`combo_yield_candidate_snapshot` 与 `cc_lp_candidate_snapshot` 的新标准模式快照复用
+`payload_helpers.canonical_json_bytes_lines`，保留所有字段、schema、语义 content hash 和末尾换行。
+experience 继续使用自己的 owner；本改动不更换其编码。
+
+两类 owner 对已存在文件只允许两种精确结果：当前紧凑字节，或同一已验证 payload 按原
+`readable_json_bytes` 编码所得的旧字节。后者沿用原件；不改写历史文件、manifest、mtime或hash，
+不把任意“可解析为相等JSON”的文件都采纳。其他差异仍由原write-once拒绝，路径继续通过
+no-follow读取和发布。复用原sealed_at及相同输入是同run重试条件，不以当前时间重封历史。
+
+manifest绑定实际文件字节；load、Brief、Research和独立归档恢复消费相同事实。
+旧4.6.42 reader能够解析新紧凑JSON，但其writer可能在重放同run时因编码不同而拒绝：
+代码回退不等于可用旧writer重新封存新run。此优化不提供历史原件迁移或源删除能力。
+
+回归入口：`tests/test_candidate_snapshot_compact_encoding.py`，覆盖有/无候选的同输入字节减少、
+旧字节重试保留、冲突/篡改/链接拒绝，以及真实隔离worker的复制和独立恢复。
+fixture字节减少不等于已测生产分配空间或日增长收益。
 
 ### 1. 只投影落盘 prefetch summary
 

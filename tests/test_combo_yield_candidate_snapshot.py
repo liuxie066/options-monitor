@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -239,11 +240,9 @@ def test_combo_yield_snapshot_rejects_tampered_payload(tmp_path: Path) -> None:
         / "state"
         / COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE
     )
-    text = path.read_text(encoding="utf-8")
-    path.write_text(
-        text.replace('"net_credit_retention": 0.8', '"net_credit_retention": 0.9', 1),
-        encoding="utf-8",
-    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["ranked_pairs"][0]["net_credit_retention"] = 0.9
+    path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(ComboYieldCandidateSnapshotError, match="content hash mismatch"):
         load_combo_yield_candidate_snapshot(

@@ -54,6 +54,7 @@ def _pair(**overrides) -> dict:
 
 def _seal(
     tmp_path: Path, *, pairs: bool = True, status: str = "completed", detail: str | None = None,
+    sealed_at: str | None = None,
 ) -> dict:
     return seal_cc_lp_candidate_snapshot(
         base=tmp_path,
@@ -74,6 +75,7 @@ def _seal(
             }
         ],
         ranked_pairs=[_pair()] if pairs else [],
+        sealed_at=sealed_at,
     )
 
 
