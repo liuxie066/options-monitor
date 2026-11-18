@@ -1144,6 +1144,15 @@ def _collect_runtime_storage(*, root: Path, observed_at: datetime) -> tuple[dict
         "by_suffix": _aggregate_groups(aggregates.by_suffix, "suffix"),
         "by_month": _aggregate_groups(aggregates.by_month, "month"),
         "by_tier": _aggregate_groups(aggregates.by_tier, "tier"),
+        "run_artifacts": [
+            {
+                "artifact": name,
+                "file_count": counts[0],
+                "size_bytes": counts[1],
+                "allocated_file_bytes": counts[2],
+            }
+            for name, counts in sorted(aggregates.run_artifacts.items(), key=lambda row: (-row[1][1], row[0]))
+        ],
         "largest_files": [
             {
                 "path": item["path"],
@@ -1172,6 +1181,25 @@ class _RuntimeAggregates:
         self.by_month: dict[str, list[int]] = defaultdict(lambda: [0, 0])
         self.by_tier: dict[str, list[int]] = defaultdict(lambda: [0, 0])
         self.largest: list[tuple[int, str, dict[str, Any]]] = []
+        self.run_artifacts: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0])
+
+    def add_run_artifact(self, parts: tuple[str, ...], *, size: int, allocated: int) -> None:
+        if len(parts) < 3 or parts[0] != "output_runs":
+            return
+        artifact = "other"
+        if parts[2:4] == ("required_data", "source_receipts") and len(parts) > 4:
+            artifact = "source_receipts"
+        elif len(parts) > 3 and parts[-2] == "state" and parts[-1] in {
+            "opening_candidate_snapshot.json",
+            "combo_yield_candidate_snapshot.json",
+            "option_positions_context.json",
+            "required_data_prefetch_summary.json",
+        }:
+            artifact = parts[-1]
+        bucket = self.run_artifacts[artifact]
+        bucket[0] += 1
+        bucket[1] += size
+        bucket[2] += allocated
 
     def add(self, item: dict[str, Any]) -> None:
         size = int(item["size_bytes"])
@@ -1220,7 +1248,8 @@ def _scan_runtime_directory(
         with os.scandir(current) as entries:
             for entry in sorted(entries, key=lambda item: item.name, reverse=True):
                 path = Path(entry.path)
-                relpath = path.relative_to(root).as_posix()
+                relative = path.relative_to(root)
+                relpath = relative.as_posix()
                 if entry.is_symlink():
                     symlinks.append({"path": relpath, "kind": "entry"})
                     continue
@@ -1245,6 +1274,10 @@ def _scan_runtime_directory(
                     "tier": tier,
                 }
                 aggregates.add(item)
+                if storage_class == "sealed_run_artifact":
+                    aggregates.add_run_artifact(
+                        relative.parts, size=stat.st_size, allocated=stat.st_blocks * 512,
+                    )
                 if inventory_files is not None:
                     inventory_files.append(item)
                 if storage_class in {"research_artifact", "immutable_shared_partition", "sealed_run_artifact"}:

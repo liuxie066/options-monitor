@@ -1784,3 +1784,38 @@ def test_storage_baseline_qualifies_observed_disk_capacity(
     assert thresholds["current_free_bytes"] == observation.free
     assert ("current_free_space_below_critical_floor" in thresholds["critical_reasons"]) is critical
     assert thresholds["automatic_actions"] == []
+
+
+def test_run_artifacts_measure_logical_and_allocated_bytes_without_following_aliases(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    root = _make_runtime(tmp_path)
+    names = {
+        "run-a/lx/state/opening_candidate_snapshot.json": "opening_candidate_snapshot.json",
+        "run-b/sy/state/opening_candidate_snapshot.json": "opening_candidate_snapshot.json",
+        "run-a/lx/state/combo_yield_candidate_snapshot.json": "combo_yield_candidate_snapshot.json",
+        "run-a/required_data/source_receipts/nested/quotes.json": "source_receipts",
+        "run-a/state/random.json": "other",
+    }
+    expected: dict[str, list[int]] = {}
+    for i, (name, artifact) in enumerate(names.items(), start=1):
+        path = root / "output_runs" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("wb") as handle:
+            handle.truncate(i * 128 * 1024)
+        bucket = expected.setdefault(artifact, [0, 0, 0])
+        bucket[0] += 1
+        bucket[1] += path.stat().st_size
+        bucket[2] += path.stat().st_blocks * 512
+    alias = root / "output_runs/run-a/state/opening_candidate_snapshot.json"
+    alias.symlink_to(root / "output_runs/run-a/lx/state/opening_candidate_snapshot.json")
+    (root / "output_shared/state/opening_candidate_snapshot.json").write_bytes(b"outside run")
+
+    rows = _collect(monkeypatch, tmp_path, root=root)["runtime_storage"]["run_artifacts"]
+
+    assert {
+        row["artifact"]: [row["file_count"], row["size_bytes"], row["allocated_file_bytes"]] for row in rows
+    } == expected
+    assert [row["size_bytes"] for row in rows] == sorted(
+        (row["size_bytes"] for row in rows), reverse=True,
+    )
