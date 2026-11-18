@@ -1084,7 +1084,7 @@ def _run_scan_blob_refs(
         entries = []
         if manifest_present:
             if manifest_path.is_symlink() or not manifest_path.is_file():
-                raise ValueError("required-data snapshot manifest is unsafe")
+                return [], "invalid", "required-data snapshot manifest is unsafe"
             payload = json.loads(manifest_path.read_text(encoding="utf-8"))
             symbols = payload.get("symbols") if isinstance(payload, dict) else None
             if not isinstance(symbols, dict):
