@@ -1,0 +1,153 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.43",
+  "base": {
+    "tag": "v4.6.42",
+    "commit": "34dcfa824d33ab7bded817ac13753c3835ff37c0"
+  },
+  "reviewed_head": "b91de7b40cfbd95cde316db7f1386c90fe2bcf1c",
+  "commits": [
+    {
+      "sha": "315e3f657829cd5517bd0865371afbc8082c8a46",
+      "subject": "perf(brief): reuse validated normalization within history batches"
+    },
+    {
+      "sha": "7cf79806cd5e79974bccc0b5684f58ce50b27db2",
+      "subject": "Merge pull request #1209 from liuxie066/perf/cpu-brief-source-reuse-20261117"
+    },
+    {
+      "sha": "e0b66a9e59aca3fd5aa3bc2c49d70891e179f7d2",
+      "subject": "perf(runtime): reduce service imports and snapshot storage, retire one-shot diagnostics"
+    },
+    {
+      "sha": "439fca649e305ba8ccaafdb094540d99b1985b28",
+      "subject": "fix: isolate trade attribution SDK workers and expose observation health"
+    },
+    {
+      "sha": "99b3809f781ff03db5e036dd951aa061ed3df006",
+      "subject": "test(storage): cover compact and legacy run reader encoding"
+    },
+    {
+      "sha": "d4ff5e66539cd7077232bd541c5927166d64e287",
+      "subject": "Merge pull request #1210 from liuxie066/cindy/gentle-colden"
+    },
+    {
+      "sha": "6afbaac8c01421312a0dd0708963faa13fb515dc",
+      "subject": "chore(integration): merge main for resource optimization PR"
+    },
+    {
+      "sha": "b91de7b40cfbd95cde316db7f1386c90fe2bcf1c",
+      "subject": "Merge pull request #1212 from liuxie066/cindy/swift-hawking"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "每日简报在同一次历史观察内复用已验证的标准化结果，减少重复计算，保持来源校验和观察生命周期边界。（#1209）",
+      "commits": [
+        "315e3f657829cd5517bd0865371afbc8082c8a46",
+        "7cf79806cd5e79974bccc0b5684f58ce50b27db2"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "群查询 bot 和成交接收监督入口按需加载依赖，减少启动时间及入口内存；成交处理子进程的业务与恢复语义不变。（#1212）",
+      "commits": [
+        "e0b66a9e59aca3fd5aa3bc2c49d70891e179f7d2",
+        "b91de7b40cfbd95cde316db7f1386c90fe2bcf1c"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "组合快照采用紧凑 JSON，opening v5 只保存一份规范化输入，减少新写入与本地处理开销；保留历史 v3/v4 读取和同 run 不重写，新 v5 数据恢复或降级必须使用兼容 reader，不能交给旧 4.6.42 reader。（#1212）",
+      "commits": [
+        "e0b66a9e59aca3fd5aa3bc2c49d70891e179f7d2",
+        "b91de7b40cfbd95cde316db7f1386c90fe2bcf1c"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "退役已完成用途的一次性对象诊断及心跳探针，保留正常心跳、错误、恢复审计与 Tick 耗时观测。（#1212）",
+      "commits": [
+        "e0b66a9e59aca3fd5aa3bc2c49d70891e179f7d2",
+        "b91de7b40cfbd95cde316db7f1386c90fe2bcf1c"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "成交归因 SDK 工作线程与监听处理隔离，并报告归因恢复的观察健康状态，保留失败与恢复边界。（#1210）",
+      "commits": [
+        "439fca649e305ba8ccaafdb094540d99b1985b28",
+        "d4ff5e66539cd7077232bd541c5927166d64e287"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "有界归档失败回执保留受控错误阶段与来源退出码，未知清理结果仍标记未知；发布升级不会执行历史数据删除。（#1212）",
+      "commits": [
+        "e0b66a9e59aca3fd5aa3bc2c49d70891e179f7d2",
+        "b91de7b40cfbd95cde316db7f1386c90fe2bcf1c"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "99b3809f781ff03db5e036dd951aa061ed3df006",
+      "reason": "测试覆盖紧凑与历史JSON编码，不改变产品行为；对应存储行为已在#1212条目说明。"
+    },
+    {
+      "commit": "6afbaac8c01421312a0dd0708963faa13fb515dc",
+      "reason": "合并已单独覆盖的main并刷新生成依赖图，没有新增产品行为。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "315e3f657829cd5517bd0865371afbc8082c8a46",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1209"
+      ]
+    },
+    {
+      "commit": "7cf79806cd5e79974bccc0b5684f58ce50b27db2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1209"
+      ]
+    },
+    {
+      "commit": "e0b66a9e59aca3fd5aa3bc2c49d70891e179f7d2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1212"
+      ]
+    },
+    {
+      "commit": "439fca649e305ba8ccaafdb094540d99b1985b28",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1210"
+      ]
+    },
+    {
+      "commit": "99b3809f781ff03db5e036dd951aa061ed3df006",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1212"
+      ]
+    },
+    {
+      "commit": "d4ff5e66539cd7077232bd541c5927166d64e287",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1210"
+      ]
+    },
+    {
+      "commit": "6afbaac8c01421312a0dd0708963faa13fb515dc",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1212"
+      ]
+    },
+    {
+      "commit": "b91de7b40cfbd95cde316db7f1386c90fe2bcf1c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1212"
+      ]
+    }
+  ]
+}
