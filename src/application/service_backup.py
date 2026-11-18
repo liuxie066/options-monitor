@@ -17,6 +17,7 @@ from typing import Any
 
 from src.application.encrypted_backup_package import _mounted_target, publish_encrypted_backup, restore_encrypted_backup
 from src.application.offline_backup_snapshot import OfflineBackupError, stage_offline_backup
+from src.application.storage_layout import parse_backup_filename
 
 
 _RECEIPT_SCHEMA = "om_backup_publication.v1"
@@ -71,7 +72,13 @@ def create_service_backup(
 ) -> dict[str, Any]:
     if writers_stopped is not True:
         raise OfflineBackupError("all source writers must be stopped before backup")
+    parse_backup_filename(filename)
     receipt_path = _new_receipt_path(receipt_path)
+    target, mount = target.absolute(), mount.absolute()
+    if receipt_path == target / filename:
+        raise OfflineBackupError("publication receipt and encrypted package must be separate")
+    with _mounted_target(mount, target, expected_device):
+        pass
     source = source.resolve(strict=True)
     staging_root = staging_root.absolute()
     if (
@@ -116,7 +123,8 @@ def create_service_backup(
 
 def restore_service_backup(
     *, package: Path, receipt_path: Path, verification_receipt: Path,
-    destination: Path, private_key: Path, max_bytes: int, max_files: int, timeout: float,
+    destination: Path, private_key: Path, max_bytes: int, max_ciphertext_bytes: int,
+    max_files: int, timeout: float,
 ) -> dict[str, Any]:
     receipt, receipt_bytes = _control_object(receipt_path)
     verification_receipt = _new_receipt_path(verification_receipt)
@@ -131,12 +139,15 @@ def restore_service_backup(
         value = receipt.get(key)
         if not _valid_digest(value):
             raise OfflineBackupError("publication receipt has an invalid digest")
-    if type(max_bytes) is not int or max_bytes <= 0 or shutil.disk_usage(destination.parent).free < 2 * max_bytes:
-        raise OfflineBackupError("restore requires twice the byte budget in free space")
+    if type(max_ciphertext_bytes) is not int or not 0 < max_ciphertext_bytes <= max_bytes:
+        raise OfflineBackupError("ciphertext budget must be positive and no larger than restore budget")
+    if type(max_bytes) is not int or max_bytes <= 0 or shutil.disk_usage(destination.parent).free < max_bytes + max_ciphertext_bytes:
+        raise OfflineBackupError("restore volume lacks free space for the archive and extracted files")
     restore_encrypted_backup(
         package=package, ciphertext_sha256=receipt["ciphertext_sha256"],
         manifest_sha256=receipt["manifest_sha256"], destination=destination,
-        private_key=private_key, max_bytes=max_bytes, max_files=max_files, timeout=timeout,
+        private_key=private_key, max_bytes=max_bytes, max_ciphertext_bytes=max_ciphertext_bytes,
+        max_files=max_files, timeout=timeout,
     )
     record = {
         "schema": _RESTORE_SCHEMA,
@@ -165,6 +176,24 @@ def _valid_digest(value: Any) -> bool:
     return isinstance(value, str) and len(value) == 64 and set(value) <= set("0123456789abcdef")
 
 
+def _rotation_filename_series(filename: str) -> str | None:
+    try:
+        _, series, _ = parse_backup_filename(filename)
+    except ValueError:
+        return None
+    return series
+
+
+def _rotation_receipt_path(inventory: Path, name: str) -> Path:
+    relative = Path(name)
+    if (
+        relative.is_absolute() or not relative.parts or ".." in relative.parts
+        or "\\" in name or relative.as_posix() != name
+    ):
+        raise OfflineBackupError("rotation receipt must be relative to the inventory directory")
+    return inventory.parent / relative
+
+
 def preview_backup_rotation(
     *, inventory: Path, target: Path, mount: Path, expected_device: int, max_verify_bytes: int,
 ) -> dict[str, Any]:
@@ -180,7 +209,6 @@ def preview_backup_rotation(
     series = inventory_data.get("series")
     if not isinstance(series, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", series):
         raise OfflineBackupError("rotation must identify one backup series")
-    filename_pattern = re.compile(r"\d{4}-\d{2}-\d{2}T\d{6}Z_" + re.escape(series) + r"_(full|pre-upgrade)\.tar\.gz\.cms")
     now = _receipt_time(_utc_now())
     scope = None
     with _mounted_target(mount, target, expected_device) as fd:
@@ -188,22 +216,25 @@ def preview_backup_rotation(
         for item in entries:
             if (
                 not isinstance(item, dict)
-                or set(item) - {"publication", "verification", "pinned"}
+                or set(item) - {"publication", "verification", "pinned", "rollback_window_closed"}
                 or not isinstance(item.get("publication"), str)
                 or type(item.get("pinned", False)) is not bool
+                or type(item.get("rollback_window_closed", False)) is not bool
                 or ("verification" in item and not isinstance(item["verification"], str))
             ):
                 raise OfflineBackupError("backup rotation entry is invalid")
-            receipt, raw = _control_object(inventory.parent / item["publication"])
+            receipt, raw = _control_object(_rotation_receipt_path(inventory, item["publication"]))
             receipt_hash = hashlib.sha256(raw).hexdigest()
             filename = receipt.get("filename")
             if (
                 receipt.get("schema") != _RECEIPT_SCHEMA or receipt.get("status") != "published_readback"
-                or not isinstance(filename, str) or not filename_pattern.fullmatch(filename)
+                or not isinstance(filename, str) or _rotation_filename_series(filename) != series
                 or filename in rows
                 or not all(_valid_digest(receipt.get(key)) for key in ("ciphertext_sha256", "manifest_sha256", "backup_scope_sha256"))
             ):
                 raise OfflineBackupError("backup rotation publication receipt is invalid or duplicated")
+            if item.get("rollback_window_closed") and not filename.endswith("_pre-upgrade.tar.gz.cms"):
+                raise OfflineBackupError("rollback closure applies only to a pre-upgrade backup")
             if scope is None:
                 scope = receipt["backup_scope_sha256"]
             elif receipt["backup_scope_sha256"] != scope:
@@ -218,7 +249,7 @@ def preview_backup_rotation(
             verified = False
             proof_hash = None
             if "verification" in item:
-                proof, proof_raw = _control_object(inventory.parent / item["verification"])
+                proof, proof_raw = _control_object(_rotation_receipt_path(inventory, item["verification"]))
                 if (
                     proof.get("schema") != _RESTORE_SCHEMA
                     or proof.get("status") != "package_restored_and_verified"
@@ -234,6 +265,7 @@ def preview_backup_rotation(
                 "ciphertext_sha256": receipt["ciphertext_sha256"],
                 "publication_receipt_sha256": receipt_hash, "verification_receipt_sha256": proof_hash,
                 "pinned": item.get("pinned", False), "restore_verified": verified,
+                "rollback_window_closed": item.get("rollback_window_closed", False),
                 "package_identity": _file_identity(package_info),
                 "allocated_file_bytes": package_info.st_blocks * 512,
             }
@@ -255,7 +287,9 @@ def preview_backup_rotation(
             if key not in periods[name] and len(periods[name]) < limits[name]:
                 periods[name].add(key)
                 reasons.append(name)
-        if row["pinned"] or row["filename"].endswith("_pre-upgrade.tar.gz.cms"):
+        if row["pinned"] or (
+            row["filename"].endswith("_pre-upgrade.tar.gz.cms") and not row["rollback_window_closed"]
+        ):
             reasons.append("pinned_or_pre_upgrade")
         if witness is None:
             reasons.append("restore_verification_unavailable")

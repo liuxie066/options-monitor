@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1585 (`src`: 633, `domain`: 99, `scripts`: 33, `tests`: 816)
-- Internal import edges: 14279 total, 4740 production/script edges excluding tests
+- Python files scanned: 1587 (`src`: 634, `domain`: 99, `scripts`: 33, `tests`: 817)
+- Internal import edges: 14286 total, 4743 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -40,7 +40,7 @@ flowchart LR
   domain_services -->|2| storage
   infrastructure -->|47| application
   infrastructure -->|9| domain
-  interfaces -->|260| application
+  interfaces -->|262| application
   interfaces -->|4| domain
   interfaces -->|6| infrastructure
   om_strategy_core -->|9| domain
@@ -51,11 +51,11 @@ flowchart LR
   scripts -->|2| tests
   src -->|1| application
   storage -->|1| domain
-  tests -->|7192| application
+  tests -->|7194| application
   tests -->|779| domain
   tests -->|2| domain_services
   tests -->|511| infrastructure
-  tests -->|533| interfaces
+  tests -->|534| interfaces
   tests -->|14| om_strategy_core
   tests -->|93| scripts
   tests -->|79| storage
@@ -66,7 +66,7 @@ flowchart LR
 | from | to | imports |
 |---|---|---|
 | application | domain | 746 |
-| interfaces | application | 260 |
+| interfaces | application | 262 |
 | application | infrastructure | 237 |
 | scripts | application | 103 |
 | application | storage | 65 |
@@ -90,9 +90,9 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 7192 |
+| tests | application | 7194 |
 | tests | domain | 779 |
-| tests | interfaces | 533 |
+| tests | interfaces | 534 |
 | tests | infrastructure | 511 |
 | tests | scripts | 93 |
 | tests | storage | 79 |
@@ -106,7 +106,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | from | to | imports |
 |---|---|---|
 | src.application | domain.domain | 323 |
-| src.interfaces | src.application | 202 |
+| src.interfaces | src.application | 204 |
 | src.application.ledger | domain.domain | 184 |
 | src.application | src.infrastructure | 168 |
 | scripts | src.application | 83 |

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -411,10 +412,25 @@ def _validate_evidence_identity(
 _STORAGE_ENCODING = "single_funding_input.v1"
 
 
+def _same_json_value(left: Any, right: Any) -> bool:
+    if left is right:
+        return True
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(_same_json_value(value, right[key]) for key, value in left.items())
+    if isinstance(left, list):
+        return len(left) == len(right) and all(_same_json_value(a, b) for a, b in zip(left, right))
+    if isinstance(left, float) and left == right == 0:
+        # JSON preserves the sign spelling for floating-point zero.
+        return str(left) == str(right)
+    return left == right
+
+
 def _encode_snapshot(payload: dict[str, Any]) -> bytes:
     decisions = payload["funding_put_decisions"]
     if not decisions or any(
-        row["normalized_input"] != row["opening_decision"]["normalized_input"]
+        not _same_json_value(row["normalized_input"], row["opening_decision"]["normalized_input"])
         for row in decisions
     ):
         return _canonical_json_bytes(payload)
@@ -679,7 +695,10 @@ def seal_combo_yield_candidate_snapshot(
         expected_run_id=run_id_norm,
         expected_account=account_norm,
     )
-    encoded = _encode_snapshot(payload)
+    encoded = (
+        _encode_snapshot(payload) if os.environ.get("OM_COMBO_SINGLE_FUNDING_INPUT") == "1"
+        else _canonical_json_bytes(payload)
+    )
     try:
         account_dir = (
             Path(base).resolve()
@@ -698,7 +717,9 @@ def seal_combo_yield_candidate_snapshot(
                 name=COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE,
             )
             # Preserve a sealed legacy encoding only for this exact validated payload.
-            if existing != encoded and existing in (_canonical_json_bytes(payload), readable_json_bytes(payload)):
+            if existing != encoded and existing in (
+                _canonical_json_bytes(payload), readable_json_bytes(payload), _encode_snapshot(payload),
+            ):
                 encoded = existing
         write_account_run_state_bytes_once_safely(
             base=Path(base),

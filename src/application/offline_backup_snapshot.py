@@ -162,7 +162,8 @@ def stage_offline_backup(
     atomic_write_private_bytes(destination / _MANIFEST, encoded)
     _sync_directory(destination)
     _sync_directory(destination.parent)
-    verify_offline_backup(root=destination, manifest_sha256=digest)
+    if (destination / _MANIFEST).read_bytes() != encoded:
+        raise OfflineBackupError("snapshot manifest readback mismatch")
     return digest
 
 

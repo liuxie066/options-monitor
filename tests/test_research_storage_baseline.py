@@ -1859,3 +1859,17 @@ def test_strict_scan_blob_retirement_keeps_present_run_and_quote_receipt_referen
     assert [json.loads(line)["status"] for line in receipt.read_text().splitlines()] == [
         "started", "deleting", "removed", "complete",
     ]
+
+
+def test_strict_gc_blocks_nonregular_reference_without_opening_it(tmp_path):
+    root = _make_runtime(tmp_path, with_ledger=False).resolve()
+    _publish_scan_blob(root, "AAA")
+    path = root / "output_runs/old/required_data/source_receipts/quotes/run/symbol/id/payload.json"
+    path.parent.mkdir(parents=True)
+    os.mkfifo(path)
+    result = module.preview_scan_blob_gc(
+        runtime_root=root, now_fn=lambda: datetime(2030, 2, 1, tzinfo=timezone.utc), retired_only=True,
+    )
+    assert result["deletion_allowed"] is False
+    assert result["candidates"] == []
+    assert any(row["reason"] == "nonregular_reference" for row in result["blockers"])

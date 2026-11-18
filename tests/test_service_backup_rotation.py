@@ -185,3 +185,26 @@ def test_partial_new_backup_cannot_replace_full_recovery_scope(rotation):
     with pytest.raises(OfflineBackupError, match="different recovery scopes"):
         service_backup.preview_backup_rotation(**args)
     assert len(list(args["target"].iterdir())) == 12
+
+
+def test_pre_upgrade_rotation_requires_explicit_closed_window(rotation):
+    args, names = rotation
+    first = service_backup.preview_backup_rotation(**args)
+    assert names[11] not in first["deletion_candidates"]
+    payload = json.loads(args["inventory"].read_bytes())
+    payload["entries"][11]["rollback_window_closed"] = True
+    args["inventory"].write_text(json.dumps(payload))
+    closed = service_backup.preview_backup_rotation(**args)
+    assert names[11] in closed["deletion_candidates"]
+    assert closed["plan_sha256"] != first["plan_sha256"]
+
+
+@pytest.mark.parametrize("field", ["publication", "verification"])
+@pytest.mark.parametrize("path", ["/absolute/path.json", "../outside.json"])
+def test_rotation_rejects_nonportable_receipt_paths(rotation, field, path):
+    args, _ = rotation
+    payload = json.loads(args["inventory"].read_bytes())
+    payload["entries"][1][field] = path
+    args["inventory"].write_text(json.dumps(payload))
+    with pytest.raises(OfflineBackupError, match="relative to the inventory directory"):
+        service_backup.preview_backup_rotation(**args)

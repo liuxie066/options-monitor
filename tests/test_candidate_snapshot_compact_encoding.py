@@ -93,7 +93,8 @@ def test_retry_does_not_adopt_conflicting_or_unsafe_file(tmp_path, monkeypatch, 
         assert path.is_symlink()
 
 
-def test_compact_snapshot_manifest_and_independent_archive_restore(tmp_path, owner):
+def test_compact_snapshot_manifest_and_independent_archive_restore(tmp_path, owner, monkeypatch):
+    monkeypatch.setenv("OM_COMBO_SINGLE_FUNDING_INPUT", "1")
     name, _, seal, load, filename, _ = owner
     source = tmp_path / "source"
     source.mkdir()
@@ -140,7 +141,8 @@ def test_compact_snapshot_manifest_and_independent_archive_restore(tmp_path, own
 
 
 @pytest.mark.parametrize("pretty", [False, True])
-def test_combo_single_input_round_trips_and_preserves_existing_bytes(tmp_path, pretty):
+def test_combo_single_input_round_trips_and_preserves_existing_bytes(tmp_path, pretty, monkeypatch):
+    monkeypatch.setenv("OM_COMBO_SINGLE_FUNDING_INPUT", "1")
     kwargs = {"funding_put_decisions": [_funding_put_decision()]}
     fresh = tmp_path
     logical = seal_sp_lc(fresh, sealed_at=SEALED_AT, **kwargs)
@@ -154,6 +156,9 @@ def test_combo_single_input_round_trips_and_preserves_existing_bytes(tmp_path, p
     assert sp_lc.load_combo_yield_candidate_snapshot(base=fresh, run_id="run-1", account="lx") == logical
     assert seal_sp_lc(fresh, sealed_at=SEALED_AT, **kwargs) == logical
     assert target.read_bytes() == compact
+    monkeypatch.delenv("OM_COMBO_SINGLE_FUNDING_INPUT")
+    assert seal_sp_lc(fresh, sealed_at=SEALED_AT, **kwargs) == logical
+    assert target.read_bytes() == compact
     legacy = readable_json_bytes(logical) if pretty else canonical_json_bytes_lines(logical)
     target.write_bytes(legacy)
     assert seal_sp_lc(fresh, sealed_at=SEALED_AT, **kwargs) == logical
@@ -163,3 +168,21 @@ def test_combo_single_input_round_trips_and_preserves_existing_bytes(tmp_path, p
     target.write_bytes(canonical_json_bytes_lines(raw))
     with pytest.raises(sp_lc.ComboYieldCandidateSnapshotError):
         sp_lc.load_combo_yield_candidate_snapshot(base=fresh, run_id="run-1", account="lx")
+
+
+def test_combo_snapshot_preserves_distinct_json_number_types(tmp_path, monkeypatch):
+    monkeypatch.setenv("OM_COMBO_SINGLE_FUNDING_INPUT", "1")
+    row = _funding_put_decision()
+    row["normalized_input"]["strike"] = 100
+    assert type(row["opening_decision"]["normalized_input"]["strike"]) is float
+    payload = seal_sp_lc(tmp_path, sealed_at=SEALED_AT, funding_put_decisions=[row])
+    file = tmp_path / "output_runs/run-1/accounts/lx/state" / sp_lc.COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE
+    assert "storage_encoding" not in json.loads(file.read_bytes())
+    assert type(payload["funding_put_decisions"][0]["normalized_input"]["strike"]) is int
+
+
+def test_combo_new_snapshot_defaults_to_full_rollback_compatible_encoding(tmp_path, monkeypatch):
+    monkeypatch.delenv("OM_COMBO_SINGLE_FUNDING_INPUT", raising=False)
+    payload = seal_sp_lc(tmp_path, sealed_at=SEALED_AT, funding_put_decisions=[_funding_put_decision()])
+    file = tmp_path / "output_runs/run-1/accounts/lx/state" / sp_lc.COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE
+    assert file.read_bytes() == canonical_json_bytes_lines(payload)

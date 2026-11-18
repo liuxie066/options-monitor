@@ -125,14 +125,17 @@ def publish_encrypted_backup(
 def restore_encrypted_backup(
     *, package: Path, ciphertext_sha256: str, manifest_sha256: str,
     destination: Path, private_key: Path, max_bytes: int, max_files: int, timeout: float,
+    max_ciphertext_bytes: int | None = None,
 ) -> None:
     """Recover and verify a new private directory using a trusted receipt."""
+    ciphertext_limit = max_bytes if max_ciphertext_bytes is None else max_ciphertext_bytes
     if (
         type(max_bytes) is not int or max_bytes <= 0
+        or type(ciphertext_limit) is not int or not 0 < ciphertext_limit <= max_bytes
         or type(max_files) is not int or max_files <= 0
         or destination != destination.resolve()
         or package.is_symlink() or not package.is_file()
-        or package.stat().st_size > max_bytes
+        or package.stat().st_size > ciphertext_limit
         or _digest(package) != ciphertext_sha256
     ):
         raise OfflineBackupError("encrypted backup package identity or budget mismatch")

@@ -55,6 +55,9 @@ def test_encrypted_publish_and_independent_restore(tmp_path: Path, monkeypatch: 
     with pytest.raises(OfflineBackupError, match="restore budget"):
         restore_encrypted_backup(**{**restore_args, "max_files": 1}, destination=restored)
     assert not restored.exists()
+    with pytest.raises(OfflineBackupError, match="identity or budget"):
+        restore_encrypted_backup(**restore_args, max_ciphertext_bytes=1, destination=restored)
+    assert not restored.exists()
     restore_encrypted_backup(**restore_args, destination=restored)
     assert (restored / "config.yaml").read_bytes() == b"secret: isolated-test-value\n"
     raw = package.read_bytes()
@@ -105,6 +108,16 @@ def test_service_backup_commands_persist_independent_receipts(
     assert main(command) == 2
     assert not receipt.exists() and list(mount.iterdir()) == []
     capsys.readouterr()
+    collision = command.copy()
+    collision[collision.index("--receipt") + 1] = str(mount / filename)
+    assert main([*collision, "--writers-stopped"]) == 2
+    assert list(mount.iterdir()) == []
+    capsys.readouterr()
+    invalid = command.copy()
+    invalid[invalid.index("--filename") + 1] = "cannot-rotate.tar.gz.cms"
+    assert main([*invalid, "--writers-stopped"]) == 2
+    assert list(mount.iterdir()) == [] and list(staging.iterdir()) == []
+    capsys.readouterr()
     assert main([*command, "--writers-stopped"]) == 0
     published = json.loads(receipt.read_bytes())
     assert published["status"] == "published_readback"
@@ -115,7 +128,8 @@ def test_service_backup_commands_persist_independent_receipts(
     assert main([
         "service", "restore-backup", "--package", str(mount / filename),
         "--receipt", str(receipt), "--verification-receipt", str(verified),
-        "--destination", str(restored), "--private-key", str(key), "--max-files", "2", *common,
+        "--destination", str(restored), "--private-key", str(key), "--max-files", "2",
+        "--max-ciphertext-bytes", "50000", *common,
     ]) == 0
     restored_receipt = json.loads(verified.read_bytes())
     assert restored_receipt["status"] == "package_restored_and_verified"

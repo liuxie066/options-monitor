@@ -281,6 +281,13 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
     )
     pull.add_argument("--write", action="store_true", help="execute rsync and write local sync/verify manifests")
 
+    layout = archive_commands.add_parser("layout", help="show a canonical archive path without writing")
+    layout.add_argument("--kind", choices=("research", "incidents", "maintenance"), required=True)
+    layout.add_argument("--when", required=True)
+    layout.add_argument("--batch-id", required=True)
+    layout.add_argument("--market")
+    layout.add_argument("--dataset")
+
     verify = archive_commands.add_parser(
         "verify", help="check local archive structure without changing source verification evidence"
     )
@@ -649,6 +656,17 @@ def handle_research_command(
                 output_dir=Path(args.output_dir),
             )
             return build_response(tool_name="research.archive.series-export", ok=True, data=data)
+        if args.archive_command == "layout":
+            from src.application.storage_layout import plan_archive_layout
+
+            try:
+                data = plan_archive_layout(
+                    kind=args.kind, when=args.when, batch_id=args.batch_id,
+                    market=args.market, dataset=args.dataset,
+                )
+            except ValueError as exc:
+                raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
+            return build_response(tool_name="research.archive.layout", ok=True, data=data)
         from src.application.research.archive import (
             archive_inventory,
             archive_prune_remote,

@@ -530,9 +530,13 @@ def _gc_file_inventory(
             research_files=[],
             symlinks=symlinks,
             inventory_files=rows,
+            strict_gc=retained_run_ids is None,
         )
         for item in symlinks:
             relpath = str(item["path"])
+            if item["kind"] == "nonregular_reference":
+                blockers.append(_gc_blocker(reason="nonregular_reference", path=relpath))
+                continue
             protected_manifest = _is_manifest_relpath(relpath) and _gc_manifest_is_protected(
                 relpath,
                 retained_run_ids=retained_run_ids,
@@ -1267,6 +1271,7 @@ def _scan_runtime_directory(
     research_files: list[dict[str, Any]],
     symlinks: list[dict[str, Any]],
     inventory_files: list[dict[str, Any]] | None = None,
+    strict_gc: bool = False,
 ) -> None:
     stack = [directory]
     while stack:
@@ -1278,6 +1283,11 @@ def _scan_runtime_directory(
                 relpath = relative.as_posix()
                 if entry.is_symlink():
                     symlinks.append({"path": relpath, "kind": "entry"})
+                    continue
+                if strict_gc and (
+                    _is_manifest_relpath(relpath) or _is_scan_quote_payload(relpath)
+                ) and not entry.is_file(follow_symlinks=False):
+                    symlinks.append({"path": relpath, "kind": "nonregular_reference"})
                     continue
                 if entry.is_dir(follow_symlinks=False):
                     stack.append(path)

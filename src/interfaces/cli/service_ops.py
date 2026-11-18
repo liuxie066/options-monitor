@@ -35,6 +35,7 @@ from src.application.service_upgrade import (
     service_upgrade_check,
     service_upgrade_verify,
 )
+from src.application.storage_layout import plan_backup_layout
 from src.application.write_contract import attach_write_contract
 
 
@@ -214,6 +215,12 @@ def add_service_update_commands(subparsers: Any) -> None:
         action="store_true",
         help="non-interactive confirmation; emits an audit_id",
     )
+    layout = service_sub.add_parser("backup-layout", help="show canonical backup paths without writing")
+    layout.add_argument("--series", required=True)
+    layout.add_argument("--purpose", choices=("full", "pre-upgrade"), default="full")
+    for name in ("timestamp", "restored-at", "retired-at", "plan-sha256"):
+        layout.add_argument(f"--{name}")
+
     backup = service_sub.add_parser("backup", help="publish an encrypted backup from stopped input")
     for name in ("source", "file-list", "staging-root", "target", "mount", "recipient-cert", "receipt"):
         backup.add_argument(f"--{name}", type=Path, required=True)
@@ -224,6 +231,7 @@ def add_service_update_commands(subparsers: Any) -> None:
     for name in ("package", "receipt", "verification-receipt", "destination", "private-key"):
         restore.add_argument(f"--{name}", type=Path, required=True)
     restore.add_argument("--max-files", type=int, required=True)
+    restore.add_argument("--max-ciphertext-bytes", type=int, required=True)
     for parser in (backup, restore):
         parser.add_argument("--max-bytes", type=int, required=True)
         parser.add_argument("--timeout", type=float, required=True)
@@ -392,6 +400,16 @@ def handle_service_update_command(
     service_upgrade_fn: Callable[..., dict[str, Any]] = service_upgrade,
     service_rollback_fn: Callable[..., dict[str, Any]] = service_rollback,
 ) -> dict[str, Any]:
+    if args.command == "service" and args.service_command == "backup-layout":
+        try:
+            data = plan_backup_layout(
+                series=args.series, purpose=args.purpose, timestamp=args.timestamp,
+                restored_at=args.restored_at, retired_at=args.retired_at, plan_sha256=args.plan_sha256,
+            )
+        except ValueError as exc:
+            raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
+        return build_response(tool_name="service.backup-layout", ok=True, data=data)
+
     if args.command == "service" and args.service_command in {"backup", "restore-backup", "backup-rotation-preview", "backup-retire"}:
         try:
             if args.service_command == "backup":
@@ -416,7 +434,7 @@ def handle_service_update_command(
                 data = restore_service_backup(
                     package=args.package, receipt_path=args.receipt, verification_receipt=args.verification_receipt,
                     destination=args.destination, private_key=args.private_key, max_bytes=args.max_bytes,
-                    max_files=args.max_files, timeout=args.timeout,
+                    max_files=args.max_files, max_ciphertext_bytes=args.max_ciphertext_bytes, timeout=args.timeout,
                 )
         except OfflineBackupError as exc:
             raise AgentToolError(code="BACKUP_OPERATION_FAILED", message=str(exc)) from exc

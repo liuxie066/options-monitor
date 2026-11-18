@@ -231,6 +231,19 @@ Daily Brief 是普通调度通知的权威读取面。普通 scan / Tick 不再�
 
 ### 备份与隔离恢复（手动）
 
+先用只读规划命令生成相对于备份盘根的路径：
+
+```sh
+./om service backup-layout --series example-host \
+  --timestamp 2026-11-18T021500Z --purpose full
+./om research archive layout --kind research \
+  --when 2026-11-17 --market us --dataset watchlist --batch-id batch-001
+```
+
+第一个命令返回包名、`packages/` 目标、回执路径和轮换清单条目。传 `--restored-at` 生成
+恢复回执路径，传 `--retired-at` 和 `--plan-sha256` 生成退役回执路径。第二个命令返回
+可交给归档工具的 `archive_root`。执行时以已确认的挂载根解析列出的 `OM/...` 路径。规划命令不会创建目录。
+
 `om service backup` 接收已经停写的目录。操作方须负责阻止新写入、等待在途工作、
 检查点和复原原有服务状态。命令不管理这些服务；手动入口尚无独立快照交接，应在命令结束后复原写入。使用相对路径到 `sqlite` 或 `file`
 的 JSON 映射作为 `--file-list`，例如 `{"state/example.sqlite3":"sqlite","config.yaml":"file"}`。
@@ -239,12 +252,14 @@ Daily Brief 是普通调度通知的权威读取面。普通 scan / Tick 不再�
 备份命令显式传 `--source`、`--file-list`、`--writers-stopped`、`--staging-root`、
 `--mount`、`--target`、`--expected-device`、`--filename`、`--recipient-cert`、
 `--receipt`、`--max-bytes` 和 `--timeout`。目标必须是已挂载卷中的现存目录，
-设备号须来自已确认的预期卷，文件名以 `.tar.gz.cms` 结尾。暂存应在源树和备份挂载之外。
+设备号须来自已确认的预期卷，文件名必须符合[备份盘目录与命名](docs/STORAGE_LIFECYCLE_DESIGN.md#备份盘目录与命名)，才能纳入轮换。暂存应在源树和备份挂载之外。
 备份端只需接收方证书。
 
 `om service restore-backup` 使用 `--package`、可信的 `--receipt`、`--private-key`、
 新的 `--destination`、新的 `--verification-receipt`、`--max-bytes`、
-`--max-files` 和 `--timeout`。它只把数据恢复到新目录并检查完整性，生产接管另行验证。
+`--max-files`、`--max-ciphertext-bytes` 和 `--timeout`。密文上限须按恢复主机实测内存设置；
+OpenSSL CMS 的解密内存随密文大小增长，不要按流式压缩的固定开销估算。它只把数据恢复到
+新目录并检查完整性，生产接管另行验证。
 发布与验证回执均不覆盖同名文件。包已写入但回执未确认时，先独立核查包及回执，
 不要据此轮换旧备份或盲目重试。
 
@@ -259,13 +274,16 @@ Daily Brief 是普通调度通知的权威读取面。普通 scan / Tick 不再�
   "schema": "om_backup_rotation_inventory.v1",
   "series": "example-host",
   "entries": [
-    {"publication": "published.json", "verification": "verified.json", "pinned": true}
+    {
+      "publication": "receipts/2026-11-18T021500Z_example-host_full.published.json",
+      "verification": "receipts/2026-11-18T021500Z_example-host_full.restored.2026-11-18T030000Z.json"
+    }
   ]
 }
 ```
 
-回执路径可相对清单目录。预览用 UTC 快照日期保留最近 7 个成功日期、4 个成功备份周、
-3 个成功备份月，并额外保护锁定及升级前包。最新独立恢复验证及对应密文读回都匹配时，
+回执路径必须相对清单目录，例如 `receipts/xxx.published.json`。预览用 UTC 快照日期保留最近 7 个成功日期、4 个成功备份周、
+3 个成功备份月，并额外保护锁定及仍在回滚窗口的升级前包。只有验收结束并确认回滚窗口关闭后，才可为升级前包填入 `"rollback_window_closed": true`，使其重新参与日、周、月轮换。最新独立恢复验证及对应密文读回都匹配时，
 才列出比该恢复点更旧的候选。同一份可同时满足多个窗口。未列入清单的文件不参与，
 本命令只返回候选、占用估计和计划摘要。
 
