@@ -1,0 +1,199 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.44",
+  "base": {
+    "tag": "v4.6.43",
+    "commit": "ec2f770e81d013d9eee7e7df6d54fbd022b8dc9d"
+  },
+  "reviewed_head": "7b1993113d9a9cebdb0c9f70637c7fd821e79f86",
+  "commits": [
+    {
+      "sha": "ac9cd6fac235066fce662610ef13be3e1dbf3e27",
+      "subject": "Measure scan artifact storage by type"
+    },
+    {
+      "sha": "8258f73ce1ed11844e81d0c2e861c0c63e878871",
+      "subject": "Store combo funding input once"
+    },
+    {
+      "sha": "10e4757ce39c023e5775933f34d955efe76e9696",
+      "subject": "Stage and verify offline OM backup snapshots"
+    },
+    {
+      "sha": "cc96223956199426afdbe8ab80130ad8bf459a22",
+      "subject": "Publish and restore encrypted OM backup packages"
+    },
+    {
+      "sha": "b05b76911cb7d205ab622aa01f5e54e0095e9bee",
+      "subject": "Expose manual backup and restore with durable receipts"
+    },
+    {
+      "sha": "1ecda247655b66899008da6995054a6a82a0c740",
+      "subject": "Preview backup rotation against verified recovery points"
+    },
+    {
+      "sha": "1ec7a7427ab09d13313e1cc5e6f532573948b69c",
+      "subject": "Retire exact confirmed backup rotation candidates"
+    },
+    {
+      "sha": "e9bedb44c21e8039259dc50c410e6659aee42671",
+      "subject": "Retire only unreferenced scan blobs from stopped runtimes"
+    },
+    {
+      "sha": "e7387e6611b952dcd14fc27525bcf7aae2536eca",
+      "subject": "Bind backup retirement to the exact recovery scope"
+    },
+    {
+      "sha": "1dc24ddb8f463ad8ac0896010a754812fe36526f",
+      "subject": "Preserve the default storage GC preview call"
+    },
+    {
+      "sha": "4bf978f4746f3f0e6abfaf19d292ac357c44c3bb",
+      "subject": "Harden storage recovery and standardize portable backup paths"
+    },
+    {
+      "sha": "9d88d6c457e33d4598d4679bfaaba89ef1aa2916",
+      "subject": "Preserve archive manifest rejection text"
+    },
+    {
+      "sha": "7b1993113d9a9cebdb0c9f70637c7fd821e79f86",
+      "subject": "Merge pull request #1214 from liuxie066/cindy/fierce-jepsen"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "新增手动离线备份和恢复：按文件清单打包，发布加密恢复点，读回校验并分别保存备份、恢复回执；可用相对于卷根的 OM 路径规划外接盘备份和扫描归档。（#1214）",
+      "commits": [
+        "10e4757ce39c023e5775933f34d955efe76e9696",
+        "cc96223956199426afdbe8ab80130ad8bf459a22",
+        "b05b76911cb7d205ab622aa01f5e54e0095e9bee",
+        "4bf978f4746f3f0e6abfaf19d292ac357c44c3bb",
+        "7b1993113d9a9cebdb0c9f70637c7fd821e79f86"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "新增备份轮换预览和精确退役，要求同一备份范围的独立恢复证据，并记录删除回执；扫描共享对象仅在停写后按严格预览回收无引用对象。（#1214）",
+      "commits": [
+        "1ecda247655b66899008da6995054a6a82a0c740",
+        "1ec7a7427ab09d13313e1cc5e6f532573948b69c",
+        "e9bedb44c21e8039259dc50c410e6659aee42671",
+        "e7387e6611b952dcd14fc27525bcf7aae2536eca",
+        "1dc24ddb8f463ad8ac0896010a754812fe36526f",
+        "4bf978f4746f3f0e6abfaf19d292ac357c44c3bb"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "组合快照只保存一份规范化融资输入，继续读取既有格式；新增按扫描产物类型统计文件数、逻辑大小与磁盘分配块，便于核对空间变化。（#1214）",
+      "commits": [
+        "ac9cd6fac235066fce662610ef13be3e1dbf3e27",
+        "8258f73ce1ed11844e81d0c2e861c0c63e878871"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "修正扫描归档的引用和清单校验，保护仍被保留批次或行情回执引用的共享对象，并保留清单被拒绝时原有的诊断文案。（#1214）",
+      "commits": [
+        "e9bedb44c21e8039259dc50c410e6659aee42671",
+        "4bf978f4746f3f0e6abfaf19d292ac357c44c3bb",
+        "9d88d6c457e33d4598d4679bfaaba89ef1aa2916"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "ac9cd6fac235066fce662610ef13be3e1dbf3e27",
+      "references": [
+        "docs/STORAGE_LIFECYCLE_DESIGN.md",
+        "https://github.com/liuxie066/options-monitor/pull/1214"
+      ]
+    },
+    {
+      "commit": "8258f73ce1ed11844e81d0c2e861c0c63e878871",
+      "references": [
+        "docs/STORAGE_LIFECYCLE_DESIGN.md",
+        "https://github.com/liuxie066/options-monitor/pull/1214"
+      ]
+    },
+    {
+      "commit": "10e4757ce39c023e5775933f34d955efe76e9696",
+      "references": [
+        "docs/STORAGE_LIFECYCLE_DESIGN.md",
+        "https://github.com/liuxie066/options-monitor/pull/1214"
+      ]
+    },
+    {
+      "commit": "cc96223956199426afdbe8ab80130ad8bf459a22",
+      "references": [
+        "docs/STORAGE_LIFECYCLE_DESIGN.md",
+        "https://github.com/liuxie066/options-monitor/pull/1214"
+      ]
+    },
+    {
+      "commit": "b05b76911cb7d205ab622aa01f5e54e0095e9bee",
+      "references": [
+        "docs/STORAGE_LIFECYCLE_DESIGN.md",
+        "https://github.com/liuxie066/options-monitor/pull/1214"
+      ]
+    },
+    {
+      "commit": "1ecda247655b66899008da6995054a6a82a0c740",
+      "references": [
+        "docs/STORAGE_LIFECYCLE_DESIGN.md",
+        "https://github.com/liuxie066/options-monitor/pull/1214"
+      ]
+    },
+    {
+      "commit": "1ec7a7427ab09d13313e1cc5e6f532573948b69c",
+      "references": [
+        "docs/STORAGE_LIFECYCLE_DESIGN.md",
+        "https://github.com/liuxie066/options-monitor/pull/1214"
+      ]
+    },
+    {
+      "commit": "e9bedb44c21e8039259dc50c410e6659aee42671",
+      "references": [
+        "docs/STORAGE_LIFECYCLE_DESIGN.md",
+        "https://github.com/liuxie066/options-monitor/pull/1214"
+      ]
+    },
+    {
+      "commit": "e7387e6611b952dcd14fc27525bcf7aae2536eca",
+      "references": [
+        "docs/STORAGE_LIFECYCLE_DESIGN.md",
+        "https://github.com/liuxie066/options-monitor/pull/1214"
+      ]
+    },
+    {
+      "commit": "1dc24ddb8f463ad8ac0896010a754812fe36526f",
+      "references": [
+        "docs/STORAGE_LIFECYCLE_DESIGN.md",
+        "https://github.com/liuxie066/options-monitor/pull/1214"
+      ]
+    },
+    {
+      "commit": "4bf978f4746f3f0e6abfaf19d292ac357c44c3bb",
+      "references": [
+        "docs/STORAGE_LIFECYCLE_DESIGN.md",
+        "https://github.com/liuxie066/options-monitor/pull/1214"
+      ]
+    },
+    {
+      "commit": "9d88d6c457e33d4598d4679bfaaba89ef1aa2916",
+      "references": [
+        "docs/STORAGE_LIFECYCLE_DESIGN.md",
+        "https://github.com/liuxie066/options-monitor/pull/1214"
+      ]
+    },
+    {
+      "commit": "7b1993113d9a9cebdb0c9f70637c7fd821e79f86",
+      "references": [
+        "docs/STORAGE_LIFECYCLE_DESIGN.md",
+        "https://github.com/liuxie066/options-monitor/pull/1214"
+      ]
+    }
+  ]
+}
