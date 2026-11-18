@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import fcntl
 import hashlib
 import json
 import os
@@ -222,8 +223,7 @@ def preview_backup_rotation(
                 "ciphertext_sha256": receipt["ciphertext_sha256"],
                 "publication_receipt_sha256": receipt_hash, "verification_receipt_sha256": proof_hash,
                 "pinned": item.get("pinned", False), "restore_verified": verified,
-                "package_identity": [package_info.st_dev, package_info.st_ino, package_info.st_size,
-                                     package_info.st_mtime_ns, package_info.st_ctime_ns],
+                "package_identity": _file_identity(package_info),
                 "allocated_file_bytes": package_info.st_blocks * 512,
             }
         ordered = sorted(rows.values(), key=lambda row: (row["snapshot_at_utc"], row["filename"]), reverse=True)
@@ -231,21 +231,7 @@ def preview_backup_rotation(
         if witness:
             if witness["package_identity"][2] > max_verify_bytes:
                 raise OfflineBackupError("verified backup exceeds readback byte budget")
-            with os.fdopen(os.open(witness["filename"], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd), "rb") as handle:
-                info = os.fstat(handle.fileno())
-                current = [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
-                if current != witness["package_identity"]:
-                    raise OfflineBackupError("verified backup changed")
-                digest = hashlib.sha256()
-                remaining = info.st_size
-                while remaining:
-                    block = handle.read(min(1024 * 1024, remaining))
-                    if not block:
-                        raise OfflineBackupError("verified backup was truncated")
-                    remaining -= len(block)
-                    digest.update(block)
-                if digest.hexdigest() != witness["ciphertext_sha256"] or os.fstat(handle.fileno()).st_ctime_ns != info.st_ctime_ns:
-                    raise OfflineBackupError("verified backup readback mismatch")
+            _verify_rotation_package(fd, witness, mismatch="verified backup readback mismatch")
 
     periods: dict[str, set] = {"daily": set(), "weekly": set(), "monthly": set()}
     limits = {"daily": 7, "weekly": 4, "monthly": 3}
@@ -276,3 +262,99 @@ def preview_backup_rotation(
     }
     plan["plan_sha256"] = hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return plan
+
+
+def _file_identity(info: os.stat_result) -> list[int]:
+    return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+
+
+def _require_rotation_identity(fd: int, row: dict[str, Any]) -> None:
+    info = os.stat(row["filename"], dir_fd=fd, follow_symlinks=False)
+    if not stat.S_ISREG(info.st_mode) or _file_identity(info) != row["package_identity"]:
+        raise OfflineBackupError("backup rotation package changed")
+
+
+def _verify_rotation_package(fd: int, row: dict[str, Any], *, mismatch: str) -> None:
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    with os.fdopen(os.open(row["filename"], flags, dir_fd=fd), "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or _file_identity(info) != row["package_identity"]:
+            raise OfflineBackupError("backup rotation package changed")
+        digest = hashlib.sha256()
+        remaining = info.st_size
+        while remaining:
+            block = handle.read(min(1024 * 1024, remaining))
+            if not block:
+                raise OfflineBackupError("backup rotation package was truncated")
+            remaining -= len(block)
+            digest.update(block)
+        if digest.hexdigest() != row["ciphertext_sha256"] or _file_identity(os.fstat(handle.fileno())) != row["package_identity"]:
+            raise OfflineBackupError(mismatch)
+
+
+def retire_backup_rotation(
+    *, inventory: Path, target: Path, mount: Path, expected_device: int,
+    max_verify_bytes: int, expected_plan_sha256: str, receipt_path: Path, confirm: bool,
+) -> dict[str, Any]:
+    """Delete only exact proven candidates on a controlled backup receiver."""
+    if confirm is not True or not _valid_digest(expected_plan_sha256):
+        raise OfflineBackupError("rotation requires confirmation and the exact preview digest")
+    receipt_path = _new_receipt_path(receipt_path)
+    target, mount = target.absolute(), mount.absolute()
+    if receipt_path.is_relative_to(target):
+        raise OfflineBackupError("retirement receipt must be outside the backup target directory")
+    names: list[str] = []
+    with _mounted_target(mount, target, expected_device) as fd:
+        # Operators retire packages via this entry point. Published files are immutable
+        # and the receiver must exclude writers that can replace or delete these names.
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        plan = preview_backup_rotation(
+            inventory=inventory, target=target, mount=mount, expected_device=expected_device,
+            max_verify_bytes=max_verify_bytes,
+        )
+        if plan["plan_sha256"] != expected_plan_sha256 or plan["target_inode"] != os.fstat(fd).st_ino:
+            raise OfflineBackupError("rotation preview changed; generate a new preview")
+        names = plan["deletion_candidates"]
+        if not names:
+            raise OfflineBackupError("rotation preview has no eligible packages")
+
+        by_name = {row["filename"]: row for row in plan["entries"]}
+        witness = by_name[plan["minimum_restorable_backup"]]
+        if witness["package_identity"][2] + sum(by_name[n]["package_identity"][2] for n in names) > max_verify_bytes:
+            raise OfflineBackupError("rotation readback exceeds aggregate verification byte budget")
+        for name in names:
+            _verify_rotation_package(fd, by_name[name], mismatch="rotation candidate readback mismatch")
+        _require_rotation_identity(fd, witness)
+
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        with os.fdopen(os.open(receipt_path, flags, 0o600), "w", encoding="utf-8") as journal:
+            def write(status: str, **fields: Any) -> None:
+                journal.write(json.dumps({"status": status, "at_utc": _utc_now(), **fields}, sort_keys=True) + "\n")
+                journal.flush()
+                os.fsync(journal.fileno())
+
+            write("started", plan_sha256=expected_plan_sha256, target=str(target), candidates=names,
+                  retained_restore=witness["filename"])
+            receipt_dir = os.open(receipt_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(receipt_dir)
+            finally:
+                os.close(receipt_dir)
+
+            for name in names:
+                _require_rotation_identity(fd, witness)
+                _require_rotation_identity(fd, by_name[name])
+                write("deleting", filename=name, package_identity=by_name[name]["package_identity"])
+                os.unlink(name, dir_fd=fd)
+                os.fsync(fd)
+                try:
+                    os.stat(name, dir_fd=fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise OfflineBackupError("rotation package removal could not be confirmed")
+                write("removed", filename=name)
+            _require_rotation_identity(fd, witness)
+            write("complete", removed_count=len(names))
+    return {"status": "complete", "plan_sha256": expected_plan_sha256, "removed": names,
+            "receipt": str(receipt_path)}

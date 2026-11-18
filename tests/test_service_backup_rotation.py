@@ -107,3 +107,64 @@ def test_rotation_refuses_mixing_series_and_respects_pins(rotation):
     args["inventory"].write_text(json.dumps(payload))
     with pytest.raises(OfflineBackupError, match="publication receipt"):
         service_backup.preview_backup_rotation(**args)
+
+
+def test_retire_binds_preview_and_never_removes_recovery_point(rotation, tmp_path):
+    args, names = rotation
+    expected = service_backup.preview_backup_rotation(**args)["plan_sha256"]
+    receipt = tmp_path / "retirement.jsonl"
+    apply = {**args, "expected_plan_sha256": expected, "receipt_path": receipt}
+    with pytest.raises(OfflineBackupError, match="requires confirmation"):
+        service_backup.retire_backup_rotation(**apply, confirm=False)
+    assert not receipt.exists()
+    with pytest.raises(OfflineBackupError, match="preview changed"):
+        service_backup.retire_backup_rotation(**{**apply, "expected_plan_sha256": "0" * 64}, confirm=True)
+    assert not receipt.exists()
+
+    result = service_backup.retire_backup_rotation(**apply, confirm=True)
+    assert result["removed"] == names[7:11]
+    assert {p.name for p in args["target"].iterdir()} == set(names[:7] + names[11:])
+    events = [json.loads(line) for line in receipt.read_text().splitlines()]
+    assert [x["status"] for x in events] == ["started"] + ["deleting", "removed"] * 4 + ["complete"]
+    assert events[0]["retained_restore"] == names[1]
+    assert events[-1]["removed_count"] == 4
+    with pytest.raises(OfflineBackupError, match="new path"):
+        service_backup.retire_backup_rotation(**apply, confirm=True)
+
+
+def test_retire_rejects_fresh_plan_if_candidate_content_is_wrong(rotation, tmp_path):
+    args, names = rotation
+    bad = args["target"] / names[10]
+    bad.write_bytes(b"not the expected data")
+    expected = service_backup.preview_backup_rotation(**args)["plan_sha256"]
+    receipt = tmp_path / "retirement.jsonl"
+    with pytest.raises(OfflineBackupError, match="candidate readback mismatch"):
+        service_backup.retire_backup_rotation(
+            **args, expected_plan_sha256=expected, receipt_path=receipt, confirm=True,
+        )
+    assert not receipt.exists()
+    assert len(list(args["target"].iterdir())) == 12
+
+
+def test_interrupted_retirement_leaves_durable_progress(rotation, tmp_path, monkeypatch):
+    args, names = rotation
+    expected = service_backup.preview_backup_rotation(**args)["plan_sha256"]
+    receipt = tmp_path / "retirement.jsonl"
+    original = service_backup.os.unlink
+
+    def interrupted(path, *a, **kw):
+        if path == names[8]:
+            raise OSError("injected failure")
+        return original(path, *a, **kw)
+
+    with monkeypatch.context() as ctx:
+        ctx.setattr(service_backup.os, "unlink", interrupted)
+        with pytest.raises(OSError, match="injected failure"):
+            service_backup.retire_backup_rotation(
+                **args, expected_plan_sha256=expected, receipt_path=receipt, confirm=True,
+            )
+    events = [json.loads(line) for line in receipt.read_text().splitlines()]
+    assert [x["status"] for x in events] == ["started", "deleting", "removed", "deleting"]
+    assert not (args["target"] / names[7]).exists()
+    assert (args["target"] / names[8]).exists()
+    assert (args["target"] / names[1]).exists()
