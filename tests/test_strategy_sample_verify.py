@@ -233,12 +233,13 @@ def test_ranking_mismatch_and_ambiguous_tail(tmp_path, contexts):
     assert any(c["category"] == "ranking" and c["status"] == "mismatched" for c in result["checks"])
 
 
-def test_projection_fact_drift(tmp_path, contexts):
+def test_duplicate_projection_fact_drift_is_rejected(tmp_path, contexts):
+    from src.application.candidate_snapshot_manifest import CandidateSnapshotManifestError
+
     payload = seal(tmp_path, [candidate()])
-    payload["ranked_candidates"][0]["facts"]["max_new_contracts"] = 999
-    write_changed(tmp_path, payload)
-    result = verify(tmp_path)
-    assert any(c["category"] == "ranking_facts" and c["status"] == "mismatched" for c in result["checks"])
+    payload["ranked_candidates"][0]["facts"] = {"max_new_contracts": 999}
+    with pytest.raises(CandidateSnapshotManifestError):
+        write_changed(tmp_path, payload)
 
 
 def test_cli_json_gap_exit_code(tmp_path):
@@ -745,7 +746,7 @@ def test_old_template_snapshot_remains_readable_but_cannot_execute(tmp_path, con
             for child in value: old_identity(child)
     old_identity(payload)
     for decision in payload['candidate_decisions']:
-        decision['normalized_input_hash']=canonical_sha256(decision['normalized_input'])
+        decision['normalized_input_hash']=canonical_sha256(decision['opening_decision']['normalized_input'])
         decision['decision_hash']=canonical_sha256(decision['opening_decision'])
         for ranked in [*payload['ranked_candidates'], *payload['scope_results']]:
             if ranked.get('candidate_id')==decision['candidate_id']:

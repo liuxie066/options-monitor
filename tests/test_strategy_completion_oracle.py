@@ -14,7 +14,29 @@ FIXTURE = json.loads((Path(__file__).parent / "fixtures/strategy_completion_base
 
 @pytest.fixture(scope="module")
 def actual(tmp_path_factory):
-    return oracle.capture(tmp_path_factory.mktemp("strategy-completion-oracle"))
+    from src.application.opening_candidate_snapshot import opening_candidate_input, ranked_opening_candidates
+
+    original = oracle._seal_snapshot
+
+    def legacy_view(*args, **kwargs):
+        snap = original(*args, **kwargs)
+        assert snap["schema_version"] == "opening_candidate_snapshot.v5"
+        decisions = []
+        for decision in snap["candidate_decisions"]:
+            assert decision["schema_version"] == "opening_candidate_decision.v2"
+            assert "normalized_input" not in decision
+            decisions.append({**decision, "schema_version": "opening_candidate_decision.v1",
+                              "normalized_input": opening_candidate_input(decision)})
+        assert all("facts" not in row for row in snap["ranked_candidates"])
+        return {**snap, "candidate_decisions": decisions,
+                "ranked_candidates": [{k: v for k, v in row.items() if k != "strategy_core_status"}
+                                      for row in ranked_opening_candidates(snap)]}
+
+    # Keep the archived generator and fixture hashes intact; project only the
+    # new persistence layout at its boundary before comparing all business fields.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(oracle, "_seal_snapshot", legacy_view)
+        return oracle.capture(tmp_path_factory.mktemp("strategy-completion-oracle"))
 
 
 def test_oracle_provenance():

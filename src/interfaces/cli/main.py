@@ -5,6 +5,21 @@ import json
 import sys
 from typing import Any
 
+# Services enter through -m; keep the independent group plugin out of scan imports.
+if __name__ == "__main__" and sys.argv[1:2] == ["group-query-bot"]:
+    from src.interfaces.cli.group_query_bot_ops import _run_group_query_bot_cli
+
+    group_exit = _run_group_query_bot_cli(sys.argv[1:])
+    if group_exit is not None:
+        raise SystemExit(group_exit)
+
+if __name__ == "__main__" and sys.argv[1:3] == ["run", "trade-intake"]:
+    from src.interfaces.cli.trade_intake_ops import _run_trade_intake_cli
+
+    trade_exit = _run_trade_intake_cli(sys.argv[1:])
+    if trade_exit is not None:
+        raise SystemExit(trade_exit)
+
 from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response
 from src.application.pipeline_runtime import main as run_scan_pipeline

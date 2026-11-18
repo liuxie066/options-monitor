@@ -35,7 +35,6 @@ from src.application.trades.combo_reconciliation import (
     reconcile_account_post_trade_combos,
     trade_combo_runtime_environment,
 )
-from src.application.trades.owner_diagnostic import OwnerDiagnostic
 from src.application.trades.normalizer import normalize_trade_deal
 from src.application.trades.resolver import resolve_trade_deal
 from src.application.trades.state import (
@@ -1596,7 +1595,6 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("trade_intake.enabled=false; refusing to start listener")
 
     process_lock = threading.RLock()
-    owner_diagnostic = OwnerDiagnostic.from_environment()
     lifecycle_receipt_dispatcher: (
         LifecycleReceiptBatchDispatcher | None
     ) = None
@@ -1628,7 +1626,6 @@ def main(argv: list[str] | None = None) -> int:
                 lifecycle_dispatcher_status_fn=(
                     lifecycle_dispatcher_status_fn
                 ),
-                owner_diagnostic=owner_diagnostic,
             )
 
         return _coordinate_listener_sources(
@@ -1648,7 +1645,6 @@ def main(argv: list[str] | None = None) -> int:
                 lifecycle_dispatcher_status_fn=(
                     lifecycle_dispatcher_status_fn
                 ),
-                owner_diagnostic=owner_diagnostic,
             ),
         )
     finally:
@@ -2321,7 +2317,6 @@ def _run_listener_source_loop(
     lifecycle_dispatcher_status_fn: (
         Callable[[], dict[str, Any]] | None
     ) = None,
-    owner_diagnostic: OwnerDiagnostic | None = None,
 ) -> int:
     state_path = source["state_path"]
     audit_path = source["audit_path"]
@@ -2363,17 +2358,6 @@ def _run_listener_source_loop(
     inbox_summary_cache: dict[str, Any] = {}
     lifecycle_delivery_snapshot_cache: dict[str, Any] = {}
 
-    def diagnostic_snapshots() -> dict[str, dict]:
-        from src.application.daily_decision_brief_repository import _diagnostic_validated_brief_cache_snapshot
-
-        # Inbox also has a push-thread writer. Entries are published by
-        # replacement/clear; their nested graphs are not modified afterwards.
-        if (type(inbox_summary_cache) is not dict or type(lifecycle_delivery_snapshot_cache) is not dict
-                or len(inbox_summary_cache) > 1 or len(lifecycle_delivery_snapshot_cache) > 1):
-            raise ValueError("diagnostic_source_cache_not_bounded")
-        return {"brief_cache": _diagnostic_validated_brief_cache_snapshot(),
-                "inbox_cache": inbox_summary_cache.copy(),
-                "lifecycle_cache": lifecycle_delivery_snapshot_cache.copy()}
     inbox_wakeup = threading.Event()
     fee_target_queue: queue.SimpleQueue[_QueuedFeeTarget] = queue.SimpleQueue()
     try:
@@ -3196,8 +3180,6 @@ def _run_listener_source_loop(
                     )
                     _write_listener_status(status_path, status_state, status="listening", stage="heartbeat", restart_count=restart_count)
                     last_heartbeat_monotonic = now_mono
-                    if owner_diagnostic is not None:
-                        owner_diagnostic.poll(diagnostic_snapshots, cancelled=stop.is_set)
                 inbox_wakeup.wait(1)
                 if stop.wait(0):
                     break

@@ -25,8 +25,15 @@ def _hashes(root: Path) -> dict:
             for p in root.rglob("*") if p.is_file()}
 
 
-def test_same_bytes_formal_bundle_and_facade(tmp_path, monkeypatch):
-    _seal_combo_bundle(tmp_path)
+@pytest.mark.parametrize("encoding", ["compact", "pretty"])
+def test_same_bytes_formal_bundle_and_facade(tmp_path, monkeypatch, encoding):
+    from src.application import combo_yield_candidate_snapshot
+    from src.application.payload_helpers import readable_json_bytes
+
+    with monkeypatch.context() as writer:
+        if encoding == "pretty":
+            writer.setattr(combo_yield_candidate_snapshot, "_canonical_json_bytes", readable_json_bytes)
+        _seal_combo_bundle(tmp_path)
     before = _hashes(tmp_path)
     bundle = load_run_bundle(**_kwargs(tmp_path))
     assert bundle["scope"]["account"] == "lx"
@@ -41,7 +48,7 @@ def test_same_bytes_formal_bundle_and_facade(tmp_path, monkeypatch):
     target = next(row["relative_name"] for row in listing["entries"] if "combo" in row["relative_name"])
     page = project_run_files(root, **kwargs, action="read", relative_name=target, max_lines=1)
     assert page["freshness"]["status"] == "historical"
-    assert page["next_cursor"]
+    assert bool(page["next_cursor"]) == (encoding == "pretty")
     chunks = [page["text"]]
     for _ in range(200):
         if not page["next_cursor"]:
@@ -111,7 +118,11 @@ def test_account_cursor_cannot_cross_scope(tmp_path, monkeypatch):
     root = RuntimeRootResolution(tmp_path, "argument")
     scope = {"market": "us", "accounts": ["lx", "sy"], "config_revision": "abc"}
     listed = project_run_files(root, scope=scope, account="lx", run_id="run-1")
-    name = listed["entries"][0]["relative_name"]
+    # Exercise line pagination on a multiline resource; compact JSON may fit
+    # in one complete page and correctly has no continuation cursor.
+    resources = load_run_bundle(**_kwargs(tmp_path))["resources"]
+    name = next(row["relative_name"] for row in listed["entries"]
+                if len(resources[row["relative_name"]].splitlines()) > 1)
     page = project_run_files(root, scope=scope, account="lx", run_id="run-1", action="read", relative_name=name, max_lines=1)
     assert page["next_cursor"]
     with pytest.raises(ProjectReaderError):
@@ -171,7 +182,7 @@ def test_same_run_accounts_have_separate_validated_resources(tmp_path):
                                          strategy_policy_sha256=POLICY_HASH, sealed_at="2026-08-12T01:00:01Z")
     sy = load_run_bundle(**{**_kwargs(tmp_path), "account": "sy"})
     assert sy["scope"]["account"] == "sy" and len(sy["resources"]) == 2
-    assert all(b'"account": "sy"' in raw for raw in sy["resources"].values())
+    assert all(json.loads(raw)["account"] == "sy" for raw in sy["resources"].values())
     found = discover_runs(runtime_root=RuntimeRootResolution(tmp_path, "argument"), market="us",
                           authorized_accounts=["lx", "sy"])
     assert [row["account"] for row in found["entries"]] == ["lx", "sy"]

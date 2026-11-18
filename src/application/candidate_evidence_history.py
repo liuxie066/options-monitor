@@ -44,6 +44,7 @@ from src.application.opening_candidate_snapshot import (
     OPENING_CANDIDATE_SNAPSHOT_FILE,
     OPENING_CANDIDATE_SNAPSHOT_SCHEMA,
     OPENING_BROKER_SNAPSHOT_SCHEMA,
+    OPENING_SINGLE_INPUT_SNAPSHOT_SCHEMA,
     OpeningCandidateSnapshotError,
     load_opening_candidate_snapshot,
 )
@@ -158,6 +159,7 @@ _MODERN_OWNER_SCHEMAS = {
 }
 _SEALED_OWNER_SCHEMAS = set(_MODERN_OWNER_SCHEMAS.values()) | {
     OPENING_BROKER_SNAPSHOT_SCHEMA,
+    OPENING_SINGLE_INPUT_SNAPSHOT_SCHEMA,
     "combo_yield_candidate_snapshot.v2",
     "combo_yield_candidate_snapshot.v3",
     "cc_lp_candidate_snapshot.v2",

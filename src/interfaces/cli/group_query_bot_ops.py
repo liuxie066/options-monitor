@@ -2,11 +2,33 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import redirect_stderr
 import importlib
+import io
 import json
 
-from src.application.agent_tool_contracts import AgentToolError
+from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response
 from src.application.plugin_runtime import PluginUnavailableError, require_plugin
+
+
+def _run_group_query_bot_cli(argv: list[str]) -> int | None:
+    parser = argparse.ArgumentParser(prog="om")
+    add_group_query_bot_commands(parser.add_subparsers(dest="command", required=True))
+    try:
+        with redirect_stderr(io.StringIO()):
+            args = parser.parse_args(argv)
+    except SystemExit as exc:
+        if exc.code == 0:
+            raise
+        # The full parser owns invalid-input usage text, including all commands.
+        return None
+    try:
+        return handle_group_query_bot_command(args)
+    except AgentToolError as err:
+        print(json.dumps(build_response(tool_name="om", ok=False,
+                                        error=build_error_payload(err)),
+                         ensure_ascii=False, indent=2))
+        return 2
 
 
 def add_group_query_bot_commands(subparsers) -> None:

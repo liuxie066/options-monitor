@@ -700,6 +700,11 @@
       "module": "domain/domain/performance/strategy_evaluation.py",
       "name": "summarize_evaluation_v2",
       "reason": "Backtest summaries and strategy comparisons moved to OptionBench scripts/csp_metrics.py. OM retains valuation and cash facts only; callers must use OB. Historical fixed wheels remain unchanged."
+    },
+    {
+      "module": "src/application/trades/owner_diagnostic.py",
+      "name": "*",
+      "reason": "Retire the one-shot process object diagnostic after the bounded memory investigation. Remove its heartbeat probe and receiver; preserve business heartbeat, error/timeout and delivery timing evidence. No production endpoints or configuration are changed."
     }
   ]
 }
