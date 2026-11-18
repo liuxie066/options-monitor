@@ -196,6 +196,7 @@ def preview_scan_blob_gc(
     *,
     runtime_root: str | Path,
     now_fn: Callable[[], datetime] | None = None,
+    retired_only: bool = False,
 ) -> dict[str, Any]:
     """Build a deterministic, read-only mark-and-sweep preview for scan blobs."""
 
@@ -210,10 +211,11 @@ def preview_scan_blob_gc(
         root=root,
         observed_at=observed_at,
     )
+    protected_run_scope = None if retired_only else retained_run_ids
     file_rows, file_blockers, compatibility_aliases = _gc_file_inventory(
         root=root,
         observed_at=observed_at,
-        retained_run_ids=retained_run_ids,
+        retained_run_ids=protected_run_scope,
     )
     blockers = [*inventory_blockers, *file_blockers]
     all_refs: dict[str, dict[str, Any]] = {}
@@ -222,11 +224,15 @@ def preview_scan_blob_gc(
     protected_manifests: list[dict[str, Any]] = []
     known_files = frozenset(str(row["path"]) for row in file_rows)
 
-    manifest_rows = [row for row in file_rows if _is_manifest_relpath(str(row["path"]))]
+    manifest_rows = [
+        row for row in file_rows
+        if _is_manifest_relpath(str(row["path"]))
+        or (retired_only and _is_scan_quote_payload(str(row["path"])))
+    ]
     for row in manifest_rows:
         relpath = str(row["path"])
         path = root / relpath
-        protected = _gc_manifest_is_protected(relpath, retained_run_ids=retained_run_ids)
+        protected = _gc_manifest_is_protected(relpath, retained_run_ids=protected_run_scope)
         try:
             if path.stat(follow_symlinks=False).st_size > MANIFEST_MAX_BYTES:
                 raise ValueError("manifest_too_large")
@@ -349,6 +355,16 @@ def preview_scan_blob_gc(
         age_hours = max(0.0, (observed_at - published_at).total_seconds() / 3600.0)
         if age_hours < SCAN_BLOB_ORPHAN_GRACE_HOURS:
             continue
+        identity = {}
+        if retired_only:
+            try:
+                info = (root / str(row["path"])).lstat()
+                if info.st_ctime != row["ctime"] or info.st_size != row["size_bytes"]:
+                    raise OSError("scan blob changed")
+                identity = {"file_identity": scan_blob_file_identity(info)}
+            except OSError:
+                blockers.append(_gc_blocker(reason="candidate_blob_changed", path=str(row["path"])))
+                continue
         candidate_rows.append(
             {
                 "blob_sha256": digest,
@@ -358,6 +374,7 @@ def preview_scan_blob_gc(
                 "published_at_source": published_at_source,
                 "age_hours": round(age_hours, 3),
                 "action": "preview_only",
+                **identity,
             }
         )
 
@@ -395,6 +412,10 @@ def preview_scan_blob_gc(
         "compatibility_aliases_not_followed": compatibility_aliases,
         "deletion_allowed": deletion_allowed,
     }
+    if retired_only:
+        plan["reference_policy"] = "all_present_manifests_and_quote_payloads"
+        root_info = root.stat()
+        plan["runtime_identity"] = [root_info.st_dev, root_info.st_ino]
     hash_plan = {
         key: value
         for key, value in plan.items()
@@ -429,6 +450,10 @@ def preview_scan_blob_gc(
             "automatic_actions": [],
         },
     }
+
+
+def scan_blob_file_identity(info: os.stat_result) -> list[int]:
+    return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
 
 
 def _gc_run_inventory(
@@ -475,12 +500,13 @@ def _gc_file_inventory(
     *,
     root: Path,
     observed_at: datetime,
-    retained_run_ids: AbstractSet[str],
+    retained_run_ids: AbstractSet[str] | None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, str]]]:
     rows: list[dict[str, Any]] = []
     blockers: list[dict[str, Any]] = []
     compatibility_aliases: list[dict[str, str]] = []
-    for name in (*RUNTIME_SUBROOTS, "manifests"):
+    extra = ("source_receipts",) if retained_run_ids is None else ()
+    for name in (*RUNTIME_SUBROOTS, "manifests", *extra):
         base = root / name
         if not base.exists() and not base.is_symlink():
             continue
@@ -571,10 +597,10 @@ def _gc_compatibility_alias(
 def _gc_manifest_is_protected(
     relpath: str,
     *,
-    retained_run_ids: AbstractSet[str],
+    retained_run_ids: AbstractSet[str] | None,
 ) -> bool:
     parts = Path(relpath).parts
-    if parts and parts[0] == "output_runs":
+    if retained_run_ids is not None and parts and parts[0] == "output_runs":
         return len(parts) > 1 and parts[1] in retained_run_ids
     return True
 
@@ -1531,6 +1557,14 @@ def _collect_research_storage(
         "cold_candidates": sorted(cold_candidates, key=lambda item: (-int(item["size_bytes"]), str(item["path"]))),
         "growth": growth,
     }
+
+
+def _is_scan_quote_payload(relpath: str) -> bool:
+    parts = Path(relpath).parts
+    return (
+        len(parts) >= 6 and parts[-6:-4] == ("source_receipts", "quotes")
+        and parts[-1] == "payload.json"
+    )
 
 
 def _is_manifest_relpath(relpath: str) -> bool:

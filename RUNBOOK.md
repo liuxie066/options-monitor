@@ -276,6 +276,18 @@ Daily Brief 是普通调度通知的权威读取面。普通 scan / Tick 不再�
 执行会复核预览、重新校验候选密文，持久记录开始和逐项进度，只移除预览中的包文件，
 保留原发布与恢复回执。若终态未确认，先按回执核对每个文件，不自动重放。
 
+### 扫描归档后的共享对象回收
+
+先用已支持的研究归档、独立恢复和 run 退役流程处理所选批次。
+`om research storage-gc-preview --runtime-root <有效运行根> --retired-only` 检查仍存在的 run
+及共享清单和行情回执载荷；只列超过宽限期且无已知引用的对象。默认 GC 预览不能作为执行凭据。
+未知、无法读取的清单或缺失依赖会阻断严格预览。
+
+源树停止所有写入方并核对精确预览后，`om research storage-gc-retire` 需要
+`--runtime-root`、`--expected-plan-sha256`、`--max-candidates`、运行根外的新 `--receipt`、
+`--writers-stopped` 和 `--confirm`。命令不会自行停服务。它复核计划及对象身份，
+只移除精确候选。中断时先检查逐项回执与文件现状，不自动重放。
+
 ### 运行产物清理
 
 

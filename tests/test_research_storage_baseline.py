@@ -1819,3 +1819,43 @@ def test_run_artifacts_measure_logical_and_allocated_bytes_without_following_ali
     assert [row["size_bytes"] for row in rows] == sorted(
         (row["size_bytes"] for row in rows), reverse=True,
     )
+
+
+def test_strict_scan_blob_retirement_keeps_present_run_and_quote_receipt_references(tmp_path):
+    from src.application.research.storage_gc import retire_scan_blobs
+
+    root = _make_runtime(tmp_path, with_ledger=False).resolve()
+    now = datetime(2030, 2, 1, tzinfo=timezone.utc)
+    old_run_ref = _publish_scan_blob(root, "AAA")
+    quote_ref = _publish_scan_blob(root, "BBB")
+    orphan = _publish_scan_blob(root, "CCC")
+    old = root / "output_runs/old"
+    _write_scan_blob_manifest(old / "state/manifest.json", old_run_ref)
+    for index in range(200):
+        (root / "output_runs" / f"new-{index}").mkdir()
+    os.utime(old, (1, 1))
+
+    quote = root / "output_runs/old/required_data/source_receipts/quotes/run/symbol/quote/payload.json"
+    _write_scan_blob_manifest(quote, quote_ref)
+    args = {"runtime_root": root, "now_fn": lambda: now}
+    strict = module.preview_scan_blob_gc(**args, retired_only=True)
+    assert [row["blob_sha256"] for row in strict["candidates"]] == [orphan["blob_sha256"]]
+    assert set(strict["reachable_blob_sha256"]) == {old_run_ref["blob_sha256"], quote_ref["blob_sha256"]}
+    receipt = tmp_path / "blob-retirement.jsonl"
+    options = {**args, "expected_plan_sha256": strict["plan_sha256"], "receipt": receipt,
+               "confirm": True, "writers_stopped": True, "max_candidates": 1}
+    with pytest.raises(AgentToolError, match="stopped writers"):
+        retire_scan_blobs(**{**options, "writers_stopped": False})
+    _write_scan_blob_manifest(root / "output_shared/research/new/manifest.json", orphan)
+    with pytest.raises(AgentToolError, match="exact current strict preview"):
+        retire_scan_blobs(**options)
+    assert not receipt.exists() and (root / orphan["blob_relpath"]).exists()
+    (root / "output_shared/research/new/manifest.json").unlink()
+    refreshed = module.preview_scan_blob_gc(**args, retired_only=True)
+    result = retire_scan_blobs(**{**options, "expected_plan_sha256": refreshed["plan_sha256"]})
+    assert result["removed_count"] == 1
+    assert not (root / orphan["blob_relpath"]).exists()
+    assert all((root / ref["blob_relpath"]).exists() for ref in (old_run_ref, quote_ref))
+    assert [json.loads(line)["status"] for line in receipt.read_text().splitlines()] == [
+        "started", "deleting", "removed", "complete",
+    ]
