@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.offline_backup_snapshot import OfflineBackupError
-from src.application.service_backup import create_service_backup, restore_service_backup
+from src.application.service_backup import create_service_backup, preview_backup_rotation, restore_service_backup
 from src.application.service_cleanup import service_cleanup
 from src.application.runtime_paths import resolve_runtime_root
 from src.application.service_lifecycle import service_lifecycle
@@ -228,6 +228,12 @@ def add_service_update_commands(subparsers: Any) -> None:
         parser.add_argument("--max-bytes", type=int, required=True)
         parser.add_argument("--timeout", type=float, required=True)
 
+    rotate = service_sub.add_parser("backup-rotation-preview", help="preview retention for verified backup inventory")
+    for name in ("inventory", "target", "mount"):
+        rotate.add_argument(f"--{name}", type=Path, required=True)
+    rotate.add_argument("--expected-device", type=int, required=True)
+    rotate.add_argument("--max-verify-bytes", type=int, required=True)
+
     service_cleanup_cmd = service_sub.add_parser("cleanup", help="dry-run or clean old releases and selected caches")
     service_cleanup_cmd.add_argument("--repo-root", default=None)
     service_cleanup_cmd.add_argument("--releases-root", default=None)
@@ -378,7 +384,7 @@ def handle_service_update_command(
     service_upgrade_fn: Callable[..., dict[str, Any]] = service_upgrade,
     service_rollback_fn: Callable[..., dict[str, Any]] = service_rollback,
 ) -> dict[str, Any]:
-    if args.command == "service" and args.service_command in {"backup", "restore-backup"}:
+    if args.command == "service" and args.service_command in {"backup", "restore-backup", "backup-rotation-preview"}:
         try:
             if args.service_command == "backup":
                 data = create_service_backup(
@@ -386,6 +392,11 @@ def handle_service_update_command(
                     target=args.target, mount=args.mount, expected_device=args.expected_device,
                     filename=args.filename, recipient_cert=args.recipient_cert, receipt_path=args.receipt,
                     max_bytes=args.max_bytes, timeout=args.timeout, writers_stopped=args.writers_stopped,
+                )
+            elif args.service_command == "backup-rotation-preview":
+                data = preview_backup_rotation(
+                    inventory=args.inventory, target=args.target, mount=args.mount,
+                    expected_device=args.expected_device, max_verify_bytes=args.max_verify_bytes,
                 )
             else:
                 data = restore_service_backup(

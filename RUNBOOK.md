@@ -248,6 +248,27 @@ Daily Brief 是普通调度通知的权威读取面。普通 scan / Tick 不再�
 发布与验证回执均不覆盖同名文件。包已写入但回执未确认时，先独立核查包及回执，
 不要据此轮换旧备份或盲目重试。
 
+### 备份保留预览
+
+`om service backup-rotation-preview` 需要 `--inventory`、`--target`、`--mount`、
+`--expected-device` 和 `--max-verify-bytes`。清单覆盖同一个目标目录、同一备份系列，
+格式例如：
+
+```json
+{
+  "schema": "om_backup_rotation_inventory.v1",
+  "series": "example-host",
+  "entries": [
+    {"publication": "published.json", "verification": "verified.json", "pinned": true}
+  ]
+}
+```
+
+回执路径可相对清单目录。预览用 UTC 快照日期保留最近 7 个成功日期、4 个成功备份周、
+3 个成功备份月，并额外保护锁定及升级前包。最新独立恢复验证及对应密文读回都匹配时，
+才列出比该恢复点更旧的候选。同一份可同时满足多个窗口。未列入清单的文件不参与，
+本命令只返回候选、占用估计和计划摘要，不执行删除。
+
 ### 运行产物清理
 
 
