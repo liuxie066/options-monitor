@@ -119,5 +119,6 @@ def test_service_backup_commands_persist_independent_receipts(
     ]) == 0
     restored_receipt = json.loads(verified.read_bytes())
     assert restored_receipt["status"] == "package_restored_and_verified"
+    assert restored_receipt["backup_scope_sha256"] == published["backup_scope_sha256"]
     assert restored_receipt["publication_receipt_sha256"] == hashlib.sha256(receipt.read_bytes()).hexdigest()
     assert (restored / "config.yaml").read_bytes() == b"mode: isolated\n"

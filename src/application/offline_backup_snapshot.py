@@ -18,6 +18,7 @@ _SCHEMA = "om_offline_backup_snapshot.v1"
 _MANIFEST = "manifest.json"
 _KINDS = {"file", "sqlite"}
 _MANIFEST_LIMIT = 1024 * 1024
+_SQLITE_SIGNATURE = b"SQLite format 3\0"
 
 
 class OfflineBackupError(ValueError):
@@ -103,6 +104,10 @@ def stage_offline_backup(
         origin = _regular(source, relative)
         if kind == "sqlite":
             _standalone(origin)
+        else:
+            with origin.open("rb") as sample:
+                if sample.read(len(_SQLITE_SIGNATURE)) == _SQLITE_SIGNATURE:
+                    raise OfflineBackupError("SQLite input must be declared as sqlite")
         inputs[relative] = origin, kind, _identity(origin)
     if sum(item[2][2] for item in inputs.values()) > max_bytes:
         raise OfflineBackupError("backup exceeds source byte budget")

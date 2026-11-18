@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import stat
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from typing import Any
@@ -85,6 +86,9 @@ def create_service_backup(
     files, _ = _control_object(files_path)
     if not files or any(not isinstance(kind, str) for kind in files.values()):
         raise OfflineBackupError("file list must map relative paths to file or sqlite")
+    scope = hashlib.sha256(json.dumps(
+        {"host": socket.gethostname(), "source": str(source), "files": files}, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
     snapshot_at = _utc_now()
     with TemporaryDirectory(prefix=".om-backup-", dir=staging_root) as tmp:
         snapshot = Path(tmp) / "snapshot"
@@ -104,6 +108,7 @@ def create_service_backup(
         "filename": filename,
         "ciphertext_sha256": ciphertext,
         "manifest_sha256": manifest,
+        "backup_scope_sha256": scope,
     }
     _write_receipt(receipt_path, record)
     return record
@@ -122,7 +127,7 @@ def restore_service_backup(
         or verification_receipt.is_relative_to(destination)
     ):
         raise OfflineBackupError("publication receipt does not match package or restore target")
-    for key in ("ciphertext_sha256", "manifest_sha256"):
+    for key in ("ciphertext_sha256", "manifest_sha256", "backup_scope_sha256"):
         value = receipt.get(key)
         if not _valid_digest(value):
             raise OfflineBackupError("publication receipt has an invalid digest")
@@ -141,6 +146,7 @@ def restore_service_backup(
         "publication_receipt_sha256": hashlib.sha256(receipt_bytes).hexdigest(),
         "ciphertext_sha256": receipt["ciphertext_sha256"],
         "manifest_sha256": receipt["manifest_sha256"],
+        "backup_scope_sha256": receipt["backup_scope_sha256"],
     }
     _write_receipt(verification_receipt, record)
     return record
@@ -176,6 +182,7 @@ def preview_backup_rotation(
         raise OfflineBackupError("rotation must identify one backup series")
     filename_pattern = re.compile(r"\d{4}-\d{2}-\d{2}T\d{6}Z_" + re.escape(series) + r"_(full|pre-upgrade)\.tar\.gz\.cms")
     now = _receipt_time(_utc_now())
+    scope = None
     with _mounted_target(mount, target, expected_device) as fd:
         target_inode = os.fstat(fd).st_ino
         for item in entries:
@@ -194,9 +201,13 @@ def preview_backup_rotation(
                 receipt.get("schema") != _RECEIPT_SCHEMA or receipt.get("status") != "published_readback"
                 or not isinstance(filename, str) or not filename_pattern.fullmatch(filename)
                 or filename in rows
-                or not all(_valid_digest(receipt.get(key)) for key in ("ciphertext_sha256", "manifest_sha256"))
+                or not all(_valid_digest(receipt.get(key)) for key in ("ciphertext_sha256", "manifest_sha256", "backup_scope_sha256"))
             ):
                 raise OfflineBackupError("backup rotation publication receipt is invalid or duplicated")
+            if scope is None:
+                scope = receipt["backup_scope_sha256"]
+            elif receipt["backup_scope_sha256"] != scope:
+                raise OfflineBackupError("backup rotation cannot mix different recovery scopes")
             snapshot = _receipt_time(receipt.get("snapshot_at_utc"))
             published = _receipt_time(receipt.get("published_at_utc"))
             if not snapshot <= published <= now:
@@ -213,7 +224,7 @@ def preview_backup_rotation(
                     or proof.get("status") != "package_restored_and_verified"
                     or proof.get("publication_receipt_sha256") != receipt_hash
                     or not published <= _receipt_time(proof.get("restored_at_utc")) <= now
-                    or any(proof.get(key) != receipt[key] for key in ("filename", "ciphertext_sha256", "manifest_sha256"))
+                    or any(proof.get(key) != receipt[key] for key in ("filename", "ciphertext_sha256", "manifest_sha256", "backup_scope_sha256"))
                 ):
                     raise OfflineBackupError("restore verification receipt does not bind the publication")
                 verified = True
@@ -255,7 +266,7 @@ def preview_backup_rotation(
     plan = {
         "schema": "om_backup_rotation_plan.v1", "target": str(target),
         "mount": str(mount), "expected_device": expected_device, "target_inode": target_inode,
-        "series": series, "retention": limits,
+        "series": series, "backup_scope_sha256": scope, "retention": limits,
         "minimum_restorable_backup": None if witness is None else witness["filename"],
         "entries": ordered, "deletion_candidates": [row["filename"] for row in candidates],
         "estimated_allocated_file_bytes": sum(row["allocated_file_bytes"] for row in candidates),

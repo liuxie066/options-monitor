@@ -89,3 +89,17 @@ def test_invalid_database_never_publishes_manifest(source: Path, tmp_path: Path)
     with pytest.raises(sqlite3.DatabaseError):
         _stage(source, target)
     assert not (target / "manifest.json").exists()
+
+
+def test_sqlite_cannot_bypass_checkpoint_guard_as_an_ordinary_file(source: Path, tmp_path: Path) -> None:
+    target = tmp_path / "bundle"
+    with closing(sqlite3.connect(source / "state/ledger.sqlite3")) as db:
+        assert db.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+        db.execute("INSERT INTO events VALUES (13, 91)")
+        db.commit()
+        with pytest.raises(OfflineBackupError, match="declared as sqlite"):
+            stage_offline_backup(
+                source=source, destination=target,
+                files={"state/ledger.sqlite3": "file"}, max_bytes=100_000,
+            )
+    assert not target.exists()

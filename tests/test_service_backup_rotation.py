@@ -35,6 +35,7 @@ def rotation(tmp_path, monkeypatch):
             "filename": name,
             "ciphertext_sha256": hashlib.sha256(data).hexdigest(),
             "manifest_sha256": "f" * 64,
+            "backup_scope_sha256": "a" * 64,
         }
         publication = f"publication-{index}.json"
         receipt_hash = write(tmp_path / publication, {
@@ -168,3 +169,19 @@ def test_interrupted_retirement_leaves_durable_progress(rotation, tmp_path, monk
     assert not (args["target"] / names[7]).exists()
     assert (args["target"] / names[8]).exists()
     assert (args["target"] / names[1]).exists()
+
+
+def test_partial_new_backup_cannot_replace_full_recovery_scope(rotation):
+    args, _ = rotation
+    publication = args["inventory"].parent / "publication-1.json"
+    proof = args["inventory"].parent / "verification.json"
+    newer, verified = (json.loads(path.read_bytes()) for path in (publication, proof))
+    newer["backup_scope_sha256"] = "b" * 64
+    publication.write_text(json.dumps(newer))
+    verified["backup_scope_sha256"] = newer["backup_scope_sha256"]
+    verified["publication_receipt_sha256"] = hashlib.sha256(publication.read_bytes()).hexdigest()
+    proof.write_text(json.dumps(verified))
+
+    with pytest.raises(OfflineBackupError, match="different recovery scopes"):
+        service_backup.preview_backup_rotation(**args)
+    assert len(list(args["target"].iterdir())) == 12

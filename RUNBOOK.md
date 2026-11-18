@@ -232,7 +232,7 @@ Daily Brief 是普通调度通知的权威读取面。普通 scan / Tick 不再�
 ### 备份与隔离恢复（手动）
 
 `om service backup` 接收已经停写的目录。操作方须负责阻止新写入、等待在途工作、
-检查点和复原原有服务状态。命令不管理这些服务。使用相对路径到 `sqlite` 或 `file`
+检查点和复原原有服务状态。命令不管理这些服务；手动入口尚无独立快照交接，应在命令结束后复原写入。使用相对路径到 `sqlite` 或 `file`
 的 JSON 映射作为 `--file-list`，例如 `{"state/example.sqlite3":"sqlite","config.yaml":"file"}`。
 实际清单按启用服务及生效路径审核。
 
@@ -252,7 +252,7 @@ Daily Brief 是普通调度通知的权威读取面。普通 scan / Tick 不再�
 
 `om service backup-rotation-preview` 需要 `--inventory`、`--target`、`--mount`、
 `--expected-device` 和 `--max-verify-bytes`。清单覆盖同一个目标目录、同一备份系列，
-格式例如：
+来源及文件清单的范围摘要必须一致。覆盖范围变更时使用独立系列和保留清单。格式例如：
 
 ```json
 {
