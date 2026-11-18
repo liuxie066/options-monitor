@@ -36,6 +36,7 @@ from src.application.ledger.api import (
 from src.application.combo_yield_candidate_snapshot import (
     COMBO_YIELD_CANDIDATE_SNAPSHOT_SCHEMA,
     ComboYieldCandidateSnapshotError,
+    expand_combo_yield_snapshot_storage,
     validate_combo_yield_candidate_snapshot,
 )
 from src.application.opening_candidate_snapshot import (
@@ -1942,6 +1943,11 @@ def _validate_candidate_reference(
             supplied[reference["relpath"]],
             f"candidate owner {reference['candidate_owner']}",
         )
+        if reference["candidate_owner"] == "sp_lc":
+            try:
+                owner_payload = expand_combo_yield_snapshot_storage(owner_payload)
+            except ComboYieldCandidateSnapshotError as exc:
+                _fail("REFERENCE_PAYLOAD_INVALID", str(exc))
         if (
             owner_payload.get("schema_version") != reference["schema_version"]
             or owner_payload.get("run_id") != expected_run_id
