@@ -70,3 +70,54 @@ def test_encrypted_publish_and_independent_restore(tmp_path: Path, monkeypatch: 
             destination=tmp_path / "bad",
         )
     assert not (tmp_path / "bad").exists()
+
+
+def test_service_backup_commands_persist_independent_receipts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+) -> None:
+    from src.interfaces.cli.main import main
+    import json
+
+    if shutil.which("openssl") is None:
+        pytest.skip("OpenSSL CMS is unavailable")
+    data, mount, staging = (tmp_path / name for name in ("source", "volume", "scratch"))
+    for directory in (data, mount, staging):
+        directory.mkdir()
+    monkeypatch.setattr(Path, "is_mount", lambda path: path == mount)
+    (data / "config.yaml").write_text("mode: isolated\n")
+    files = tmp_path / "files.json"
+    files.write_text('{"config.yaml":"file"}')
+    cert, key = tmp_path / "cert.pem", tmp_path / "key.pem"
+    subprocess.run(
+        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+         "-subj", "/CN=isolated-test", "-out", str(cert), "-keyout", str(key)],
+        capture_output=True, check=True,
+    )
+    receipt = tmp_path / "published.json"
+    filename = "2026-11-18T021500Z_test_full.tar.gz.cms"
+    common = ["--max-bytes", "50000", "--timeout", "15"]
+    command = [
+        "service", "backup", "--source", str(data), "--file-list", str(files),
+        "--staging-root", str(staging), "--target", str(mount), "--mount", str(mount),
+        "--expected-device", str(mount.stat().st_dev), "--filename", filename,
+        "--recipient-cert", str(cert), "--receipt", str(receipt), *common,
+    ]
+    assert main(command) == 2
+    assert not receipt.exists() and list(mount.iterdir()) == []
+    capsys.readouterr()
+    assert main([*command, "--writers-stopped"]) == 0
+    published = json.loads(receipt.read_bytes())
+    assert published["status"] == "published_readback"
+    assert list(staging.iterdir()) == []
+    capsys.readouterr()
+
+    restored, verified = tmp_path / "restore", tmp_path / "verified.json"
+    assert main([
+        "service", "restore-backup", "--package", str(mount / filename),
+        "--receipt", str(receipt), "--verification-receipt", str(verified),
+        "--destination", str(restored), "--private-key", str(key), "--max-files", "2", *common,
+    ]) == 0
+    restored_receipt = json.loads(verified.read_bytes())
+    assert restored_receipt["status"] == "package_restored_and_verified"
+    assert restored_receipt["publication_receipt_sha256"] == hashlib.sha256(receipt.read_bytes()).hexdigest()
+    assert (restored / "config.yaml").read_bytes() == b"mode: isolated\n"

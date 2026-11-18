@@ -229,7 +229,27 @@ Daily Brief 是普通调度通知的权威读取面。普通 scan / Tick 不再�
 
 ## 维护入口（手动）
 
-运行产物清理：
+### 备份与隔离恢复（手动）
+
+`om service backup` 接收已经停写的目录。操作方须负责阻止新写入、等待在途工作、
+检查点和复原原有服务状态。命令不管理这些服务。使用相对路径到 `sqlite` 或 `file`
+的 JSON 映射作为 `--file-list`，例如 `{"state/example.sqlite3":"sqlite","config.yaml":"file"}`。
+实际清单按启用服务及生效路径审核。
+
+备份命令显式传 `--source`、`--file-list`、`--writers-stopped`、`--staging-root`、
+`--mount`、`--target`、`--expected-device`、`--filename`、`--recipient-cert`、
+`--receipt`、`--max-bytes` 和 `--timeout`。目标必须是已挂载卷中的现存目录，
+设备号须来自已确认的预期卷，文件名以 `.tar.gz.cms` 结尾。暂存应在源树和备份挂载之外。
+备份端只需接收方证书。
+
+`om service restore-backup` 使用 `--package`、可信的 `--receipt`、`--private-key`、
+新的 `--destination`、新的 `--verification-receipt`、`--max-bytes`、
+`--max-files` 和 `--timeout`。它只把数据恢复到新目录并检查完整性，生产接管另行验证。
+发布与验证回执均不覆盖同名文件。包已写入但回执未确认时，先独立核查包及回执，
+不要据此轮换旧备份或盲目重试。
+
+### 运行产物清理
+
 
 日志清理保留固定服务输出 `*.out.log`、`*.err.log`，即使 mtime 很旧或服务定义已缺失；
 文件仍可能被 launchd 的进程描述符引用。其余过期普通 `.log` 文件按预览清理。
