@@ -558,7 +558,10 @@ def handle_research_command(
     if args.research_command == "storage-gc-preview":
         from src.application.research.storage_baseline import preview_scan_blob_gc
 
-        data = preview_scan_blob_gc(runtime_root=args.runtime_root, retired_only=args.retired_only)
+        if args.retired_only:
+            data = preview_scan_blob_gc(runtime_root=args.runtime_root, retired_only=True)
+        else:
+            data = preview_scan_blob_gc(runtime_root=args.runtime_root)
         return build_response(tool_name="research.storage-gc-preview", ok=True, data=data)
     if args.research_command == "storage-gc-retire":
         from src.application.research.storage_gc import retire_scan_blobs

@@ -222,7 +222,10 @@ def test_storage_baseline_cli_dispatches_read_only_options(monkeypatch, tmp_path
     ]
 
 
-def test_storage_gc_preview_cli_has_only_runtime_root(monkeypatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("retired_only", [False, True])
+def test_storage_gc_preview_cli_keeps_default_call_and_routes_strict_mode(
+    monkeypatch, tmp_path: Path, retired_only: bool,
+) -> None:
     from src.application.research import storage_baseline
     from src.interfaces.cli.main import parse_args
     from src.interfaces.cli.research import handle_research_command
@@ -240,13 +243,14 @@ def test_storage_gc_preview_cli_has_only_runtime_root(monkeypatch, tmp_path: Pat
     response = handle_research_command(
         parse_args(
             ["research", "storage-gc-preview", "--runtime-root", str(runtime)]
+            + (["--retired-only"] if retired_only else [])
         ),
         repo_base_fn=lambda: tmp_path,
     )
 
     assert response["ok"] is True
     assert response["tool_name"] == "research.storage-gc-preview"
-    assert calls == [{"runtime_root": str(runtime)}]
+    assert calls == [{"runtime_root": str(runtime), **({"retired_only": True} if retired_only else {})}]
     for forbidden in ("--confirm", "--delete"):
         with pytest.raises(SystemExit):
             parse_args(
