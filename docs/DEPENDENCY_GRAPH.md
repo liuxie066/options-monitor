@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1578 (`src`: 629, `domain`: 99, `scripts`: 33, `tests`: 813)
-- Internal import edges: 14260 total, 4730 production/script edges excluding tests
+- Python files scanned: 1580 (`src`: 630, `domain`: 99, `scripts`: 33, `tests`: 814)
+- Internal import edges: 14262 total, 4731 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -33,7 +33,7 @@ flowchart LR
   storage["domain.storage"]
   application -->|746| domain
   application -->|4| domain_services
-  application -->|236| infrastructure
+  application -->|237| infrastructure
   application -->|2| om_strategy_core
   application -->|64| storage
   domain_services -->|6| domain
@@ -51,7 +51,7 @@ flowchart LR
   scripts -->|2| tests
   src -->|1| application
   storage -->|1| domain
-  tests -->|7185| application
+  tests -->|7186| application
   tests -->|779| domain
   tests -->|2| domain_services
   tests -->|511| infrastructure
@@ -67,7 +67,7 @@ flowchart LR
 |---|---|---|
 | application | domain | 746 |
 | interfaces | application | 257 |
-| application | infrastructure | 236 |
+| application | infrastructure | 237 |
 | scripts | application | 103 |
 | application | storage | 64 |
 | infrastructure | application | 47 |
@@ -90,7 +90,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 7185 |
+| tests | application | 7186 |
 | tests | domain | 779 |
 | tests | interfaces | 531 |
 | tests | infrastructure | 511 |
@@ -108,7 +108,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application | domain.domain | 323 |
 | src.interfaces | src.application | 200 |
 | src.application.ledger | domain.domain | 184 |
-| src.application | src.infrastructure | 167 |
+| src.application | src.infrastructure | 168 |
 | scripts | src.application | 83 |
 | src.application.ledger | domain.domain.ledger | 78 |
 | src.application.trades | domain.domain | 68 |
