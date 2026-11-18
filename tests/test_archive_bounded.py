@@ -520,3 +520,30 @@ def test_bounded_transport_flags_cannot_silently_apply_to_legacy(tmp_path):
         args = parser.parse_args(["research", "archive", "pull", option])
         with pytest.raises(AgentToolError, match="require --limits-file"):
             handle_research_command(args, repo_base_fn=lambda: tmp_path)
+
+
+def test_quote_payload_only_archive_copies_and_independently_restores_blob(tmp_path):
+    from src.application.research.archive_bounded import restore_batch
+    from tests.test_research_storage_baseline import _publish_scan_blob
+
+    source = tmp_path / "source"
+    run = source / "output_runs/run-1"
+    quote = run / "required_data/source_receipts/quotes/run/symbol/snapshot/payload.json"
+    quote.parent.mkdir(parents=True)
+    ref = _publish_scan_blob(source, "AAA")
+    quote.write_text(json.dumps({"scan_blob_ref": ref}))
+    import os
+    os.utime(run, (1, 1))
+    for index in range(200):
+        (source / "output_runs" / f"new-{index}").mkdir()
+    archive, restored, budget = tmp_path / "archive", tmp_path / "restored", limits_file(tmp_path)
+    result = bounded_pull(
+        repo_root=Path.cwd(), archive_root=archive, source_root=source, run_ids=["run-1"],
+        include_logs=False, write=True, limits_file=budget, include_fixed_shared=False,
+    )
+    assert result["ok"], result
+    assert (archive / ref["blob_relpath"]).read_bytes() == (source / ref["blob_relpath"]).read_bytes()
+    result = restore_batch(archive_root=archive, target=restored, limits_file=budget)
+    assert result["ok"], result
+    assert (restored / ref["blob_relpath"]).read_bytes() == (source / ref["blob_relpath"]).read_bytes()
+    assert not (run / "state/required_data_snapshot_manifest.json").exists()

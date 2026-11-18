@@ -4,9 +4,13 @@ import argparse
 import json
 import os
 from pathlib import Path
+import sqlite3
+import tarfile
 from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError, build_response
+from src.application.offline_backup_snapshot import OfflineBackupError
+from src.application.service_backup import create_service_backup, preview_backup_rotation, restore_service_backup, retire_backup_rotation
 from src.application.service_cleanup import service_cleanup
 from src.application.runtime_paths import resolve_runtime_root
 from src.application.service_lifecycle import service_lifecycle
@@ -31,6 +35,7 @@ from src.application.service_upgrade import (
     service_upgrade_check,
     service_upgrade_verify,
 )
+from src.application.storage_layout import plan_backup_layout
 from src.application.write_contract import attach_write_contract
 
 
@@ -210,6 +215,41 @@ def add_service_update_commands(subparsers: Any) -> None:
         action="store_true",
         help="non-interactive confirmation; emits an audit_id",
     )
+    layout = service_sub.add_parser("backup-layout", help="show canonical backup paths without writing")
+    layout.add_argument("--series", required=True)
+    layout.add_argument("--purpose", choices=("full", "pre-upgrade"), default="full")
+    for name in ("timestamp", "restored-at", "retired-at", "plan-sha256"):
+        layout.add_argument(f"--{name}")
+
+    backup = service_sub.add_parser("backup", help="publish an encrypted backup from stopped input")
+    for name in ("source", "file-list", "staging-root", "target", "mount", "recipient-cert", "receipt"):
+        backup.add_argument(f"--{name}", type=Path, required=True)
+    backup.add_argument("--filename", required=True)
+    backup.add_argument("--expected-device", type=int, required=True)
+    backup.add_argument("--writers-stopped", action="store_true")
+    restore = service_sub.add_parser("restore-backup", help="verify an encrypted backup in a new directory")
+    for name in ("package", "receipt", "verification-receipt", "destination", "private-key"):
+        restore.add_argument(f"--{name}", type=Path, required=True)
+    restore.add_argument("--max-files", type=int, required=True)
+    restore.add_argument("--max-ciphertext-bytes", type=int, required=True)
+    for parser in (backup, restore):
+        parser.add_argument("--max-bytes", type=int, required=True)
+        parser.add_argument("--timeout", type=float, required=True)
+
+    for action, help_text in (
+        ("backup-rotation-preview", "preview retention for verified backup inventory"),
+        ("backup-retire", "retire an exact confirmed backup rotation plan"),
+    ):
+        rotate = service_sub.add_parser(action, help=help_text)
+        for name in ("inventory", "target", "mount"):
+            rotate.add_argument(f"--{name}", type=Path, required=True)
+        rotate.add_argument("--expected-device", type=int, required=True)
+        rotate.add_argument("--max-verify-bytes", type=int, required=True)
+        if action == "backup-retire":
+            rotate.add_argument("--receipt", type=Path, required=True)
+            rotate.add_argument("--expected-plan-sha256", required=True)
+            rotate.add_argument("--confirm", action="store_true")
+
     service_cleanup_cmd = service_sub.add_parser("cleanup", help="dry-run or clean old releases and selected caches")
     service_cleanup_cmd.add_argument("--repo-root", default=None)
     service_cleanup_cmd.add_argument("--releases-root", default=None)
@@ -360,6 +400,51 @@ def handle_service_update_command(
     service_upgrade_fn: Callable[..., dict[str, Any]] = service_upgrade,
     service_rollback_fn: Callable[..., dict[str, Any]] = service_rollback,
 ) -> dict[str, Any]:
+    if args.command == "service" and args.service_command == "backup-layout":
+        try:
+            data = plan_backup_layout(
+                series=args.series, purpose=args.purpose, timestamp=args.timestamp,
+                restored_at=args.restored_at, retired_at=args.retired_at, plan_sha256=args.plan_sha256,
+            )
+        except ValueError as exc:
+            raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
+        return build_response(tool_name="service.backup-layout", ok=True, data=data)
+
+    if args.command == "service" and args.service_command in {"backup", "restore-backup", "backup-rotation-preview", "backup-retire"}:
+        try:
+            if args.service_command == "backup":
+                data = create_service_backup(
+                    source=args.source, files_path=args.file_list, staging_root=args.staging_root,
+                    target=args.target, mount=args.mount, expected_device=args.expected_device,
+                    filename=args.filename, recipient_cert=args.recipient_cert, receipt_path=args.receipt,
+                    max_bytes=args.max_bytes, timeout=args.timeout, writers_stopped=args.writers_stopped,
+                )
+            elif args.service_command == "backup-rotation-preview":
+                data = preview_backup_rotation(
+                    inventory=args.inventory, target=args.target, mount=args.mount,
+                    expected_device=args.expected_device, max_verify_bytes=args.max_verify_bytes,
+                )
+            elif args.service_command == "backup-retire":
+                data = retire_backup_rotation(
+                    inventory=args.inventory, target=args.target, mount=args.mount,
+                    expected_device=args.expected_device, max_verify_bytes=args.max_verify_bytes,
+                    receipt_path=args.receipt, expected_plan_sha256=args.expected_plan_sha256, confirm=args.confirm,
+                )
+            else:
+                data = restore_service_backup(
+                    package=args.package, receipt_path=args.receipt, verification_receipt=args.verification_receipt,
+                    destination=args.destination, private_key=args.private_key, max_bytes=args.max_bytes,
+                    max_files=args.max_files, max_ciphertext_bytes=args.max_ciphertext_bytes, timeout=args.timeout,
+                )
+        except OfflineBackupError as exc:
+            raise AgentToolError(code="BACKUP_OPERATION_FAILED", message=str(exc)) from exc
+        except (OSError, ValueError, sqlite3.Error, tarfile.TarError) as exc:
+            raise AgentToolError(
+                code="BACKUP_OPERATION_FAILED",
+                message="Backup operation could not finish; independently check the exact package and receipt before retrying.",
+            ) from exc
+        return build_response(tool_name=f"service.{args.service_command}", ok=True, data=data)
+
     if args.command == "service" and args.service_command in {"install", "start", "stop"}:
         repo = args.repo_root or repo_base_fn()
         runtime = resolve_runtime_root(repo_root=repo, runtime_root=args.runtime_root).runtime_root

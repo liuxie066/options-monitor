@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -408,6 +409,69 @@ def _validate_evidence_identity(
             _assert_pair(item, label=label)
 
 
+_STORAGE_ENCODING = "single_funding_input.v1"
+
+
+def _same_json_value(left: Any, right: Any) -> bool:
+    if left is right:
+        return True
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(_same_json_value(value, right[key]) for key, value in left.items())
+    if isinstance(left, list):
+        return len(left) == len(right) and all(_same_json_value(a, b) for a, b in zip(left, right))
+    if isinstance(left, float) and left == right == 0:
+        # JSON preserves the sign spelling for floating-point zero.
+        return str(left) == str(right)
+    return left == right
+
+
+def _encode_snapshot(payload: dict[str, Any]) -> bytes:
+    decisions = payload["funding_put_decisions"]
+    if not decisions or any(
+        not _same_json_value(row["normalized_input"], row["opening_decision"]["normalized_input"])
+        for row in decisions
+    ):
+        return _canonical_json_bytes(payload)
+    return _canonical_json_bytes({
+        **payload,
+        "storage_encoding": _STORAGE_ENCODING,
+        "funding_put_decisions": [
+            {key: value for key, value in row.items() if key != "normalized_input"}
+            for row in decisions
+        ],
+    })
+
+
+def expand_combo_yield_snapshot_storage(payload: dict[str, Any]) -> dict[str, Any]:
+    """Recover the logical v4 object before checking its hashes or business fields."""
+    if "storage_encoding" not in payload:
+        return payload
+    if (
+        payload["storage_encoding"] != _STORAGE_ENCODING
+        or payload.get("schema_version") != COMBO_YIELD_CANDIDATE_SNAPSHOT_SCHEMA
+        or payload.get("candidate_owner") != "sp_lc"
+        or payload.get("scan_mode") == "experience"
+    ):
+        raise ComboYieldCandidateSnapshotError("combo snapshot storage encoding mismatch")
+    decisions = payload.get("funding_put_decisions")
+    if not isinstance(decisions, list) or not decisions:
+        raise ComboYieldCandidateSnapshotError("compact funding decisions are unavailable")
+    expanded = []
+    for row in decisions:
+        if not isinstance(row, dict) or "normalized_input" in row:
+            raise ComboYieldCandidateSnapshotError("compact funding decision is invalid")
+        opening = row.get("opening_decision")
+        if not isinstance(opening, dict) or not isinstance(opening.get("normalized_input"), dict):
+            raise ComboYieldCandidateSnapshotError("compact funding input is unavailable")
+        expanded.append({**row, "normalized_input": dict(opening["normalized_input"])})
+    return {
+        **{key: value for key, value in payload.items() if key != "storage_encoding"},
+        "funding_put_decisions": expanded,
+    }
+
+
 def validate_combo_yield_candidate_snapshot(
     payload: Mapping[str, Any],
     *,
@@ -631,7 +695,10 @@ def seal_combo_yield_candidate_snapshot(
         expected_run_id=run_id_norm,
         expected_account=account_norm,
     )
-    encoded = _canonical_json_bytes(payload)
+    encoded = (
+        _encode_snapshot(payload) if os.environ.get("OM_COMBO_SINGLE_FUNDING_INPUT") == "1"
+        else _canonical_json_bytes(payload)
+    )
     try:
         account_dir = (
             Path(base).resolve()
@@ -650,7 +717,9 @@ def seal_combo_yield_candidate_snapshot(
                 name=COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE,
             )
             # Preserve a sealed legacy encoding only for this exact validated payload.
-            if existing != encoded and existing == readable_json_bytes(payload):
+            if existing != encoded and existing in (
+                _canonical_json_bytes(payload), readable_json_bytes(payload), _encode_snapshot(payload),
+            ):
                 encoded = existing
         write_account_run_state_bytes_once_safely(
             base=Path(base),
@@ -693,6 +762,7 @@ def load_combo_yield_candidate_snapshot(
         raise ComboYieldCandidateSnapshotError("combo yield candidate snapshot is unavailable") from exc
     if not isinstance(payload, dict):
         raise ComboYieldCandidateSnapshotError("combo yield candidate snapshot must be an object")
+    payload = expand_combo_yield_snapshot_storage(payload)
     validate_combo_yield_candidate_snapshot(
         payload,
         expected_run_id=run_id_norm,

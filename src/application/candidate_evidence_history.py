@@ -38,6 +38,8 @@ from src.application.cc_lp_candidate_snapshot import (
 from src.application.combo_yield_candidate_snapshot import (
     COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE,
     COMBO_YIELD_CANDIDATE_SNAPSHOT_SCHEMA,
+    ComboYieldCandidateSnapshotError,
+    expand_combo_yield_snapshot_storage,
 )
 from src.application.config_sections import resolve_watchlist_config
 from src.application.opening_candidate_snapshot import (
@@ -855,6 +857,11 @@ def _decoded_file(
         raise CandidateSnapshotManifestError(
             "historical candidate bundle data is invalid"
         )
+    if name == "state/" + COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE:
+        try:
+            return expand_combo_yield_snapshot_storage(payload)
+        except ComboYieldCandidateSnapshotError as exc:
+            raise CandidateSnapshotManifestError(str(exc)) from exc
     return payload
 
 

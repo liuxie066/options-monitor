@@ -79,17 +79,28 @@ def read_json(path):
 
 def scan_blob_refs(run_dir):
     manifest_path = run_dir / "state" / "required_data_snapshot_manifest.json"
-    if not manifest_path.exists() and not manifest_path.is_symlink():
+    quote_files = sorted(run_dir.glob("required_data/source_receipts/quotes/*/*/*/payload.json"))
+    manifest_present = manifest_path.exists() or manifest_path.is_symlink()
+    if not manifest_present and not quote_files:
         return [], "absent", None
-    if manifest_path.is_symlink() or not manifest_path.is_file():
-        return [], "invalid", "required-data snapshot manifest is unsafe"
-    manifest = read_json(manifest_path)
-    symbols = manifest.get("symbols")
-    if not isinstance(symbols, dict):
-        return [], "invalid", "required-data snapshot symbols are invalid"
     refs = {}
     try:
-        for entry in symbols.values():
+        entries = []
+        if manifest_present:
+            if manifest_path.is_symlink() or not manifest_path.is_file():
+                raise ValueError("required-data snapshot manifest is unsafe")
+            symbols = read_json(manifest_path).get("symbols")
+            if not isinstance(symbols, dict):
+                raise ValueError("required-data snapshot symbols are invalid")
+            entries.extend(symbols.values())
+        for path in quote_files:
+            if path.resolve(strict=True) != path.absolute() or not path.is_file():
+                raise ValueError("quote payload is unsafe")
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("quote payload is invalid")
+            entries.append(payload)
+        for entry in entries:
             if not isinstance(entry, dict) or "scan_blob_ref" not in entry:
                 continue
             ref = entry["scan_blob_ref"]
@@ -110,7 +121,7 @@ def scan_blob_refs(run_dir):
                 raise ValueError("blob references conflict")
             if previous is None or str(ref.get("published_at_utc") or "") > str(previous.get("published_at_utc") or ""):
                 refs[digest] = ref
-    except (TypeError, ValueError) as exc:
+    except (OSError, TypeError, ValueError) as exc:
         return [], "invalid", str(exc)
     return [refs[key] for key in sorted(refs)], "ready", None
 
@@ -1065,17 +1076,29 @@ def _run_scan_blob_refs(
     run_dir: Path,
 ) -> tuple[list[dict[str, Any]], str, str | None]:
     manifest_path = run_dir / "state" / "required_data_snapshot_manifest.json"
-    if not manifest_path.exists() and not manifest_path.is_symlink():
-        return [], "absent", None
-    if manifest_path.is_symlink() or not manifest_path.is_file():
-        return [], "invalid", "required-data snapshot manifest is unsafe"
     try:
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-        symbols = payload.get("symbols") if isinstance(payload, dict) else None
-        if not isinstance(symbols, dict):
-            raise ValueError("required-data snapshot symbols are invalid")
+        quotes = sorted(run_dir.glob("required_data/source_receipts/quotes/*/*/*/payload.json"))
+        manifest_present = manifest_path.exists() or manifest_path.is_symlink()
+        if not manifest_present and not quotes:
+            return [], "absent", None
+        entries = []
+        if manifest_present:
+            if manifest_path.is_symlink() or not manifest_path.is_file():
+                return [], "invalid", "required-data snapshot manifest is unsafe"
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            symbols = payload.get("symbols") if isinstance(payload, dict) else None
+            if not isinstance(symbols, dict):
+                raise ValueError("required-data snapshot symbols are invalid")
+            entries.extend(symbols.values())
+        for path in quotes:
+            if path.resolve(strict=True) != path.absolute() or not path.is_file():
+                raise ValueError("quote payload is unsafe")
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("quote payload is invalid")
+            entries.append(payload)
         by_hash: dict[str, dict[str, Any]] = {}
-        for entry in symbols.values():
+        for entry in entries:
             if not isinstance(entry, dict) or "scan_blob_ref" not in entry:
                 continue
             ref = validate_required_data_scan_blob_ref(entry["scan_blob_ref"])

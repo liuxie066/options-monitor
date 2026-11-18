@@ -184,13 +184,16 @@ for relative in r['roots']:
             if total>r['max_bytes'] or st.st_size>r['max_file_bytes']: fail('byte_budget')
             rows.append({'path':rel,'size':st.st_size,'mtime_ns':st.st_mtime_ns,
                          'identity':[st.st_dev,st.st_ino,st.st_size,st.st_mtime_ns,st.st_ctime_ns]})
-            if rel.endswith('/state/required_data_snapshot_manifest.json'):
+            parts=rel.split('/')
+            quote=(len(parts)>=6 and parts[-6:-4]==['source_receipts','quotes'] and parts[-1]=='payload.json')
+            if rel.endswith('/state/required_data_snapshot_manifest.json') or quote:
                 stage='manifest'
                 with open_regular(rel) as manifest_file:
                     raw=manifest_file.read(r['max_file_bytes']+1)
                 if len(raw)>r['max_file_bytes']: fail('manifest_length')
                 manifest=json.loads(raw)
-                for value in manifest['symbols'].values():
+                values=[manifest] if quote else manifest['symbols'].values()
+                for value in values:
                     if 'scan_blob_ref' not in value: continue
                     ref=value['scan_blob_ref']; digest=ref['blob_sha256']
                     if len(digest)!=64 or any(c not in '0123456789abcdef' for c in digest): fail('blob_hash')

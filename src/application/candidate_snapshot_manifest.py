@@ -25,6 +25,7 @@ from src.application.cc_lp_candidate_snapshot import (
 from src.application.combo_yield_candidate_snapshot import (
     COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE,
     COMBO_YIELD_CANDIDATE_SNAPSHOT_SCHEMA,
+    expand_combo_yield_snapshot_storage,
     ComboYieldCandidateSnapshotError,
     load_combo_yield_candidate_snapshot,
     validate_combo_yield_candidate_snapshot,
@@ -827,6 +828,8 @@ def validate_candidate_snapshot_bundle_bytes(
     for entry in manifest["owner_snapshots"]:
         owner = entry["candidate_owner"]
         snapshot = decoded(entry["relpath"])
+        if owner == "sp_lc":
+            snapshot = expand_combo_yield_snapshot_storage(snapshot)
         kwargs = {"require_current_contract": True} if owner == "opening" else {}
         owner_validators[owner](snapshot, expected_run_id=run_id, expected_account=account, **kwargs)
         for dependency in snapshot.get("dependencies") or []:

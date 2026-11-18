@@ -202,6 +202,15 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
         "storage-gc-preview", help="preview reachable and orphaned canonical scan blobs without deleting"
     )
     storage_gc.add_argument("--runtime-root", required=True)
+    storage_gc.add_argument("--retired-only", action="store_true")
+
+    gc_retire = commands.add_parser("storage-gc-retire", help="retire exact unreferenced blobs on a stopped runtime")
+    gc_retire.add_argument("--runtime-root", required=True)
+    gc_retire.add_argument("--expected-plan-sha256", required=True)
+    gc_retire.add_argument("--receipt", type=Path, required=True)
+    gc_retire.add_argument("--max-candidates", type=int, required=True)
+    gc_retire.add_argument("--writers-stopped", action="store_true")
+    gc_retire.add_argument("--confirm", action="store_true")
 
     cleanup = commands.add_parser(
         "storage-cleanup-preview", help="preview gated historical cleanup without moving or deleting data"
@@ -271,6 +280,13 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
         help="explicit local bounded batch budget; requires new root, no logs and run IDs",
     )
     pull.add_argument("--write", action="store_true", help="execute rsync and write local sync/verify manifests")
+
+    layout = archive_commands.add_parser("layout", help="show a canonical archive path without writing")
+    layout.add_argument("--kind", choices=("research", "incidents", "maintenance"), required=True)
+    layout.add_argument("--when", required=True)
+    layout.add_argument("--batch-id", required=True)
+    layout.add_argument("--market")
+    layout.add_argument("--dataset")
 
     verify = archive_commands.add_parser(
         "verify", help="check local archive structure without changing source verification evidence"
@@ -549,8 +565,26 @@ def handle_research_command(
     if args.research_command == "storage-gc-preview":
         from src.application.research.storage_baseline import preview_scan_blob_gc
 
-        data = preview_scan_blob_gc(runtime_root=args.runtime_root)
+        if args.retired_only:
+            data = preview_scan_blob_gc(runtime_root=args.runtime_root, retired_only=True)
+        else:
+            data = preview_scan_blob_gc(runtime_root=args.runtime_root)
         return build_response(tool_name="research.storage-gc-preview", ok=True, data=data)
+    if args.research_command == "storage-gc-retire":
+        from src.application.research.storage_gc import retire_scan_blobs
+
+        try:
+            data = retire_scan_blobs(
+                runtime_root=args.runtime_root, expected_plan_sha256=args.expected_plan_sha256,
+                receipt=args.receipt, writers_stopped=args.writers_stopped, confirm=args.confirm,
+                max_candidates=args.max_candidates,
+            )
+        except OSError as exc:
+            raise AgentToolError(
+                code="SCAN_BLOB_RETIREMENT_BLOCKED",
+                message="Blob retirement could not finish; check the exact target and progress receipt.",
+            ) from exc
+        return build_response(tool_name="research.storage-gc-retire", ok=True, data=data)
     if args.research_command == "storage-baseline":
         from src.application.research.storage_baseline import collect_storage_runtime_baseline
 
@@ -622,6 +656,17 @@ def handle_research_command(
                 output_dir=Path(args.output_dir),
             )
             return build_response(tool_name="research.archive.series-export", ok=True, data=data)
+        if args.archive_command == "layout":
+            from src.application.storage_layout import plan_archive_layout
+
+            try:
+                data = plan_archive_layout(
+                    kind=args.kind, when=args.when, batch_id=args.batch_id,
+                    market=args.market, dataset=args.dataset,
+                )
+            except ValueError as exc:
+                raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
+            return build_response(tool_name="research.archive.layout", ok=True, data=data)
         from src.application.research.archive import (
             archive_inventory,
             archive_prune_remote,
