@@ -1611,40 +1611,35 @@ def _rank_return_bands(
     tie_key: Any,
     near_return_threshold: float = OPENING_CANDIDATE_NEAR_RETURN_THRESHOLD,
 ) -> list[dict[str, Any]]:
-    remaining = list(enumerate(rows))
+    usable = []
+    missing = []
+    for index, row in enumerate(rows):
+        value = period_return_fn(row)
+        if value is None:
+            missing.append((index, row))
+        else:
+            usable.append((value, index, row))
+    usable.sort(key=lambda item: item[0], reverse=True)
+
     ranked: list[dict[str, Any]] = []
-    while remaining:
-        usable = [
-            value
-            for _index, row in remaining
-            if (value := period_return_fn(row)) is not None
-        ]
-        if not usable:
-            ranked.extend(
-                row
-                for _index, row in sorted(
-                    remaining,
-                    key=lambda item: (tie_key(item[1]), item[0]),
-                )
-            )
-            break
-        band_max = max(usable)
-        floor = band_max - near_return_threshold
-        band = [
-            (index, row)
-            for index, row in remaining
-            if (value := period_return_fn(row)) is not None
-            and value >= floor
-        ]
+    start = 0
+    while start < len(usable):
+        # Anchor each band to its maximum, never to the previous adjacent return.
+        floor = usable[start][0] - near_return_threshold
+        end = start + 1
+        while end < len(usable) and usable[end][0] >= floor:
+            end += 1
         ranked.extend(
-            row
-            for _index, row in sorted(
-                band,
-                key=lambda item: (tie_key(item[1]), item[0]),
+            row for _value, _index, row in sorted(
+                usable[start:end], key=lambda item: (tie_key(item[2]), item[1]),
             )
         )
-        band_indices = {index for index, _row in band}
-        remaining = [item for item in remaining if item[0] not in band_indices]
+        start = end
+    ranked.extend(
+        row for _index, row in sorted(
+            missing, key=lambda item: (tie_key(item[1]), item[0]),
+        )
+    )
     return ranked
 
 
