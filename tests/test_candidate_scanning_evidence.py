@@ -190,9 +190,11 @@ def test_candidate_scan_binds_partial_range_evidence_before_metrics_and_policy(t
         assert detail["missing_range_inclusive"] == [[True, False]]
 
 
+@pytest.mark.parametrize("mode", ["put", "call"])
 def test_supplied_required_data_frame_avoids_legacy_csv_read(
     monkeypatch,
     tmp_path,
+    mode,
 ) -> None:
     frame = pd.DataFrame(
         [
@@ -207,16 +209,29 @@ def test_supplied_required_data_frame_avoids_legacy_csv_read(
         ),
     )
 
+    frame.attrs["snapshot_id"] = "frozen-fixture"
+    copies = []
+    original_copy = pd.DataFrame.copy
+
+    def record_copy(self, *args, **kwargs):
+        copies.append(self)
+        return original_copy(self, *args, **kwargs)
+
+    monkeypatch.setattr(pd.DataFrame, "copy", record_copy)
     result = _load_required_data_rows(
         input_root=tmp_path,
         symbol="NVDA",
-        mode="put",
+        mode=mode,
         frames={"NVDA": frame},
     )
 
     assert result.to_dict("records") == [
-        {"symbol": "NVDA", "option_type": "put"}
+        {"symbol": "NVDA", "option_type": mode}
     ]
+    assert all(source is not frame for source in copies)
+    assert result.attrs == frame.attrs
+    result.loc[:, "symbol"] = "CHANGED"
+    assert frame["symbol"].tolist() == ["NVDA", "NVDA"]
 
 
 def test_sell_put_scan_classifies_missing_canonical_status_as_unavailable(

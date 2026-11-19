@@ -127,7 +127,7 @@ def _load_required_data_rows(
 
         raise FrozenRequiredDataUnavailable(symbol=symbol, reason="symbol_entry_missing")
     if supplied is not None:
-        df = supplied.copy()
+        df = supplied
     else:
         path = Path(input_root) / "parsed" / f"{symbol}_required_data.csv"
         try:
