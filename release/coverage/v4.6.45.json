@@ -1,0 +1,104 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.45",
+  "base": {
+    "tag": "v4.6.44",
+    "commit": "6e53510f4cbd42a31fc201ada66af84e7b6911f6"
+  },
+  "reviewed_head": "6796ebbec8fe2ade496f5411b795353eb65ad2da",
+  "commits": [
+    {
+      "sha": "cf708e505ac5bc258b0e73f1a330ca7e674a48c1",
+      "subject": "perf(scan): avoid repeated return extraction and shared frame copies"
+    },
+    {
+      "sha": "e49a3835fdd843b69c3c7c0b9d9b9a2da2d97bea",
+      "subject": "Merge pull request #1217 from liuxie066/cindy/humble-goldberg"
+    },
+    {
+      "sha": "0b847632d22bce67c59f402a41b9d8517c96bece",
+      "subject": "perf(scan): reuse verified facts within each monitoring round"
+    },
+    {
+      "sha": "ad8d772ecd65fbb29659f7b20ff706ff453f21c9",
+      "subject": "Refresh PM holdings after Futu option executions (#1218)"
+    },
+    {
+      "sha": "8e17a88663a3c91d04995abcf475ba32ba2384ee",
+      "subject": "Merge remote-tracking branch 'origin/main' into perf/halve-scan-round"
+    },
+    {
+      "sha": "6796ebbec8fe2ade496f5411b795353eb65ad2da",
+      "subject": "Merge pull request #1219 from liuxie066/perf/halve-scan-round"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "富途期权成交现在和股票、ETF 一样触发 PM 持仓刷新，沿用账户校验、持久提交和成交去重。（#1218）",
+      "commits": [
+        "ad8d772ecd65fbb29659f7b20ff706ff453f21c9"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "加速 CSP/CC 收益分档，复用收益率提取结果并减少共享行情表复制。（#1217）",
+      "commits": [
+        "cf708e505ac5bc258b0e73f1a330ca7e674a48c1",
+        "e49a3835fdd843b69c3c7c0b9d9b9a2da2d97bea"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "在同一次监控轮次内复用已核验的行情、历史及决策输入，减少重复读取和处理。（#1219）",
+      "commits": [
+        "0b847632d22bce67c59f402a41b9d8517c96bece",
+        "6796ebbec8fe2ade496f5411b795353eb65ad2da"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "8e17a88663a3c91d04995abcf475ba32ba2384ee",
+      "reason": "主分支同步合并；具体改动由各原始提交的发布条目覆盖。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "cf708e505ac5bc258b0e73f1a330ca7e674a48c1",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1217"
+      ]
+    },
+    {
+      "commit": "e49a3835fdd843b69c3c7c0b9d9b9a2da2d97bea",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1217"
+      ]
+    },
+    {
+      "commit": "ad8d772ecd65fbb29659f7b20ff706ff453f21c9",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1218"
+      ]
+    },
+    {
+      "commit": "0b847632d22bce67c59f402a41b9d8517c96bece",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1219"
+      ]
+    },
+    {
+      "commit": "6796ebbec8fe2ade496f5411b795353eb65ad2da",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1219"
+      ]
+    },
+    {
+      "commit": "8e17a88663a3c91d04995abcf475ba32ba2384ee",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1219"
+      ]
+    }
+  ]
+}
