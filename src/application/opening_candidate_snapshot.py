@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import deepcopy
 import hashlib
 import json
 import math
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Iterator, Mapping
 
-from domain.domain.decision_state_fingerprint import canonical_sha256
+from domain.domain.decision_state_fingerprint import canonical_sha256, opening_decision_hashes
 from domain.domain.engine import (
     evaluate_opening_candidate_policy,
     validate_candidate_decision_payload,
@@ -23,7 +25,7 @@ from domain.domain.engine.candidate_engine import (
     REJECT_RISK_DELTA_UNAVAILABLE,
 )
 from domain.domain.strategy_core import evaluate_candidates, validate_strategy_identity, rank_candidates, explain_rank, decision_time_from_input
-from domain.domain.strategy_identity import candidate_ranking_profile, validate_strategy_identity as validate_stored_identity
+from domain.domain.strategy_identity import candidate_ranking_profile, ranking_profile_from_identities, validate_strategy_identity as validate_stored_identity
 from domain.domain.symbol_identity import symbol_market
 from domain.domain.risk_capacity import broker_capacity_binding
 from src.application.candidate_snapshot_contract import (
@@ -261,14 +263,17 @@ def seal_opening_candidate_snapshot(
             dict(capacity_fx_evidence) if isinstance(capacity_fx_evidence, Mapping) else capacity_fx_evidence
         )
     payload["content_sha256"] = canonical_sha256(payload)
+    encoded = _canonical_json_bytes(payload)
+    adopted = json.loads(encoded)
+    if adopted != payload:
+        raise OpeningCandidateSnapshotError("opening candidate snapshot adoption mismatch")
     validate_opening_candidate_snapshot(
-        payload,
+        adopted,
         expected_run_id=run_id_norm,
         expected_account=account_norm,
         verify_dependency_root=Path(base).resolve(),
         require_current_contract=True,
     )
-    encoded = _canonical_json_bytes(payload)
     try:
         account_dir = (
             Path(base).resolve()
@@ -292,15 +297,38 @@ def seal_opening_candidate_snapshot(
         raise OpeningCandidateSnapshotError(
             "terminal opening candidate snapshot conflicts or cannot be published"
         ) from exc
-    adopted = load_opening_candidate_snapshot(
-        base=Path(base),
-        run_id=run_id_norm,
-        account=account_norm,
-        require_current_contract=True,
-    )
-    if adopted != payload:
+    try:
+        stored = read_account_run_state_bytes_safely(
+            base=Path(base), run_id=run_id_norm, account=account_norm,
+            name=OPENING_CANDIDATE_SNAPSHOT_FILE,
+        )
+    except Exception as exc:
+        raise OpeningCandidateSnapshotError("opening candidate snapshot is unavailable") from exc
+    if stored != encoded:
         raise OpeningCandidateSnapshotError("opening candidate snapshot adoption mismatch")
+    # Readback binds the validated JSON to disk. Its external sources may have changed.
+    _verify_snapshot_sources(
+        adopted, adopted["dependencies"], base=Path(base).resolve(), run_id=run_id_norm, account=account_norm,
+    )
+    observed = _VALIDATED_OPENING_FILES.get()
+    if observed is not None:
+        observed[(Path(base).resolve(), run_id_norm, account_norm, True)] = hashlib.sha256(stored).digest()
     return adopted
+
+
+_VALIDATED_OPENING_FILES: ContextVar[dict[tuple[Path, str, str, bool], bytes] | None] = ContextVar(
+    "validated_opening_files", default=None,
+)
+
+
+@contextmanager
+def opening_snapshot_read_scope() -> Iterator[None]:
+    """Share structural checks within one publication or one notification operation."""
+    token = _VALIDATED_OPENING_FILES.set({})
+    try:
+        yield
+    finally:
+        _VALIDATED_OPENING_FILES.reset(token)
 
 
 def load_opening_candidate_snapshot(
@@ -326,13 +354,27 @@ def load_opening_candidate_snapshot(
         ) from exc
     if not isinstance(payload, dict):
         raise OpeningCandidateSnapshotError("opening candidate snapshot must be an object")
+    root = Path(base).resolve()
+    observed = _VALIDATED_OPENING_FILES.get()
+    reuse = observed is not None and payload.get("schema_version") == OPENING_SINGLE_INPUT_SNAPSHOT_SCHEMA
+    key = (root, run_id_norm, account_norm, require_current_contract)
+    if reuse:
+        digest = hashlib.sha256(encoded).digest()
+        if observed.get(key) == digest:
+            # Each reader has a fresh JSON object. Dependencies and FX are external
+            # to these bytes and must still be checked against their current files.
+            _verify_snapshot_sources(payload, _dependencies(payload["dependencies"]),
+                                     base=root, run_id=run_id_norm, account=account_norm)
+            return payload
     validate_opening_candidate_snapshot(
         payload,
         expected_run_id=run_id_norm,
         expected_account=account_norm,
-        verify_dependency_root=Path(base).resolve(),
+        verify_dependency_root=root,
         require_current_contract=require_current_contract,
     )
+    if reuse:
+        observed[key] = digest
     return payload
 
 
@@ -366,8 +408,9 @@ def ranked_opening_candidates(
     snapshot: Mapping[str, Any],
     *,
     mode: str | None = None,
+    copy_facts: bool = True,
 ) -> list[dict[str, Any]]:
-    """Project the sealed order without re-ranking or filling missing facts."""
+    """Project sealed order. Read-only consumers may borrow the single-input facts."""
 
     mode_norm = _mode(mode) if mode is not None else None
     single_input = snapshot.get("schema_version") == OPENING_SINGLE_INPUT_SNAPSHOT_SCHEMA
@@ -381,7 +424,8 @@ def ranked_opening_candidates(
             decision = decisions.get(row.get("candidate_id"))
             if decision is None:
                 raise OpeningCandidateSnapshotError("ranked opening candidate decision is unavailable")
-            row["facts"] = deepcopy(opening_candidate_input(decision))
+            facts = opening_candidate_input(decision)
+            row["facts"] = deepcopy(facts) if copy_facts else facts
         row["strategy_core_status"] = "source" if (row.get("facts") or {}).get("strategy_core") else "legacy"
         out.append(row)
     return out
@@ -519,13 +563,6 @@ def validate_opening_candidate_snapshot(
         "required_data_manifest_sha256"
     ):
         raise OpeningCandidateSnapshotError("required-data dependency hash mismatch")
-    if verify_dependency_root is not None:
-        _verify_dependency_files(
-            dependencies,
-            base=Path(verify_dependency_root).resolve(),
-            run_id=expected_run_id,
-            account=expected_account,
-        )
     modes = item.get("strategy_modes")
     if not isinstance(modes, list) or not modes or any(
         mode not in {"put", "call"} for mode in modes
@@ -606,11 +643,16 @@ def validate_opening_candidate_snapshot(
             raise OpeningCandidateSnapshotError(
                 "opening candidate decision mode mismatch"
             )
-        if canonical_sha256(normalized) != decision.get("normalized_input_hash"):
+        if normalized is opening.get("normalized_input"):
+            decision_hash, input_hash = opening_decision_hashes(opening)
+        else:
+            input_hash = canonical_sha256(normalized)
+            decision_hash = canonical_sha256(opening)
+        if input_hash != decision.get("normalized_input_hash"):
             raise OpeningCandidateSnapshotError(
                 "opening candidate normalized input hash mismatch"
             )
-        if canonical_sha256(opening) != decision.get("decision_hash"):
+        if decision_hash != decision.get("decision_hash"):
             raise OpeningCandidateSnapshotError(
                 "opening candidate decision hash mismatch"
             )
@@ -669,22 +711,11 @@ def validate_opening_candidate_snapshot(
         validate_capacity_fx_evidence(
             item["capacity_fx_evidence"], expected_run_fx_snapshot_sha256=_dependency_hash(dependencies, "fx"),
         )
-        if verify_dependency_root is not None:
-            from src.application.current_fx_run import RunFXError, load_run_fx_snapshot
-
-            evidence = item["capacity_fx_evidence"]
-            try:
-                run_fx, run_fx_hash = load_run_fx_snapshot(base=Path(verify_dependency_root), run_id=expected_run_id)
-            except RunFXError as exc:
-                raise OpeningCandidateSnapshotError("capacity FX run source is unavailable or invalid") from exc
-            if run_fx_hash != evidence["run_fx_snapshot_sha256"]:
-                raise OpeningCandidateSnapshotError("capacity FX run source hash mismatch")
-            expected_observation = project_exchange_rate_snapshot(
-                run_fx, purpose="capacity",
-                now=datetime.fromisoformat(evidence["evaluated_at_utc"].replace("Z", "+00:00")),
-            )
-            if canonical_sha256(expected_observation) != evidence["observation_sha256"]:
-                raise OpeningCandidateSnapshotError("capacity FX observation run source mismatch")
+    if verify_dependency_root is not None:
+        _verify_snapshot_sources(
+            item, dependencies, base=Path(verify_dependency_root).resolve(),
+            run_id=expected_run_id, account=expected_account,
+        )
     contract_scope_ids = {
         str(row.get("candidate_id") or "")
         for row in scopes
@@ -1062,7 +1093,8 @@ def dependency_from_hash(*, kind: str, sha256: str) -> dict[str, Any]:
     }
 
 
-def _validate_core_scope(rows: list[dict[str, Any]], *, mode: str, account: str, market: str) -> None:
+def _validate_core_scope(rows: list[dict[str, Any]], *, mode: str, account: str, market: str) -> str:
+    identities = []
     try:
         for row in rows:
             if "decision_now_utc" in row:
@@ -1070,7 +1102,8 @@ def _validate_core_scope(rows: list[dict[str, Any]], *, mode: str, account: str,
             strategy = validate_stored_identity(row, mode=mode, account=account, market=market.lower())
             if strategy is not None and not row["strategy_core"].get("runtime"):
                 raise ValueError("strategy runtime identity is missing")
-        candidate_ranking_profile(rows, mode=mode)
+            identities.append(strategy)
+        return ranking_profile_from_identities(identities)
     except ValueError as exc:
         raise OpeningCandidateSnapshotError(str(exc)) from exc
 
@@ -1173,9 +1206,18 @@ def _snapshot_decisions(
                     "opening candidate decision mode mismatch"
                 )
             decision_input = opening.get("normalized_input")
-            if not isinstance(decision_input, dict) or canonical_sha256(
-                decision_input
-            ) != canonical_sha256(normalized):
+            if not isinstance(decision_input, dict):
+                raise OpeningCandidateSnapshotError(
+                    "opening candidate normalized input mismatch"
+                )
+            decision_hash, normalized_input_hash = opening_decision_hashes(opening)
+            # Scan adapters pass shallow copies. Equal Python values alone can
+            # have different fingerprints (e.g. True and 1).
+            same_items = type(decision_input) is dict and len(normalized) == len(decision_input) and all(
+                key is other_key and value is other_value
+                for (key, value), (other_key, other_value) in zip(normalized.items(), decision_input.items())
+            )
+            if not same_items and canonical_sha256(normalized) != normalized_input_hash:
                 raise OpeningCandidateSnapshotError(
                     "opening candidate normalized input mismatch"
                 )
@@ -1199,8 +1241,8 @@ def _snapshot_decisions(
                 "schema_version": "opening_candidate_decision.v2",
                 "candidate_id": candidate_id,
                 "strategy_mode": mode,
-                "normalized_input_hash": canonical_sha256(normalized),
-                "decision_hash": canonical_sha256(opening),
+                "normalized_input_hash": normalized_input_hash,
+                "decision_hash": decision_hash,
                 "risk_policy_hash": risk_policy_hash,
                 "quote_snapshot_id": quote_bindings.get(
                     (str(normalized.get("symbol") or "").strip().upper(), mode)
@@ -1244,12 +1286,12 @@ def _ranked_candidates(
             if final_row.get("decision_now_utc") != normalized.get("decision_now_utc"):
                 raise OpeningCandidateSnapshotError("final candidate decision time mismatch")
             source_rows.append(normalized)
-        _validate_core_scope(source_rows, mode=mode, account=account, market=market)
+        profile = _validate_core_scope(source_rows, mode=mode, account=account, market=market)
         ranking_inputs[mode] = {
             "candidate_ids": [
                 str(decision_index[_contract_key(mode, row)]["candidate_id"]) for row in source_rows
             ],
-            "profile": candidate_ranking_profile(source_rows, mode=mode),
+            "profile": profile,
         }
         for mode_rank, ranked_row in enumerate(
             rank_candidates(source_rows, mode=mode),
@@ -1539,6 +1581,29 @@ def _dependencies(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
             "opening candidate dependencies are incomplete: " + ",".join(missing)
         )
     return sorted(out, key=lambda row: str(row["kind"]))
+
+
+def _verify_snapshot_sources(
+    item: Mapping[str, Any], dependencies: list[dict[str, Any]], *, base: Path, run_id: str, account: str,
+) -> None:
+    _verify_dependency_files(dependencies, base=base, run_id=run_id, account=account)
+    if "capacity_fx_evidence" not in item:
+        return
+    from src.application.current_fx_run import RunFXError, load_run_fx_snapshot
+
+    evidence = item["capacity_fx_evidence"]
+    try:
+        run_fx, run_fx_hash = load_run_fx_snapshot(base=base, run_id=run_id)
+    except RunFXError as exc:
+        raise OpeningCandidateSnapshotError("capacity FX run source is unavailable or invalid") from exc
+    if run_fx_hash != evidence["run_fx_snapshot_sha256"]:
+        raise OpeningCandidateSnapshotError("capacity FX run source hash mismatch")
+    expected_observation = project_exchange_rate_snapshot(
+        run_fx, purpose="capacity",
+        now=datetime.fromisoformat(evidence["evaluated_at_utc"].replace("Z", "+00:00")),
+    )
+    if canonical_sha256(expected_observation) != evidence["observation_sha256"]:
+        raise OpeningCandidateSnapshotError("capacity FX observation run source mismatch")
 
 
 def _verify_dependency_files(

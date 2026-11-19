@@ -19,7 +19,7 @@ from domain.domain.insurance_underwriting import (
 from src.application.short_vol_risk_context import (
     build_portfolio_risk_context,
 )
-from domain.domain.strategy_core import ResolvedStrategy, calculate_constraints, evaluate_candidates, resolve_strategy, rank_candidates
+from domain.domain.strategy_core import ResolvedStrategy, calculate_constraints, evaluate_candidates, evaluate_candidate_decision, resolve_strategy, rank_candidates
 from src.application.candidate_scanning import attach_strategy_identity, resolve_scan_strategy
 from src.infrastructure.exchange_rates import CurrencyConverter
 from src.application.payload_helpers import config_float_from_sources as _float_setting_from_sources
@@ -123,16 +123,16 @@ def enrich_and_filter_sell_put_underwriting(
             "portfolio_risk_warnings",
         ):
             if key in row_payload:
-                out.loc[idx, key] = row_payload.get(key)
+                out.at[idx, key] = row_payload.get(key)
         for key, value in row_payload.items():
             if key.startswith("policy_") or key == "effective_min_strike":
-                out.loc[idx, key] = value
+                out.at[idx, key] = value
         if not cfg.enabled:
             keep_mask.append(True)
             continue
-        decision = evaluate_sell_put_underwriting_row(row_payload, cfg=cfg, resolved_strategy=strategy)
+        decision = evaluate_candidate_decision(row_payload, strategy=strategy)
         for key, value in decision.get("fields", {}).items():
-            out.loc[idx, key] = value
+            out.at[idx, key] = value
         opening_decision = dict(decision.get("opening_decision") or {})
         normalized_input = dict(
             opening_decision.get("normalized_input") or row_payload

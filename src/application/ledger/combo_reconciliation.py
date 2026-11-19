@@ -372,6 +372,19 @@ def _combo_counterpart_open_ids(
             and exposure in delivered[lot_id]}
 
 
+def combo_attribution_history_scopes(
+    rows: Mapping[str, Any], *, account: str, focus_open_event_id: str | None = None,
+) -> set[tuple[str, str]]:
+    """Select the market dates of all applicable lots, including previously claimed legs."""
+    lots = _ledger_lot_facts(
+        account=account, runtime_environment="", events=list(rows.get("trade_events") or []),
+        lots=list(rows.get("stored_position_lots") or []), confirmed_open_event_ids=set(),
+        effective_identity_open_event_ids=set(), include_claimed=True,
+    )
+    return {(lot["market"], lot["market_date"]) for lot in lots
+            if focus_open_event_id is None or lot["open_event_id"] == focus_open_event_id}
+
+
 def combo_attribution_candidates_from_rows(
     rows: Mapping[str, Any], *, account: str, runtime_environment: str,
     exposures: list[dict[str, Any]], effective_now_ms: int, include_claimed: bool = False,
@@ -629,7 +642,7 @@ def _ledger_lot_facts(
     # RECONSTRUCTIBLE; §7 moves it to the strategy/event side). "Is this lot
     # already grouped?" is replayed from the events that bound it -- the same
     # answer the payload used to carry, with voided adoptions excluded.
-    group_bindings = resolve_lot_group_bindings(events)
+    group_bindings = {} if include_claimed else resolve_lot_group_bindings(events)
     events_by_id = {
         str(item.get("event_id") or "").strip(): item
         for item in events
@@ -681,7 +694,7 @@ def _ledger_lot_facts(
         ).strip().lower()
         market = _market(symbol=symbol, currency=currency, broker=broker)
         broker_account_ref = _event_broker_account_ref(event, expected_account=account)
-        group_binding = {} if include_claimed else group_bindings.get(lot_id) or {}
+        group_binding = group_bindings.get(lot_id) or {}
         group_id = str(group_binding.get("strategy_group_id") or "").strip()
         leg_role = str(group_binding.get("leg_role") or "").strip().lower()
         strategy = str(group_binding.get("strategy") or "").strip().lower()

@@ -223,7 +223,7 @@ def _snapshot_strategy_scopes(
         key: 0 for key in expected_by_key
     }
     if owner == "opening":
-        selected_rows = ranked_opening_candidates(snapshot)
+        selected_rows = ranked_opening_candidates(snapshot, copy_facts=False)
     elif owner == "wheel":
         selected_rows = [
             {
@@ -909,13 +909,13 @@ def load_candidate_snapshot_bundle(
     if not index_path.is_file() or index_path.is_symlink():
         raise CandidateSnapshotManifestError("candidate status index is unavailable")
     index_encoded = index_path.read_bytes()
-    index = _load_status_index(
-        index_path,
-        run_id=run_id_norm,
-        account=account_norm,
-        account_config_sha256=str(manifest["account_config_sha256"]),
-    )
-    _validate_index_binding(manifest, index, index_encoded, run_id=run_id_norm, account=account_norm)
+    try:
+        index = json.loads(index_encoded.decode("utf-8"))
+        if not isinstance(index, dict):
+            raise CandidateSnapshotManifestError("candidate status index is invalid")
+        _validate_index_binding(manifest, index, index_encoded, run_id=run_id_norm, account=account_norm)
+    except (UnicodeDecodeError, json.JSONDecodeError, StrategyScanStatusError) as exc:
+        raise CandidateSnapshotManifestError("candidate status index is invalid") from exc
     _validate_v4_source_status_bindings(account_dir, index)
 
     owners: dict[str, dict[str, Any]] = {}

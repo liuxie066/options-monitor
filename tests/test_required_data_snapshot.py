@@ -13,6 +13,7 @@ import signal
 import pytest
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
+import src.application.required_data_blobs as scan_blobs
 import src.application.required_data_snapshot as required_data_snapshot_module
 from src.application.opend_symbol_outputs import (
     _csv_roundtrip_frame,
@@ -668,6 +669,36 @@ def _sealed_canonical_snapshot(
     return root, manifest_path, manifest, manifest_path.read_bytes()
 
 
+def test_scoped_blob_reads_reuse_verified_bytes_and_detect_replacement(tmp_path, monkeypatch):
+    _, _, manifest, _ = _sealed_canonical_snapshot(tmp_path)
+    ref = manifest["symbols"]["3690.HK"]["scan_blob_ref"]
+    path = tmp_path / ref["blob_relpath"]
+    original = path.read_bytes()
+    materialize = scan_blobs._validate_required_data_scan_blob_payload
+    calls = []
+
+    def count(payload):
+        calls.append(payload["symbol"])
+        return materialize(payload)
+
+    monkeypatch.setattr(scan_blobs, "_validate_required_data_scan_blob_payload", count)
+    with scan_blobs.scan_blob_read_scope():
+        first = load_required_data_scan_blob(runtime_root=tmp_path, blob_ref=ref)
+        first["payload"]["provider_payload"].clear()
+        second = load_required_data_scan_blob(runtime_root=tmp_path, blob_ref=ref)
+        assert second["payload"]["provider_payload"]["symbol"] == "3690.HK"
+        assert first["required_data_csv_bytes"] == second["required_data_csv_bytes"]
+        assert calls == ["3690.HK"]
+        # Damage the gzip CRC without changing the file size or reference.
+        path.write_bytes(original[:-8] + bytes([original[-8] ^ 1]) + original[-7:])
+        with pytest.raises(RequiredDataBlobError, match="unreadable"):
+            load_required_data_scan_blob(runtime_root=tmp_path, blob_ref=ref)
+
+    path.write_bytes(original)
+    load_required_data_scan_blob(runtime_root=tmp_path, blob_ref=ref)
+    assert calls == ["3690.HK", "3690.HK"]
+
+
 def test_sealed_snapshot_resolves_exact_current_run_bytes(tmp_path: Path) -> None:
     root, manifest_path = _workspace(tmp_path)
     _publish_quote(root, run_id="run-1")
@@ -1285,17 +1316,11 @@ def test_frozen_bundle_rejects_rows_with_non_success_source_outcome(
         },
         "rows": [{"symbol": "3690.HK"}],
     }
-    bundle = {
-        "raw_json_base64": base64.b64encode(
-            json.dumps(raw_payload).encode("utf-8")
-        ).decode("ascii"),
-    }
-
     with pytest.raises(
         SourceReceiptError,
         match="non-success required-data bundle contains rows",
     ):
-        _validate_complete_required_data_bundle(bundle)
+        _validate_complete_required_data_bundle(raw_payload=raw_payload, required_data_csv_bytes=b"")
 
 
 def test_sealed_snapshot_rejects_tampered_csv_and_other_run_receipt(tmp_path: Path) -> None:
@@ -1349,6 +1374,42 @@ def test_partial_snapshot_keeps_ready_symbol_and_types_failed_symbol(tmp_path: P
     assert compatible.value.reason == "empty_chain"
 
 
+@pytest.mark.parametrize("canonical_blob", [False, True])
+def test_projection_reuse_still_checks_bound_bytes(tmp_path, monkeypatch, canonical_blob):
+    from unittest.mock import Mock
+    from src.application import required_data_snapshot as snapshot
+
+    root, manifest_path = _workspace(tmp_path)
+    _publish_quote(root, run_id="run-1", canonical_blob=canonical_blob)
+    manifest = _seal(root, manifest_path, _summary("3690.HK"))
+    projection = Mock(wraps=snapshot.validate_required_data_quote_projection)
+    monkeypatch.setattr(snapshot, "validate_required_data_quote_projection", projection)
+    scope = snapshot.FrozenProjectionReadScope()
+
+    def read():
+        return resolve_frozen_required_data_csv_bytes_batch(
+            manifest_path=manifest_path, expected_run_id="run-1", required_data_root=root,
+            projection_scope=scope, require_fresh=False,
+        ).resolve("3690.HK")
+
+    first, csv_bytes = read()
+    first["required_data_coverage"]["status"] = "changed by consumer"
+    second, revalidated_bytes = read()
+    assert second["required_data_coverage"]["status"] != "changed by consumer"
+    assert revalidated_bytes == csv_bytes
+    assert projection.call_count == 1
+
+    if canonical_blob:
+        ref = manifest["symbols"]["3690.HK"]["scan_blob_ref"]
+        source = root.parents[2] / ref["blob_relpath"]
+    else:
+        source = root / manifest["symbols"]["3690.HK"]["required_data_csv_relpath"]
+    source.write_bytes(source.read_bytes()[:-1])
+    with pytest.raises(FrozenRequiredDataUnavailable) as corrupted:
+        read()
+    assert corrupted.value.reason == "receipt_or_payload_mismatch"
+
+
 def test_batch_validates_each_ready_symbol_once(
     monkeypatch,
     tmp_path: Path,
@@ -1400,6 +1461,24 @@ def test_contract_mismatch_fails_one_symbol_without_losing_ready_peer(
         "reason": "quote_receipt_unavailable",
         "error_type": "RequiredDataFetchError",
     }
+
+
+def test_seal_rereads_canonical_blob_after_manifest_write(tmp_path, monkeypatch):
+    from src.application import required_data_snapshot as snapshot
+
+    root, manifest_path = _workspace(tmp_path)
+    _publish_quote(root, run_id="run-1", canonical_blob=True)
+    write_json = snapshot.atomic_write_json
+
+    def corrupt_after_write(path, payload):
+        write_json(path, payload)
+        ref = payload["symbols"]["3690.HK"]["scan_blob_ref"]
+        blob = root.parents[2] / ref["blob_relpath"]
+        blob.write_bytes(blob.read_bytes()[:-1])
+
+    monkeypatch.setattr(snapshot, "atomic_write_json", corrupt_after_write)
+    with pytest.raises(snapshot.RequiredDataSnapshotError, match="compressed size mismatch"):
+        _seal(root, manifest_path, _summary("3690.HK"))
 
 
 def test_snapshot_seal_rejects_self_inconsistent_plan_authority(

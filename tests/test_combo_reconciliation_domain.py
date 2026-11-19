@@ -249,7 +249,7 @@ def test_physical_identity_blocks_cross_account_pair_and_legacy_records():
 
 
 @pytest.mark.parametrize("scenario", [
-    "ties", "weighted", "forbidden", "all_forbidden", "mixed",
+    "ties", "weighted", "forbidden", "all_forbidden", "mixed", "isolated",
     "duplicate_lots", "shared_open_events", "cross_side_lot_ids",
 ])
 def test_forced_pairs_match_exhaustive_oracle_and_preserve_permutations(monkeypatch, scenario):
@@ -269,6 +269,10 @@ def test_forced_pairs_match_exhaustive_oracle_and_preserve_permutations(monkeypa
         _exposure(put_strike=105, call_strike=120,
                   occurrence_id="occ-2", exposure_id="exp-2"),
     ]
+    if scenario == "isolated":
+        lots.extend(_lot("isolated-" + side, option_type=side, strike=strike,
+                         trade_time_ms=BASE_TIME_MS, symbol="MSFT")
+                    for side, strike in (("put", 100), ("call", 110)))
     if scenario == "mixed":
         lots.extend([
             _lot("other-expiry", option_type="call", strike=130,

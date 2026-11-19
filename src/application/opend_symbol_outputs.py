@@ -420,6 +420,20 @@ def validate_required_data_quote_bytes(
         raw_payload = json.loads(bytes(raw_json_bytes).decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise SourceReceiptError("required-data canonical JSON is unreadable") from exc
+    return validate_required_data_quote_projection(
+        raw_payload=raw_payload,
+        required_data_csv_bytes=required_data_csv_bytes,
+        expected_fetch_contract=expected_fetch_contract,
+    )
+
+
+def validate_required_data_quote_projection(
+    *,
+    raw_payload: Mapping[str, Any],
+    required_data_csv_bytes: bytes,
+    expected_fetch_contract: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate a decoded provider payload against its bound CSV and fetch contract."""
     try:
         frame = pd.read_csv(io.BytesIO(bytes(required_data_csv_bytes)), float_precision="round_trip")
     except Exception as exc:
@@ -2587,6 +2601,7 @@ __all__ = [
     "save_outputs",
     "validate_required_data_payload_candidate",
     "validate_required_data_quote_bytes",
+    "validate_required_data_quote_projection",
     "validate_required_data_quote_candidate",
     "validate_required_data_source_outcome",
 ]

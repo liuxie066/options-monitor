@@ -151,6 +151,24 @@ def _run_puts(root, *, experimental=False, injected=True, cash_available=True, c
     return finals, decisions, summaries
 
 
+def test_put_underwriting_ranks_accepted_contracts_once_per_symbol(frozen_scan, monkeypatch):
+    from domain.domain import strategy_core
+    from src.application import sell_put_strategy_risk
+
+    sizes = []
+    rank = strategy_core.rank_candidates
+
+    def counted(rows, **kwargs):
+        sizes.append(len(rows))
+        return rank(rows, **kwargs)
+
+    monkeypatch.setattr(strategy_core, "rank_candidates", counted)
+    monkeypatch.setattr(sell_put_strategy_risk, "rank_candidates", counted)
+    finals, decisions, _ = _run_puts(frozen_scan)
+    assert sizes == [2, 2]
+    assert len(finals) == 4 and len(decisions) == 5
+
+
 def test_real_put_steps_multi_symbol_rank_complete_passes_and_reversion(frozen_scan):
     context = _portfolio()
     baseline, decisions, summaries = _run_puts(frozen_scan, injected=False, context=context)

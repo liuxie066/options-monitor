@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 from decimal import Decimal, InvalidOperation
+from functools import lru_cache
 from typing import Any
 
 
@@ -84,10 +85,12 @@ def _decimal_string(value: Any, *, field_path: str = "") -> str:
     return rendered
 
 
+@lru_cache(maxsize=512)
 def _excluded_key(key: str) -> bool:
     return key in DECISION_FINGERPRINT_EXCLUDED_FIELDS or key.startswith("display_")
 
 
+@lru_cache(maxsize=512)
 def _is_decimal_field(field_name: str | None, parent_field: str | None) -> bool:
     if parent_field and parent_field.endswith("_by_lot"):
         return True
@@ -105,6 +108,7 @@ def canonicalize_decision_value(
     *,
     _field_name: str | None = None,
     _parent_field: str | None = None,
+    _numbers: dict | None = None,
 ) -> Any:
     if value is None or isinstance(value, bool):
         return value
@@ -115,6 +119,14 @@ def canonicalize_decision_value(
             except DecisionStateNormalizationError:
                 pass
         return value
+    if _numbers is not None and type(value) in (int, float):
+        # Repeated quotes and quantities share a spelling within this traversal.
+        key = (type(value), value)
+        normalized = _numbers.get(key)
+        if normalized is None:
+            normalized = _decimal_string(value, field_path=_field_name or "")
+            _numbers[key] = normalized
+        return normalized
     if isinstance(value, (int, float, Decimal)):
         return _decimal_string(value, field_path=str(_field_name or ""))
     if isinstance(value, dict):
@@ -123,6 +135,7 @@ def canonicalize_decision_value(
                 item,
                 _field_name=str(key),
                 _parent_field=_field_name,
+                _numbers=_numbers,
             )
             for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
             if not _excluded_key(str(key))
@@ -133,11 +146,26 @@ def canonicalize_decision_value(
                 item,
                 _field_name=_field_name,
                 _parent_field=_parent_field,
+                _numbers=_numbers,
             )
             for item in value
         ]
-        if items and all(isinstance(item, dict) and _set_like_row_id(item) for item in items):
-            return sorted(items, key=_set_like_row_sort_key)
+        if items and isinstance(items[0], dict):
+            groups: dict[str, list[Any]] = {}
+            for item in items:
+                row_id = _set_like_row_id(item) if isinstance(item, dict) else ""
+                if not row_id:
+                    break
+                groups.setdefault(row_id, []).append(item)
+            else:
+                # The full row breaks ties only among rows with the same identity.
+                ordered = []
+                for row_id in sorted(groups):
+                    group = groups[row_id]
+                    if len(group) > 1:
+                        group.sort(key=_canonical_sort_key)
+                    ordered.extend(group)
+                return ordered
         if isinstance(value, (set, frozenset)):
             return sorted(items, key=_canonical_sort_key)
         return items
@@ -148,11 +176,6 @@ def _canonical_sort_key(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def _set_like_row_sort_key(value: dict[str, Any]) -> tuple[str, str]:
-    row_id = _set_like_row_id(value)
-    return (row_id, _canonical_sort_key(value))
-
-
 def _set_like_row_id(value: dict[str, Any]) -> str:
     for field in _SET_LIKE_ID_FIELDS:
         item = value.get(field)
@@ -161,15 +184,30 @@ def _set_like_row_id(value: dict[str, Any]) -> str:
     return ""
 
 
-def canonical_json_bytes(value: Any) -> bytes:
-    normalized = canonicalize_decision_value(value)
+def _encode_normalized(normalized: Any) -> bytes:
+    # Normalization already orders every mapping by its string keys.
     return json.dumps(
         normalized,
         ensure_ascii=False,
-        sort_keys=True,
         separators=(",", ":"),
         allow_nan=False,
     ).encode("utf-8")
+
+
+def canonical_json_bytes(value: Any) -> bytes:
+    return _encode_normalized(canonicalize_decision_value(value, _numbers={}))
+
+
+def opening_decision_hashes(opening: dict[str, Any]) -> tuple[str, str]:
+    """Fingerprint a decision and its input dictionary using one normalized tree."""
+    # A non-string key may stringify to "normalized_input" in the outer digest.
+    if any(type(key) is not str for key in opening):
+        return canonical_sha256(opening), canonical_sha256(opening["normalized_input"])
+    normalized = canonicalize_decision_value(opening, _numbers={})
+    return (
+        hashlib.sha256(_encode_normalized(normalized)).hexdigest(),
+        hashlib.sha256(_encode_normalized(normalized["normalized_input"])).hexdigest(),
+    )
 
 
 def canonical_sha256(value: Any) -> str:
@@ -189,6 +227,7 @@ __all__ = [
     "DecisionStateNormalizationError",
     "build_decision_state_fingerprint",
     "canonical_json_bytes",
+    "opening_decision_hashes",
     "canonical_sha256",
     "canonicalize_decision_value",
 ]

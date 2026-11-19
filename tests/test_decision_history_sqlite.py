@@ -1,4 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
+import json
 import sqlite3
 
 import pytest
@@ -8,7 +10,7 @@ from src.application.daily_decision_brief_repository import (
     DailyDecisionBriefStateError, persist_daily_decision_brief_success,
     persist_daily_decision_brief_failure, read_daily_decision_brief, read_latest_daily_decision_brief,
 )
-from src.infrastructure.decision_history_sqlite import DecisionHistoryStore, DecisionHistoryError, history_path
+from src.infrastructure.decision_history_sqlite import DecisionHistoryStore, DecisionHistoryError, history_hash_read_scope, history_path
 
 
 def test_replay_immutable_conflict_new_run_and_failure_current(tmp_path):
@@ -30,6 +32,38 @@ def test_replay_immutable_conflict_new_run_and_failure_current(tmp_path):
             conn.execute("UPDATE decisions SET run_id='oops'")
         with pytest.raises(sqlite3.IntegrityError, match="immutable_decision"):
             conn.execute("DELETE FROM decisions")
+
+
+def test_identical_input_and_payload_keep_independent_objects_and_hash_checks(tmp_path):
+    persist_daily_decision_brief_success(base=tmp_path, brief=_brief(run_id="first"))
+    store = DecisionHistoryStore(history_path(tmp_path))
+    with store.connect() as conn:
+        row = dict(conn.execute("SELECT * FROM decisions").fetchone())
+    row.update(input_json=row["payload_json"], input_hash=row["payload_hash"])
+    decoded = store.decode(row)
+    decoded["input"]["actions"].append("changed")
+    assert "changed" not in decoded["payload"]["actions"]
+    row["input_hash"] = "0" * 64
+    with pytest.raises(DecisionHistoryError, match="history_content_corrupt"):
+        store.decode(row)
+
+
+def test_history_hash_reuse_checks_current_bytes_and_preserves_legacy_json(tmp_path):
+    persist_daily_decision_brief_success(base=tmp_path, brief=_brief(run_id="first"))
+    store = DecisionHistoryStore(history_path(tmp_path))
+    with store.connect() as conn:
+        row = dict(conn.execute("SELECT * FROM decisions").fetchone())
+    with history_hash_read_scope():
+        before = store.decode(row)
+        assert store.decode(row) == before
+        pretty = json.dumps(before["payload"], indent=2)
+        assert store.decode({**row, "payload_json": pretty}) == before
+        with pytest.raises(DecisionHistoryError, match="history_content_corrupt"):
+            store.decode({**row, "payload_json": pretty, "payload_hash": hashlib.sha256(pretty.encode()).hexdigest()})
+        with pytest.raises(DecisionHistoryError, match="history_content_corrupt"):
+            store.decode({**row, "input_json": "{}"})
+        with pytest.raises(DecisionHistoryError, match="history_identity_corrupt"):
+            store.decode({**row, "run_id": "changed"})
 
 
 def test_json_is_disposable_not_authority_and_missing_sqlite_is_not_empty(tmp_path):

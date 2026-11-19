@@ -68,6 +68,7 @@ from src.application.opening_quote_evidence import OPENING_QUOTE_MAX_AGE_SECONDS
 from src.application.market_data_provider import resolve_market_data_provider
 from src.application.required_data_snapshot import assert_required_data_source
 from src.application.required_data_snapshot import (
+    FrozenProjectionReadScope,
     FrozenRequiredDataBatch,
     FrozenRequiredDataUnavailable,
     RequiredDataSnapshotError,
@@ -214,8 +215,12 @@ def _row_account(value: Any, *, default: str = "当前账户") -> str:
     return normalize_account(value) or default
 
 
-def _quote_key(symbol: Any, option_type: Any, expiration: Any, strike: Any, *, base_dir: Path | None = None) -> tuple[str, str, str, str]:
-    aliases = load_runtime_symbol_aliases(base_dir) if base_dir is not None else None
+def _quote_key(
+    symbol: Any, option_type: Any, expiration: Any, strike: Any, *,
+    base_dir: Path | None = None, aliases: Mapping[str, Any] | None = None,
+) -> tuple[str, str, str, str]:
+    if base_dir is not None:
+        aliases = load_runtime_symbol_aliases(base_dir)
     return contract_key(
         symbol,
         option_type,
@@ -979,8 +984,9 @@ def _snapshot_integrity_failure_result(
 def _frozen_position_plan_reasons(
     *,
     positions: list[dict[str, Any]],
-    plan: dict[str, Any] | None,
-    account: str,
+    requirements: dict[str, dict[str, Any]],
+    requirement_reasons: dict[str, str],
+    account_status: str,
     base_dir: Path,
 ) -> tuple[
     dict[str, str],
@@ -988,18 +994,6 @@ def _frozen_position_plan_reasons(
 ]:
     reasons: dict[str, str] = {}
     symbols_to_validate: set[str] = set()
-    requirements: dict[str, dict[str, Any]] = {}
-    requirement_reasons: dict[str, str] = {}
-    account_status = "unavailable"
-    if plan is not None:
-        (
-            requirements,
-            requirement_reasons,
-            account_status,
-        ) = account_requirement_index(
-            payload=plan,
-            account=account,
-        )
     for position in positions:
         if not isinstance(position, dict):
             continue
@@ -1013,7 +1007,7 @@ def _frozen_position_plan_reasons(
         if not all(key):
             continue
         lot_id = advice_position_key(position)
-        if plan is None or account_status == "unavailable":
+        if account_status == "unavailable":
             reasons[lot_id] = "close_advice_plan_unavailable"
             continue
         requirement = requirements.get(lot_id)
@@ -1094,6 +1088,7 @@ def _load_frozen_required_data_quotes(
     provenance_by_symbol: dict[str, dict[str, Any]] | None = None,
 ) -> dict[tuple[str, str, str, str], dict[str, Any]]:
     quotes: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    aliases = load_runtime_symbol_aliases(base_dir) if csv_bytes_by_symbol else None
     for symbol in sorted(csv_bytes_by_symbol):
         try:
             frame = pd.read_csv(BytesIO(csv_bytes_by_symbol[symbol]))
@@ -1121,7 +1116,7 @@ def _load_frozen_required_data_quotes(
                 row.get("option_type"),
                 row.get("expiration"),
                 row.get("strike"),
-                base_dir=base_dir,
+                aliases=aliases,
             )
             if all(key):
                 if isinstance(coverage, dict) and coverage.get("status") == "partial":
@@ -1466,6 +1461,7 @@ def run_close_advice(
     frozen_plan: dict[str, Any] | None = None
     frozen_plan_path: Path | None = None
     frozen_manifest_payload: dict[str, Any] | None = None
+    projection_scope = FrozenProjectionReadScope()
     frozen_required_data_batch: FrozenRequiredDataBatch | None = None
     frozen_manifest_sha256: str | None = None
     frozen_plan_sha256: str | None = None
@@ -1474,6 +1470,7 @@ def run_close_advice(
         if not run_id or frozen_manifest_path is None:
             raise RequiredDataSnapshotError("frozen Close Advice run identity is unavailable")
         frozen_required_data_batch = resolve_frozen_required_data_csv_bytes_batch(
+            projection_scope=projection_scope,
             manifest_path=frozen_manifest_path,
             expected_run_id=run_id,
             required_data_root=Path(required_data_root),
@@ -1555,17 +1552,14 @@ def run_close_advice(
         pos for pos, lifecycle_state, _dte in position_entries if lifecycle_state in {"active", "unknown"}
     ]
     quote_positions = [pos for pos, lifecycle_state, _dte in position_entries if lifecycle_state == "active"]
-    frozen_plan_reasons: dict[str, str] = {}
-    frozen_provenance: dict[str, dict[str, Any]] = {}
-    frozen_requirements_by_lot: dict[str, dict[str, Any]] = {}
-    frozen_requirements_by_lot, _requirement_reasons, _account_status = account_requirement_index(
-        payload=frozen_plan,
-        account=account_norm or "",
+    frozen_requirements_by_lot, requirement_reasons, account_status = account_requirement_index(
+        payload=frozen_plan, account=account_norm or "",
     )
     frozen_plan_reasons, symbols_to_validate = _frozen_position_plan_reasons(
         positions=quote_positions,
-        plan=frozen_plan,
-        account=account_norm or "",
+        requirements=frozen_requirements_by_lot,
+        requirement_reasons=requirement_reasons,
+        account_status=account_status,
         base_dir=Path(base_dir),
     )
     try:
@@ -1831,6 +1825,7 @@ def run_close_advice(
     try:
         assert frozen_manifest_path is not None
         revalidated_batch = resolve_frozen_required_data_csv_bytes_batch(
+            projection_scope=projection_scope,
             manifest_path=frozen_manifest_path,
             expected_run_id=str(required_data_snapshot_run_id or ""),
             required_data_root=Path(required_data_root),

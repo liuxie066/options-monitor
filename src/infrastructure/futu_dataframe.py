@@ -21,6 +21,8 @@ def futu_dataframe_records(frame: Any) -> list[dict[str, Any]]:
             value = row[i]
             if value is pd.NA:
                 row[i] = None
+            elif not isinstance(value, np.generic):
+                continue
             elif isinstance(value, np.datetime64):
                 row[i] = pd.Timestamp(value)
             elif isinstance(value, np.timedelta64):

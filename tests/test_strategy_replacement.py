@@ -172,6 +172,15 @@ def test_baseline_multi_failure_exact_order_and_no_evidence_opt_out_regression(m
     assert 'risk_earnings_unavailable' not in [r['reason'] for r in no_evidence['rejects']]
 
 
+def test_baseline_put_without_constraints_still_rejects_invalid_facts():
+    strategy = _strategy("put")
+    row = {**next(c["policy_row"] for c in VALID if c["mode"] == "put"), "source_metric": float("inf")}
+    with pytest.raises(ValueError, match="non-finite numeric value"):
+        core.calculate_constraints(
+            row, mode="put", risk_ctx=UNKNOWN, exchange_rate_converter=CONVERTER, strategy=strategy,
+        )
+
+
 @pytest.mark.parametrize('mode', ['put', 'call'])
 @pytest.mark.parametrize('operation', ['constraints', 'evaluate', 'rank', 'explain'])
 def test_callback_mutation_rejected_without_mutating_original(alternatives, monkeypatch, mode, operation):
@@ -228,6 +237,86 @@ def test_callback_output_contracts_fail_closed(alternatives, monkeypatch, mode, 
             core.calculate_constraints(row, mode=mode, risk_ctx=UNKNOWN, exchange_rate_converter=CONVERTER, strategy=strategy)
         else:
             core.evaluate_candidates([row], strategy=strategy)
+
+
+def test_candidate_copy_preserves_aliases_and_isolates_nested_mutations():
+    nested = []
+    shared = {1: nested}
+    original = {"a": nested, "b": nested, "left": shared, "right": shared}
+    shared["parent"] = original
+    nested.append(original)
+    copied = core._copy_candidate_facts(original)
+    assert copied["a"] is copied["b"]
+    assert copied["a"][0] is copied
+    assert copied["left"] is copied["right"] and copied["left"] is not shared
+    assert copied["left"][1] is copied["a"]
+    assert copied["left"]["parent"] is copied
+    copied["a"].append("changed")
+    assert len(original["b"]) == 1
+
+
+def test_ranking_copies_shared_nested_facts_once(alternatives, monkeypatch):
+    strategy = _alternate("put")
+    common = {"history": [1]}
+    rows = [
+        attach_strategy_identity({"symbol": "NVDA", "contract_symbol": code, "shared": common}, strategy)
+        for code in ("A", "B")
+    ]
+    def rank(supplied, **kwargs):
+        assert supplied[0]["shared"] is supplied[1]["shared"]
+        assert supplied[0]["shared"] is not common
+        return supplied[::-1]
+
+    descriptor = replace(strategy.descriptor, rank=rank)
+    monkeypatch.setitem(core._TEMPLATES, (descriptor.template_id, descriptor.version), descriptor)
+    ranked = core.rank_candidates(rows, mode="put")
+    assert [row["contract_symbol"] for row in ranked] == ["B", "A"]
+
+
+def test_frozen_facts_keep_distinct_integer_and_float_representations():
+    number = 1e23
+    integer = int(number)
+    assert number == integer
+    assert core._stable([number, integer, number]) == (
+        core._stable(number), core._stable(integer), core._stable(number),
+    )
+    assert core._stable(number) != core._stable(integer)
+
+
+def test_rank_restores_shared_policy_once_and_checks_each_account(alternatives, monkeypatch):
+    strategy = _alternate("put")
+    rows = [
+        attach_strategy_identity({"symbol": "NVDA", "contract_symbol": code, "strike": strike}, strategy)
+        for code, strike in (("A", 90), ("B", 95))
+    ]
+    restored = []
+    restore = core._restore_strategy
+
+    def counted(identity):
+        restored.append(identity)
+        return restore(identity)
+
+    monkeypatch.setattr(core, "_restore_strategy", counted)
+    assert core.rank_candidates(rows, mode="put") == rows[::-1]
+    assert len(restored) == 1
+    rows[1]["account"] = "sy"
+    with pytest.raises(ValueError, match="candidate account conflicts"):
+        core.rank_candidates(rows, mode="put")
+
+
+def test_rank_accepts_mixed_original_and_copied_rows(alternatives, monkeypatch):
+    descriptor = alternatives["put"]
+
+    def mixed_rank(rows, **kwargs):
+        return [deepcopy(rows[1]), rows[0]]
+
+    monkeypatch.setitem(core._TEMPLATES, (descriptor.template_id, descriptor.version),
+                        replace(descriptor, rank=mixed_rank))
+    rows = [{"contract_symbol": key, "details": {"score": 1}} for key in ("A", "B")]
+    ranked = core.rank_candidates(rows, mode="put", strategy=_alternate("put"))
+    assert ranked == rows[::-1]
+    ranked[1]["details"]["score"] = 2
+    assert rows[0]["details"]["score"] == 1
 
 
 @pytest.mark.parametrize('mode', ['put', 'call'])

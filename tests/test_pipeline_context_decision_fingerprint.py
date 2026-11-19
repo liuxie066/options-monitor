@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from domain.domain.decision_state_fingerprint import canonical_json_bytes, canonical_sha256, opening_decision_hashes
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.portfolio_scope import portfolio_scope_id
 from src.application import pipeline_context as pc
@@ -22,6 +23,36 @@ from src.application.prepared_option_positions_context import PreparedOptionPosi
 
 
 RATES = {"rates": {"USDCNY": 7.0, "HKDCNY": 0.9}}
+
+
+def test_fingerprint_bytes_preserve_identity_ties_and_partial_identity_order():
+    second = {"x": 2, "event_id": "a"}
+    first = {"event_id": "a", "x": 1}
+    later = {"event_id": "b"}
+    assert canonical_json_bytes([later, second, first]) == (
+        b'[{"event_id":"a","x":"1"},{"event_id":"a","x":"2"},{"event_id":"b"}]'
+    )
+    assert canonical_json_bytes([later, {}, first]) == (
+        b'[{"event_id":"b"},{},{"event_id":"a","x":"1"}]'
+    )
+
+
+def test_fingerprint_preserves_distinct_spellings_of_equal_float_and_integer():
+    floating = 1e23
+    integer = int(floating)
+    assert integer == floating
+    assert json.loads(canonical_json_bytes([integer, floating, integer])) == [
+        str(integer), "100000000000000000000000", str(integer),
+    ]
+
+
+def test_opening_hashes_match_independent_input_and_decision_hashes():
+    inputs = {
+        "quantity_by_lot": {"a": "12.00"}, "display_name": "ignored",
+        "events": [{"event_id": "b", "strike": "1.00"}, {"event_id": "a", "strike": 2}],
+    }
+    opening = {"normalized_input": inputs, "accepted": True, "rejects": []}
+    assert opening_decision_hashes(opening) == (canonical_sha256(opening), canonical_sha256(inputs))
 
 
 def _write(path: Path, payload: dict) -> Path:

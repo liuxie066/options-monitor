@@ -54,6 +54,7 @@ from src.application.tick_run_workspace import canonical_account_run_config_byte
 from src.application.opening_candidate_snapshot import (
     dependency_from_file,
     dependency_from_hash,
+    opening_snapshot_read_scope,
     seal_opening_candidate_snapshot,
     strategy_policy_hash,
 )
@@ -786,6 +787,7 @@ def run_watchlist_pipeline(
     return summary_rows
 
 
+@opening_snapshot_read_scope()
 def run_watchlist_pipeline_default(
     *,
     py: str,

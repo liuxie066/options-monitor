@@ -1030,6 +1030,15 @@ a null timing means its observation clock was unavailable. These are optional
 observations, not completion authority. `terminal_status=returned` and
 `return_code` describe wrapper execution, not confirmed scan or delivery.
 
+For option snapshot timing, group returned rows by their batch request/receive
+timestamps before summing provider round trips. Check the number of observed
+batches against the actual call count; rows alone cannot describe failed attempts.
+The sealed symbol payload's `meta.fetch_diagnostics.option_snapshot_gate_elapsed_sec`
+records cumulative monotonic time inside limiter acquisition for option snapshots,
+including retries, fallback batches and failed acquisitions. It includes limiter
+bookkeeping. An absent field means no measurement. Neither metric includes the
+entire prefetch stage.
+
 A child-end checkpoint may lack `observation_complete`; only the final snapshot
 sets it true. Outer elapsed ends before that final diagnostic write, includes
 lock release, and excludes OS process startup/exit and scheduling delay.

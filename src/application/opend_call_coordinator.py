@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from time import monotonic
 from typing import Any, Callable
 
 from src.application.option_chain_fetching import FileRateLimiter
@@ -24,6 +25,7 @@ def rate_limited_opend_call(
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
     diagnostics: dict[str, Any] | None = None,
+    snapshot_gate_observation: dict[str, Any] | None = None,
 ) -> Any:
     check_fetch_control(deadline, cancelled)
     limiter = FileRateLimiter(
@@ -33,7 +35,14 @@ def rate_limited_opend_call(
         max_wait_sec=float(max_wait_sec),
         label=f"opend_{endpoint}",
     )
-    waited = limiter.acquire(**({"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}))
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
+    gate_started = monotonic() if snapshot_gate_observation is not None else None
+    try:
+        waited = limiter.acquire(**controls)
+    finally:
+        if snapshot_gate_observation is not None and gate_started is not None:
+            key = "option_snapshot_gate_elapsed_sec"
+            snapshot_gate_observation[key] = snapshot_gate_observation.get(key, 0.0) + (monotonic() - gate_started)
     if diagnostics is not None:
         diagnostics["rate_gate_wait_sec"] = diagnostics.get("rate_gate_wait_sec", 0.0) + waited
     check_fetch_control(deadline, cancelled)

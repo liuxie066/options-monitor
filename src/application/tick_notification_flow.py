@@ -1260,7 +1260,9 @@ def _daily_brief_recovery_intent_for_preparation(
         base=request.base, account=account, market=market, market_trading_date=market_date, envelope=envelope,
     ) == "legacy_ai_payload_retired":
         return None
+    day = (retry.get("state") or {}).get("days", {}).get(market_date, {})
     return _daily_brief_recovery_intent(
+        day=day,
         request=request, account=account, market=market, scheduler=scheduler, brief=brief, daily_limits=limits,
     )
 
@@ -1936,11 +1938,8 @@ def _daily_brief_candidate_render_context(
 
 def _daily_brief_recovery_intent(
     *, request: TickNotificationRequest, account: str, market: str, scheduler: dict[str, Any],
-    brief: dict[str, Any], daily_limits: Any,
+    brief: dict[str, Any], daily_limits: Any, day: dict[str, Any],
 ) -> dict[str, Any] | None:
-    market_date = str(brief["market_trading_date"])
-    state = read_daily_decision_brief_delivery_state(base=request.base, account=account, market=market)
-    day = (state.get("state") or {}).get("days", {}).get(market_date, {})
     schedule = request.base_cfg.get(request.scheduler_schedule_key) or {}
     now = utc_now()
     now_dt = now if isinstance(now, datetime) else datetime.fromisoformat(now.replace("Z", "+00:00"))

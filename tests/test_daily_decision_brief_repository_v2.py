@@ -2390,7 +2390,8 @@ def test_changed_source_payload_is_normalized_again(tmp_path: Path, monkeypatch)
     assert len(calls) == 2
 
 
-def test_cached_source_hands_each_caller_an_independent_object(tmp_path: Path) -> None:
+@pytest.mark.parametrize("read_only_first", [False, True])
+def test_cached_source_hands_each_caller_an_independent_object(tmp_path: Path, read_only_first: bool) -> None:
     import src.application.daily_decision_brief_repository as repository
 
     persisted = _persist(tmp_path, actions=[_action(), _action(symbol="AMD")])
@@ -2403,6 +2404,10 @@ def test_cached_source_hands_each_caller_an_independent_object(tmp_path: Path) -
         "revision": persisted["current_revision"],
         "source_digest": persisted["current_brief_digest"],
     }
+    if read_only_first:
+        borrowed, raw = repository._read_validated_successful_revision_source(**lookup, read_only=True)
+        raw["actions"].clear()
+        assert borrowed["actions"]
     first = repository._validate_successful_revision_source(**lookup)
     first["run_id"] = "tampered"
     first["actions"].clear()

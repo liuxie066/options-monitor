@@ -106,6 +106,13 @@ def candidate_ranking_profile(
 ) -> str:
     """One scope/rank per universe; symbol-specific policy and strike may differ."""
     identities = [validate_strategy_identity(row, mode=mode) for row in rows if isinstance(row, dict)]
+    return ranking_profile_from_identities(identities, explicit_profile=explicit_profile)
+
+
+def ranking_profile_from_identities(
+    identities: list[dict[str, Any] | None], *, explicit_profile: str | None = None,
+) -> str:
+    """Require a consistent ranking scope across previously validated identities."""
     bound = [identity for identity in identities if identity is not None]
     if not bound:
         return explicit_profile if explicit_profile is not None else "current_tie_break"

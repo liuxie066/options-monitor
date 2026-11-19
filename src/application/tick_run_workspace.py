@@ -141,14 +141,10 @@ def load_account_run_config(
         run_id=run_id,
         account=account,
     )
-    load_published_account_run_config(
-        base=base,
-        run_id=authority.run_id,
-        account=authority.account,
-        state_path=authority.state_path,
-        account_config_sha256=authority.account_config_sha256,
-        expected_bytes=authority.canonical_bytes,
-    )
+    # The retained bytes have passed the path, identity, digest and JSON checks.
+    # Reopen the published file through the same no-follow chain and bind it
+    # byte-for-byte before returning that validated configuration.
+    _read_account_config_bytes(base, authority.run_id, authority.account, expected_bytes=authority.canonical_bytes)
     return retained
 
 
@@ -388,9 +384,21 @@ def load_published_account_run_config(
             "ACCOUNT_CONFIG_HASH_INVALID",
             "account config authority hash is invalid",
         )
+    state_bytes = _read_account_config_bytes(base, run_id_norm, account_norm, expected_bytes=expected_bytes)
+    if sha256(state_bytes).hexdigest() != digest:
+        raise AccountRunConfigError(
+            "ACCOUNT_CONFIG_HASH_MISMATCH",
+            "published account config does not match its authority hash",
+        )
+    return _decode_account_run_config(state_bytes, expected_account=account_norm)
+
+
+def _read_account_config_bytes(
+    base: Path, run_id: str, account: str, *, expected_bytes: bytes | None,
+) -> bytes:
     state_bytes = _read_regular_file_at_chain(
         base=base,
-        components=("output_runs", run_id_norm, "accounts", account_norm, "state"),
+        components=("output_runs", run_id, "accounts", account, "state"),
         name=ACCOUNT_RUN_CONFIG_NAME,
         code="ACCOUNT_CONFIG_STATE_UNAVAILABLE",
     )
@@ -399,12 +407,7 @@ def load_published_account_run_config(
             "ACCOUNT_CONFIG_PARENT_BYTES_MISMATCH",
             "published account config differs from parent-retained bytes",
         )
-    if sha256(state_bytes).hexdigest() != digest:
-        raise AccountRunConfigError(
-            "ACCOUNT_CONFIG_HASH_MISMATCH",
-            "published account config does not match its authority hash",
-        )
-    return _decode_account_run_config(state_bytes, expected_account=account_norm)
+    return state_bytes
 
 
 def _write_once_or_adopt_at(
