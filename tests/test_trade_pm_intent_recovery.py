@@ -89,6 +89,23 @@ def _loop(tmp_path, monkeypatch, *, payload=None, client=None, apply_changes=Tru
         process_lock=threading.RLock(), stop_event=stop,)
 
 
+def test_option_push_dispatches_to_pm_and_deduplicates(tmp_path, monkeypatch):
+    monkeypatch.setattr(auto_intake, "is_portfolio_management_enabled", lambda cfg: True)
+    payload = _stock("option-1")
+    payload["instrument_ref"].update(
+        asset_type="option", option_type="put", strike="100",
+        expiration_ymd="2026-09-18", multiplier="100",
+    )
+    payload.update(side="sell", position_effect="open", price="2")
+    calls = []
+    client = SimpleNamespace(request_holdings_refresh=lambda **kwargs: calls.append(kwargs))
+    assert _loop(tmp_path, monkeypatch, payload=payload, client=client) == 0
+    assert _loop(tmp_path, monkeypatch, payload=payload, client=client) == 0
+    assert len(calls) == 1
+    assert calls[0]["account"] == "lx"
+    assert calls[0]["request_id"].startswith("option-refresh:")
+
+
 @pytest.mark.parametrize("outcome", ["accepted", "timeout", "interrupted"])
 def test_listener_restart_recovers_durable_pm_handoff(tmp_path, monkeypatch, outcome):
     monkeypatch.setattr(auto_intake, "is_portfolio_management_enabled", lambda cfg: True)

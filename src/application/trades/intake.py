@@ -804,17 +804,20 @@ def _build_portfolio_refresh_intent(
         not enabled
         or not apply_changes
         or str(source or "").strip().lower() not in {"push", "backfill"}
-        or str(getattr(deal, "option_type", "") or "").strip()
         or str(getattr(deal, "broker", "") or "").strip().lower()
         not in {"futu", "富途"}
     ):
         return None
+    is_option = bool(str(getattr(deal, "option_type", "") or "").strip())
     execution = getattr(deal, "execution_input", None)
-    if execution:
-        if not isinstance(execution, Mapping) or getattr(deal, "asset_type", None) != "stock":
+    if execution or is_option:
+        expected_type = "option" if is_option else "stock"
+        if not isinstance(execution, Mapping) or getattr(deal, "asset_type", None) != expected_type:
             return None
         validated = normalize_execution_input(execution)
-        if execution.get("errors") or validated["errors"] or validated["instrument_ref"]["asset_type"] != "stock":
+        if execution.get("errors") or validated["errors"]:
+            return None
+        if validated["instrument_ref"]["asset_type"] != expected_type:
             return None
     account = str(getattr(deal, "internal_account", "") or "").strip().lower()
     symbol = str(getattr(deal, "symbol", "") or "").strip()
@@ -833,4 +836,5 @@ def _build_portfolio_refresh_intent(
     ):
         return None
     digest = hashlib.sha256(deal_key.encode("utf-8")).hexdigest()
-    return {"account": account, "request_id": f"stock-refresh:{digest}"}
+    prefix = "option-refresh" if is_option else "stock-refresh"
+    return {"account": account, "request_id": f"{prefix}:{digest}"}

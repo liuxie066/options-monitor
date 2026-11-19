@@ -26,7 +26,7 @@ def _normalize(payload):
     return normalize_trade_deal(payload, futu_account_mapping={"123": "lx"}, allow_opend_refresh=False)
 
 
-def _process(tmp_path, payload, *, normalizer=normalize_trade_deal, source="push"):
+def _process(tmp_path, payload, *, normalizer=normalize_trade_deal, source="push", expected_events=0):
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     result = process_trade_payload(
         payload, repo=repo, state_path=tmp_path / "state.json", audit_path=tmp_path / "audit.jsonl",
@@ -36,7 +36,7 @@ def _process(tmp_path, payload, *, normalizer=normalize_trade_deal, source="push
         enrich_trade_payload_fn=None, normalize_trade_deal_fn=partial(normalizer, allow_opend_refresh=False),
         resolve_trade_deal_fn=resolve_trade_deal, portfolio_management_enabled=True, source=source,
     )
-    assert repo.list_trade_events() == []
+    assert len(repo.list_trade_events()) == expected_events
     return result
 
 
@@ -89,6 +89,15 @@ def test_standard_option_multiplier_never_reaches_writer_when_invalid(tmp_path, 
 
 def _futu_option() -> dict:
     return {"acc_id": "123", "broker_account_id": "futu:REAL:123", "environment": "REAL", "internal_account": "lx", "external_id_namespace": "futu.deal", "deal_id": "option-1", "code": "US.NVDA260918P100000", "qty": "1", "price": "2", "trd_side": "SELL_SHORT", "create_time": "2026-09-07 10:30:00"}
+
+
+def test_valid_futu_option_refresh_keeps_once_semantics(tmp_path):
+    payload = {**_futu_option(), "multiplier": "100"}
+    first = _process(tmp_path, payload, expected_events=1)
+    replay = _process(tmp_path, payload, source="backfill", expected_events=1)
+    assert first["portfolio_refresh_intent"]["account"] == "lx"
+    assert first["portfolio_refresh_intent"]["request_id"].startswith("option-refresh:")
+    assert "portfolio_refresh_intent" not in replay
 
 
 @pytest.mark.parametrize("field,value", [("multiplier", "1.5"), ("contract_multiplier", "0"), ("lot_size", "bad"), ("multiplier", "NaN"), ("multiplier", False), ("multiplier", "-1")])
