@@ -862,9 +862,9 @@ def _bot_runtime_summary(
     }
     if audit_db_path.exists():
         try:
-            rows = InboundAuditStore(audit_db_path).list_recent(limit=1)
-            if rows:
-                audit_summary["latest"] = _bot_audit_latest(rows[0])
+            row = InboundAuditStore(audit_db_path).latest_for_status()
+            if row is not None:
+                audit_summary["latest"] = _bot_audit_latest(row)
         except Exception as exc:
             audit_summary["error"] = f"{type(exc).__name__}: {exc}"
 

@@ -4,6 +4,7 @@ import json
 import sqlite3
 import threading
 import time
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from dataclasses import replace
 
@@ -37,6 +38,35 @@ def recovery(tmp_path, monkeypatch, example_config_path):
                         authorization=authorization)
     monkeypatch.setattr(feishu_ws, "FEISHU_OUTBOX_RETRY_INTERVAL_SECONDS", 0.02, raising=False)
     return settings, store, envelope
+
+
+def test_empty_reply_poll_does_not_need_write_lock(tmp_path):
+    store = BotHostStore(tmp_path / "host.sqlite3")
+    assert store.claim_reply(channel="feishu") is None
+    assert not store.path.exists()
+    store.enqueue_reply(delivery_key="settled", channel="feishu", payload={"text": "old"})
+    with closing(sqlite3.connect(store.path)) as writer:
+        with writer:
+            writer.execute("UPDATE bot_reply_outbox SET status='delivered', payload_json='{}'")
+        writer.execute("BEGIN IMMEDIATE")
+        assert store.claim_reply(channel="feishu") is None
+
+
+def test_reply_poll_scrubs_legacy_terminal_payload_without_claiming_it(tmp_path):
+    store = BotHostStore(tmp_path / "host.sqlite3")
+    opts = {"channel": "feishu", "payload": {"text": "old"}}
+    store.enqueue_reply(delivery_key="terminal", **opts)
+    store.enqueue_reply(delivery_key="unknown", **opts)
+    with closing(sqlite3.connect(store.path)) as db:
+        with db:
+            db.executemany(
+                "UPDATE bot_reply_outbox SET status=? WHERE delivery_key=?",
+                [("delivered", "terminal"), ("delivery_unknown", "unknown")],
+            )
+        assert store.claim_reply(channel="feishu") is None
+        assert db.execute(
+            "SELECT delivery_key, payload_json FROM bot_reply_outbox ORDER BY delivery_key"
+        ).fetchall() == [("terminal", "{}"), ("unknown", '{"text": "old"}')]
 
 
 def _wait(predicate):
