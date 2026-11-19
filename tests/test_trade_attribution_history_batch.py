@@ -61,6 +61,25 @@ def independent(base, dates):
         base=base, account="lx", market="US", market_trading_date=day) for day in dates}
 
 
+def test_batch_reads_account_fanouts_once_and_refreshes_next_batch(history, monkeypatch):
+    from src.application import notification_fanout
+
+    base, _, dates = history
+    reads = []
+    original = notification_fanout.list_notification_fanouts
+
+    def counted(**kwargs):
+        reads.append(kwargs["account"])
+        return original(**kwargs)
+
+    expected = independent(base, dates)
+    monkeypatch.setattr(notification_fanout, "list_notification_fanouts", counted)
+    assert batch(base, dates) == expected
+    assert reads == ["lx"]
+    assert batch(base, dates) == expected
+    assert reads == ["lx", "lx"]
+
+
 @pytest.mark.parametrize("warm", [False, True])
 def test_batch_normalizes_each_source_at_most_once(history, monkeypatch, warm):
     base, _, dates = history

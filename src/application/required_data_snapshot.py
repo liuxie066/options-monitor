@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import base64
-import binascii
 import csv
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import io
@@ -17,7 +17,7 @@ from src.application.opend_symbol_outputs import (
     REQUIRED_DATA_COLUMNS,
     REQUIRED_DATA_QUOTE_SNAPSHOT_SCHEMA,
     resolve_exact_fresh_required_data_quote_receipt,
-    validate_required_data_quote_bytes,
+    validate_required_data_quote_projection,
     validate_required_data_quote_candidate,
     validate_required_data_source_outcome,
 )
@@ -104,6 +104,27 @@ class FrozenRequiredDataUnavailable(RuntimeError):
 FrozenRequiredDataEntry = tuple[dict[str, Any], bytes]
 
 
+class FrozenProjectionReadScope:
+    """Reuse projection results across verified reads in one operation."""
+
+    def __init__(self) -> None:
+        self._coverage: dict[str, dict[str, Any] | None] = {}
+
+    def _validate(
+        self, payload_sha256: str, *, raw_payload: Mapping[str, Any],
+        required_data_csv_bytes: bytes, expected_fetch_contract: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        # The verified receipt payload binds the fetch contract and both inputs
+        # through inline bytes or a freshly verified content-addressed blob.
+        if payload_sha256 not in self._coverage:
+            meta = validate_required_data_quote_projection(
+                raw_payload=raw_payload, required_data_csv_bytes=required_data_csv_bytes,
+                expected_fetch_contract=expected_fetch_contract,
+            )
+            self._coverage[payload_sha256] = meta.get("required_data_coverage")
+        return deepcopy(self._coverage[payload_sha256])
+
+
 @dataclass(frozen=True)
 class FrozenRequiredDataBatch:
     manifest: dict[str, Any]
@@ -182,9 +203,11 @@ def seal_required_data_snapshot(
         )
     target = target_input.resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
+    projection_scope = FrozenProjectionReadScope()
     existing_payload: dict[str, Any] | None = None
     if target.exists():
         existing_payload, _ = _load_required_data_snapshot_manifest_for_seal(
+            projection_scope=projection_scope,
             manifest_path=target,
             expected_run_id=run_id_norm,
             expected_required_data_root=root,
@@ -247,6 +270,7 @@ def seal_required_data_snapshot(
                 )
                 continue
             symbol_entries[symbol] = _ready_manifest_entry(
+                projection_scope=projection_scope,
                 root=root,
                 run_id=run_id_norm,
                 symbol=symbol,
@@ -326,6 +350,7 @@ def seal_required_data_snapshot(
         payload=payload,
     )
     _validate_manifest_symbols(
+        projection_scope=projection_scope,
         payload=payload,
         root=root,
         run_id=run_id_norm,
@@ -340,6 +365,7 @@ def seal_required_data_snapshot(
         return existing_payload
     if target.exists():
         adopted, _ = _load_required_data_snapshot_manifest_for_seal(
+            projection_scope=projection_scope,
             manifest_path=target,
             expected_run_id=run_id_norm,
             expected_required_data_root=root,
@@ -351,6 +377,7 @@ def seal_required_data_snapshot(
         return adopted
     atomic_write_json(target, payload)
     written, _ = _load_required_data_snapshot_manifest_for_seal(
+        projection_scope=projection_scope,
         manifest_path=target,
         expected_run_id=run_id_norm,
         expected_required_data_root=root,
@@ -636,6 +663,7 @@ def _load_required_data_snapshot_manifest_snapshot(
     manifest_path: Path,
     expected_run_id: str,
     expected_required_data_root: Path | None = None,
+    projection_scope: FrozenProjectionReadScope | None = None,
 ) -> tuple[
     dict[str, Any],
     Path,
@@ -730,6 +758,7 @@ def _load_required_data_snapshot_manifest_snapshot(
         root=root,
         run_id=run_id,
         sealed_at=sealed_at,
+        projection_scope=projection_scope,
     )
     return payload, root, manifest_bytes, resolved_entries
 
@@ -786,11 +815,13 @@ def _validate_manifest_close_advice_plan(
 
 def _load_required_data_snapshot_manifest_for_seal(
     *,
+    projection_scope: FrozenProjectionReadScope,
     manifest_path: Path,
     expected_run_id: str,
     expected_required_data_root: Path | None,
 ) -> tuple[dict[str, Any], Path]:
-    payload, root = load_required_data_snapshot_manifest(
+    payload, root, _, _ = _load_required_data_snapshot_manifest_snapshot(
+        projection_scope=projection_scope,
         manifest_path=manifest_path,
         expected_run_id=expected_run_id,
         expected_required_data_root=expected_required_data_root,
@@ -808,6 +839,7 @@ def _validate_manifest_symbols(
     root: Path,
     run_id: str,
     sealed_at: datetime,
+    projection_scope: FrozenProjectionReadScope | None = None,
 ) -> dict[str, FrozenRequiredDataEntry]:
     symbols = payload.get("symbols")
     if not isinstance(symbols, dict):
@@ -841,6 +873,7 @@ def _validate_manifest_symbols(
                     symbol=symbol,
                     entry=entry,
                     now=sealed_at,
+                    projection_scope=projection_scope,
                 )
             except Exception as exc:
                 raise _RequiredDataSnapshotEntryError(
@@ -998,6 +1031,7 @@ def resolve_frozen_required_data_csv_bytes_batch(
     now: datetime | None = None,
     require_fresh: bool = True,
     require_expiration_discovery: bool = False,
+    projection_scope: FrozenProjectionReadScope | None = None,
 ) -> FrozenRequiredDataBatch:
     try:
         manifest, _root, manifest_bytes, resolved_entries = (
@@ -1005,6 +1039,7 @@ def resolve_frozen_required_data_csv_bytes_batch(
                 manifest_path=manifest_path,
                 expected_run_id=expected_run_id,
                 expected_required_data_root=required_data_root,
+                projection_scope=projection_scope,
             )
         )
     except _RequiredDataSnapshotEntryError as exc:
@@ -1195,6 +1230,7 @@ def _validate_global_plan_symbols(
 
 def _ready_manifest_entry(
     *,
+    projection_scope: FrozenProjectionReadScope,
     root: Path,
     run_id: str,
     symbol: str,
@@ -1222,7 +1258,7 @@ def _ready_manifest_entry(
         or str(bundle.get("symbol") or "").strip().upper() != symbol
     ):
         raise RequiredDataSnapshotError(f"{symbol} quote bundle is invalid")
-    raw_bytes, csv_bytes, read_source, scan_blob_ref = _bundle_scan_bytes(
+    raw_payload, csv_bytes, read_source, scan_blob_ref = _load_bundle_scan_data(
         root=root,
         run_id=run_id,
         bundle=bundle,
@@ -1233,7 +1269,7 @@ def _ready_manifest_entry(
         receipt=receipt,
         symbol=symbol,
         expected_fetch_contract=expected_fetch_contract,
-        raw_json_bytes=raw_bytes,
+        raw_payload=raw_payload,
     )
     if str(evidence.get("expected_fetch_contract_sha256") or "") != str(
         contract["contract_sha256"]
@@ -1242,8 +1278,9 @@ def _ready_manifest_entry(
             f"{symbol} resolver contract evidence mismatch"
         )
     if read_source == "canonical_blob":
-        validate_required_data_quote_bytes(
-            raw_json_bytes=raw_bytes,
+        projection_scope._validate(
+            validated["payload_sha256"],
+            raw_payload=raw_payload,
             required_data_csv_bytes=csv_bytes,
             expected_fetch_contract=contract,
         )
@@ -1254,8 +1291,7 @@ def _ready_manifest_entry(
             expected_fetch_contract=contract,
         )
     source_outcome, reason_code = _validate_complete_required_data_bundle(
-        bundle,
-        raw_json_bytes=raw_bytes,
+        raw_payload=raw_payload,
         required_data_csv_bytes=csv_bytes,
     )
     if dict(plan_item.get("fetch_plan") or {}) != dict(contract["fetch_plan"]):
@@ -1304,6 +1340,7 @@ def _validate_ready_entry(
     symbol: str,
     entry: Mapping[str, Any],
     now: datetime,
+    projection_scope: FrozenProjectionReadScope | None = None,
 ) -> tuple[dict[str, Any], bytes]:
     receipt_relpath = _required_text(entry.get("receipt_relpath"), "receipt_relpath")
     receipt_path = safe_existing_relative_path(root, receipt_relpath)
@@ -1355,7 +1392,7 @@ def _validate_ready_entry(
         raise SourceReceiptError(
             "manifest expected fetch contract hash mismatch"
         )
-    raw_bytes, csv_bytes, read_source, scan_blob_ref = _bundle_scan_bytes(
+    raw_payload, csv_bytes, read_source, scan_blob_ref = _load_bundle_scan_data(
         root=root,
         run_id=run_id,
         bundle=bundle,
@@ -1366,25 +1403,28 @@ def _validate_ready_entry(
         receipt=receipt,
         symbol=symbol,
         expected_fetch_contract=expected_contract,
-        raw_json_bytes=raw_bytes,
+        raw_payload=raw_payload,
     )
-    validated_meta = validate_required_data_quote_bytes(
-        raw_json_bytes=raw_bytes,
-        required_data_csv_bytes=csv_bytes,
-        expected_fetch_contract=contract,
-    )
+    if projection_scope is None:
+        validated_meta = validate_required_data_quote_projection(
+            raw_payload=raw_payload, required_data_csv_bytes=csv_bytes, expected_fetch_contract=contract,
+        )
+        derived_coverage = validated_meta.get("required_data_coverage")
+    else:
+        derived_coverage = projection_scope._validate(
+            validated["payload_sha256"], raw_payload=raw_payload,
+            required_data_csv_bytes=csv_bytes, expected_fetch_contract=contract,
+        )
     if read_source != "canonical_blob":
         _validate_canonical_bundle_candidate(
             root=root,
             bundle=bundle,
             expected_fetch_contract=contract,
         )
-    derived_coverage = validated_meta.get("required_data_coverage")
     if "required_data_coverage" in entry and entry["required_data_coverage"] != derived_coverage:
         raise SourceReceiptError("required-data coverage differs from bound rows")
     source_outcome, reason_code = _validate_complete_required_data_bundle(
-        bundle,
-        raw_json_bytes=raw_bytes,
+        raw_payload=raw_payload,
         required_data_csv_bytes=csv_bytes,
     )
     raw_relpath = _required_text(entry.get("raw_json_relpath"), "raw_json_relpath")
@@ -1429,19 +1469,19 @@ def _validate_ready_entry(
             ),
             "scan_blob_ref": scan_blob_ref,
             "read_source": read_source,
-            "required_data_coverage": validated_meta.get("required_data_coverage"),
+            "required_data_coverage": derived_coverage,
         },
         csv_bytes,
     )
 
 
-def _bundle_scan_bytes(
+def _load_bundle_scan_data(
     *,
     root: Path,
     run_id: str,
     bundle: Mapping[str, Any],
     expected_scan_blob_ref: Any,
-) -> tuple[bytes, bytes, str, dict[str, Any] | None]:
+) -> tuple[dict[str, Any], bytes, str, dict[str, Any] | None]:
     bundle_ref = bundle.get("scan_blob_ref")
     if bundle_ref is None:
         if expected_scan_blob_ref is not None:
@@ -1469,7 +1509,11 @@ def _bundle_scan_bytes(
             raise SourceReceiptError(
                 "required-data bytes do not match the sealed receipt"
             )
-        return raw_bytes, csv_bytes, "legacy_snapshot", None
+        try:
+            raw_payload = json.loads(raw_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise SourceReceiptError("required-data bundle raw JSON is unreadable") from exc
+        return raw_payload, csv_bytes, "legacy_snapshot", None
     if not isinstance(bundle_ref, Mapping) or not isinstance(
         expected_scan_blob_ref,
         Mapping,
@@ -1509,7 +1553,7 @@ def _bundle_scan_bytes(
             )
         ):
             raise SourceReceiptError("required-data legacy shadow mismatch")
-    return raw_bytes, csv_bytes, "canonical_blob", validated_ref
+    return loaded["payload"]["provider_payload"], csv_bytes, "canonical_blob", validated_ref
 
 
 def _validate_bundle_authority(
@@ -1518,7 +1562,7 @@ def _validate_bundle_authority(
     receipt: Mapping[str, Any],
     symbol: str,
     expected_fetch_contract: Mapping[str, Any],
-    raw_json_bytes: bytes | None = None,
+    raw_payload: Mapping[str, Any],
 ) -> dict[str, Any]:
     contract_payload = bundle.get("expected_fetch_contract")
     if not isinstance(contract_payload, Mapping):
@@ -1570,25 +1614,6 @@ def _validate_bundle_authority(
         expected=contract["fetch_binding"],
         subject="operational fetch policy",
     )
-    try:
-        raw_bytes = (
-            bytes(raw_json_bytes)
-            if raw_json_bytes is not None
-            else base64.b64decode(
-                _required_text(bundle.get("raw_json_base64"), "raw_json_base64"),
-                validate=True,
-            )
-        )
-        raw_payload = json.loads(raw_bytes.decode("utf-8"))
-    except (
-        ValueError,
-        UnicodeDecodeError,
-        json.JSONDecodeError,
-        binascii.Error,
-    ) as exc:
-        raise SourceReceiptError(
-            "required-data bundle raw JSON is unreadable"
-        ) from exc
     meta = raw_payload.get("meta") if isinstance(raw_payload, Mapping) else None
     if not isinstance(meta, Mapping):
         raise SourceReceiptError(
@@ -1663,30 +1688,10 @@ def _validate_physical_binding(
 
 
 def _validate_complete_required_data_bundle(
-    bundle: Mapping[str, Any],
     *,
-    raw_json_bytes: bytes | None = None,
-    required_data_csv_bytes: bytes | None = None,
+    raw_payload: Mapping[str, Any],
+    required_data_csv_bytes: bytes,
 ) -> tuple[str, str | None]:
-    try:
-        raw_bytes = (
-            bytes(raw_json_bytes)
-            if raw_json_bytes is not None
-            else base64.b64decode(
-                _required_text(bundle.get("raw_json_base64"), "raw_json_base64"),
-                validate=True,
-            )
-        )
-        raw_payload = json.loads(raw_bytes.decode("utf-8"))
-    except (
-        ValueError,
-        UnicodeDecodeError,
-        json.JSONDecodeError,
-        binascii.Error,
-    ) as exc:
-        raise SourceReceiptError(
-            "required-data bundle raw JSON is unreadable"
-        ) from exc
     meta = raw_payload.get("meta") if isinstance(raw_payload, dict) else None
     if str((meta or {}).get("status") or "").strip().lower() != "ok":
         raise SourceReceiptError(
@@ -1705,27 +1710,15 @@ def _validate_complete_required_data_bundle(
     )
     if not rows:
         try:
-            csv_bytes = (
-                bytes(required_data_csv_bytes)
-                if required_data_csv_bytes is not None
-                else base64.b64decode(
-                    _required_text(
-                        bundle.get("required_data_csv_base64"),
-                        "required_data_csv_base64",
-                    ),
-                    validate=True,
-                )
-            )
             csv_rows = list(
                 csv.reader(
-                    io.StringIO(csv_bytes.decode("utf-8"))
+                    io.StringIO(required_data_csv_bytes.decode("utf-8"))
                 )
             )
         except (
             ValueError,
             UnicodeDecodeError,
             csv.Error,
-            binascii.Error,
         ) as exc:
             raise SourceReceiptError(
                 "success-empty required-data CSV is unreadable"

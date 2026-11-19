@@ -186,7 +186,7 @@ def test_real_repository_history_and_persistence_keep_outputs(tmp_path):
 
 def test_atomic_write_failure_is_logged_and_original_error_preserved(monkeypatch, tmp_path):
     error = OSError("disk fixture full")
-    monkeypatch.setattr(repo, "atomic_write_json", lambda *_: (_ for _ in ()).throw(error))
+    monkeypatch.setattr(repo, "atomic_write_json", lambda *_, **__: (_ for _ in ()).throw(error))
     log = RunLog()
     with pytest.raises(OSError) as caught:
         with audit.daily_brief_timing_scope(runlog=log, account="lx", market="US"):

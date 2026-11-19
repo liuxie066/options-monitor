@@ -276,6 +276,17 @@ def trade_attribution_facts_from_events(events: Sequence[Mapping[str, Any]], *, 
         open_event_id = str(fields.get("open_event_id") or fields.get("source_event_id") or "")
         if open_event_id:
             by_open_event.setdefault(open_event_id, []).append(lot_id)
+    # Keep ledger order for proof hashes and last-decision selection. An event
+    # can reference the same lot through both its opening and its target.
+    events_by_lot: dict[str, list[dict[str, Any]]] = {}
+    for event in effective:
+        related_ids = set(by_open_event.get(event.get("event_id"), ()))
+        for field in ("lot_id", "target_lot_id"):
+            value = event.get(field)
+            if isinstance(value, str) and value in lots:
+                related_ids.add(value)
+        for related_id in related_ids:
+            events_by_lot.setdefault(related_id, []).append(event)
     out = []
     for event in effective:
         contract = event.get("contract_key") or {}
@@ -293,9 +304,8 @@ def trade_attribution_facts_from_events(events: Sequence[Mapping[str, Any]], *, 
         ref = execution.get("broker_account_ref") or {}
         fields = lots[lot_id]
         membership = metadata.get(lot_id) or {}
-        ordinary = _ordinary_decision(effective, lot_id, metadata=metadata, accepted=accepted, allow_rule=True)
-        related = [row for row in effective if row.get("event_id") == event["event_id"]
-                   or row.get("lot_id") == lot_id or row.get("target_lot_id") == lot_id]
+        related = events_by_lot[lot_id]
+        ordinary = _ordinary_decision(related, lot_id, metadata=metadata, accepted=accepted, allow_rule=True)
         allocations = membership.get("wheel_call_allocations") or []
         linked = bool(allocations or membership.get("source_wheel_branch_id") or membership.get("source_stock_lot_id")
                       or membership.get("strategy_group_id"))
@@ -659,10 +669,14 @@ def build_trade_attribution_view(
         rows, account=account, as_of_ms=now_ms, market=market, monitoring_readiness=readiness,
     )
     branches = model["wheel_branches"]
+    events_by_id = {}
+    for event in rows["trade_events"]:
+        events_by_id.setdefault(event["event_id"], event)
+    known_event_ids = set(events_by_id)
     conflict_statuses = {}
     wheel_events, _wheel_errors = effective_wheel_events(rows["account_wheel_events"], as_of_ms=now_ms, trade_events=rows["trade_events"],
         conflict_statuses=conflict_statuses,
-        known_trade_event_ids={event["event_id"] for event in rows["trade_events"]})
+        known_trade_event_ids=known_event_ids)
     blocked_executions = {execution for event in wheel_events if event["event_type"] == "wheel_attribution_conflict"
         and not conflict_statuses[event["event_id"]]["resolved"]
         for execution in event["payload"]["execution_keys"]}
@@ -699,6 +713,7 @@ def build_trade_attribution_view(
                     "strategy_group_id": pair["strategy_group_id"], "inference": pair})
     # Rows/account/market are fixed for this invocation. Historical branches may
     # be reused only at the identical fill instant, never across distinct times.
+    branch_account_refs: dict[str, dict[str, Any] | None] = {}
     historical_branches_by_time: dict[int, dict[str, Any]] = {}
     for fact in facts:
         lot = fact["lot_id"]
@@ -737,7 +752,9 @@ def build_trade_attribution_view(
                 continue
             if prior["integrity_status"] != "trusted":
                 reasons.append("wheel_branch_not_trusted_at_fill")
-            branch_ref = _branch_account_ref(branch, rows)
+            if branch_id not in branch_account_refs:
+                branch_account_refs[branch_id] = _branch_account_ref(branch, rows)
+            branch_ref = branch_account_refs[branch_id]
             if branch_ref is not None and branch_ref != fact["broker_account_ref"]:
                 continue
             if branch_ref is None:
@@ -749,9 +766,9 @@ def build_trade_attribution_view(
                     for key in ("call_open_event_id", "option_open_event_id", "put_open_event_id")}]
             if rejected:
                 continue
-            fill = next(event for event in rows["trade_events"] if event["event_id"] == fact["open_event_id"])
+            fill = events_by_id[fact["open_event_id"]]
             intent_check = resolve_wheel_fill_intent(branch, fill, rows["account_wheel_events"], now_ms=now_ms,
-                known_trade_event_ids={event["event_id"] for event in rows["trade_events"]})
+                known_trade_event_ids=known_event_ids)
             reasons.extend(intent_check["reason_codes"])
             intent = intent_check["intent"]
             if branch["integrity_status"] != "trusted" or (not readiness["ready"]

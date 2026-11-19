@@ -164,6 +164,17 @@ def test_same_run_different_config_fails_without_overwrite(tmp_path) -> None:
     assert not (original.state_path.parent.parent / "config.override.json").exists()
 
 
+def test_load_rechecks_published_bytes_even_after_success(tmp_path) -> None:
+    config = _account_config()
+    authority = _publish_config(tmp_path, "run-recheck", config=config)
+    assert _load_config(authority, "run-recheck", base=tmp_path) == config
+    # Equivalent JSON with different bytes still conflicts with the frozen generation.
+    authority.state_path.write_bytes(authority.canonical_bytes + b" ")
+    with pytest.raises(AccountRunConfigError) as raised:
+        _load_config(authority, "run-recheck", base=tmp_path)
+    assert raised.value.code == "ACCOUNT_CONFIG_PARENT_BYTES_MISMATCH"
+
+
 def test_account_config_authority_rejects_cross_run_consumption(tmp_path) -> None:
     authority = _publish_config(tmp_path, "run-a", config=_account_config())
 

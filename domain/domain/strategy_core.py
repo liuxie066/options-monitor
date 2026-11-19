@@ -6,8 +6,9 @@ only rows reaching underwriting; prior-stage rejects stay with the caller.
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import datetime, timezone
+import json
 import math
 from typing import Any, Callable
 
@@ -34,7 +35,7 @@ from domain.domain.sell_call_config import resolve_effective_sell_call_min_strik
 from domain.domain.short_vol_assessment import ShortVolPortfolioContext, _float, portfolio_concentration_fields
 from domain.domain.trade_contract_identity import require_option_multiplier
 from domain.domain.strategy_identity import (
-    IDENTITY_FORMAT, implementation_policy_hash, strategy_policy_hash, candidate_ranking_profile,
+    IDENTITY_FORMAT, implementation_policy_hash, strategy_policy_hash, ranking_profile_from_identities,
     validate_strategy_identity as _validated_strategy_identity,
 )
 
@@ -58,9 +59,11 @@ class StrategyTemplate:
     explain: Callable[..., dict[str, Any]]
 
 
-def _baseline_constraints(row, *, mode, cfg):
-    if mode == "put":
-        return {}
+def _no_constraints(row, *, mode, cfg):
+    return {}
+
+
+def _baseline_call_constraints(row, *, mode, cfg):
     effective = resolve_effective_sell_call_min_strike(
         min_strike=cfg.min_strike, avg_cost=row.get("avg_cost"), cost_multiplier=cfg.min_strike_cost_multiplier,
     )
@@ -84,9 +87,10 @@ def _baseline_explain(row, *, mode, cfg):
 
 # Source-distributed implementations only; no registration API or serialized callbacks.
 _TEMPLATES = {
-    (name, "0.2.0"): StrategyTemplate(name, "0.2.0", mode, _baseline_constraints,
+    (name, "0.2.0"): StrategyTemplate(name, "0.2.0", mode, constraints,
                                     _baseline_evaluate, _baseline_rank, _baseline_explain)
-    for name, mode in (("csp_baseline", "put"), ("cc_baseline", "call"))
+    for name, mode, constraints in (("csp_baseline", "put", _no_constraints),
+                                    ("cc_baseline", "call", _baseline_call_constraints))
 }
 
 
@@ -126,7 +130,9 @@ class ResolvedStrategy:
             raise ValueError("account must be a nonempty lowercase label")
         if self.market is not None and self.market not in ("us", "hk"):
             raise ValueError("market must be us or hk")
-        for name, value in asdict(self.config).items():
+        for parameter in fields(self.config):
+            name = parameter.name
+            value = getattr(self.config, name)
             if name == "strategy":
                 continue
             if value is None and name in ("min_strike", "max_strike", "min_dte", "max_dte", "max_abs_delta"):
@@ -148,12 +154,10 @@ class ResolvedStrategy:
         window = DEFAULT_SELL_PUT_WINDOW if self.mode == "put" else DEFAULT_SELL_CALL_WINDOW
         baseline = InsuranceUnderwritingConfig(
             min_dte=window.min_dte, max_dte=window.max_dte, max_abs_delta=default_max_abs_delta(self.mode),
+            min_strike=self.config.min_strike, max_strike=self.config.max_strike,
         )
         parameters = asdict(self.config)
         strike_inputs = {key: parameters.pop(key) for key in ("min_strike", "max_strike")}
-        baseline_parameters = asdict(baseline)
-        for key in strike_inputs:
-            baseline_parameters.pop(key)
         identity = {
             "identity_format": IDENTITY_FORMAT,
             "core_version": __version__,
@@ -161,7 +165,7 @@ class ResolvedStrategy:
             "template_version": self.descriptor.version,
             "policy_kind": (
                 "baseline" if self.descriptor.template_id in ("csp_baseline", "cc_baseline")
-                and parameters == baseline_parameters and self.ranking_profile == "current_tie_break"
+                and self.config == baseline and self.ranking_profile == "current_tie_break"
                 else "custom"
             ),
             "strike_inputs": strike_inputs,
@@ -188,8 +192,10 @@ def validate_strategy_identity(
 ) -> ResolvedStrategy | None:
     """Restore a validated resolution at the evaluation/application boundary."""
     identity = _validated_strategy_identity(row, mode=mode, account=account, market=market)
-    if identity is None:
-        return None
+    return _restore_strategy(identity) if identity is not None else None
+
+
+def _restore_strategy(identity: dict[str, Any]) -> ResolvedStrategy:
     try:
         scope = identity["scope"]
         strategy = resolve_strategy(
@@ -204,9 +210,10 @@ def validate_strategy_identity(
         expected = strategy.identity
         # Older v2 baselines sealed 0.30 or 0.40. Accept those provenance labels
         # only when delta is the sole difference from today's baseline parameters.
-        if identity["policy_kind"] == "baseline" and strategy.config.max_abs_delta in (0.30, DEFAULT_MAX_ABS_DELTA):
+        if (expected["policy_kind"] != "baseline" and identity["policy_kind"] == "baseline"
+                and strategy.config.max_abs_delta in (0.30, DEFAULT_MAX_ABS_DELTA)):
             current_defaults = replace(strategy, config=replace(
-                strategy.config, max_abs_delta=default_max_abs_delta(mode),
+                strategy.config, max_abs_delta=default_max_abs_delta(strategy.mode),
             ))
             if current_defaults.identity["policy_kind"] == "baseline":
                 expected["policy_kind"] = "baseline"
@@ -364,6 +371,10 @@ def calculate_constraints(
 
 
 def _constraint_fields(descriptor, row, *, mode, cfg):
+    if descriptor.constraints is _no_constraints:
+        # Validate the input contract once. No template receives these facts.
+        _stable(row)
+        return {}
     fields = _invoke(descriptor.constraints, row, mode=mode, cfg=cfg)
     if not isinstance(fields, dict) or any(
         not isinstance(key, str) or (key != "effective_min_strike" and not key.startswith("policy_"))
@@ -375,47 +386,54 @@ def _constraint_fields(descriptor, row, *, mode, cfg):
     return fields
 
 
+def evaluate_candidate_decision(row: dict[str, Any], *, strategy: ResolvedStrategy) -> dict[str, Any]:
+    """Evaluate one prepared row without ranking the accepted universe."""
+    descriptor = _execution_template(strategy)
+    transported = validate_strategy_identity(row, mode=strategy.mode)
+    if transported is not None and transported != strategy:
+        raise ValueError("candidate identity conflicts with evaluated strategy")
+    for field, expected in (("account", strategy.account), ("market", strategy.market), ("option_type", strategy.mode)):
+        actual = row.get(field)
+        if expected is not None and actual is not None and str(actual).lower() != expected:
+            raise ValueError(f"candidate {field} conflicts with resolved strategy")
+    fields = underwriting_fields(row, mode=strategy.mode, cfg=strategy.config)
+    fields = {**{key: value for key, value in row.items() if key.startswith("policy_")}, **fields}
+    canonical = {**row, **fields}
+    # Reproject policy scalars after shared annotations; never recompute capacity here.
+    constraints = _constraint_fields(descriptor, canonical, mode=strategy.mode, cfg=strategy.config)
+    if constraints.get("effective_min_strike") is not None:
+        floor = _float(row.get("effective_min_strike"))
+        if isinstance(row.get("effective_min_strike"), bool) or floor is None or not math.isfinite(floor):
+            raise ValueError("candidate requires calculate_constraints before evaluation: invalid effective_min_strike")
+    fields.update({key: value for key, value in constraints.items() if key.startswith("policy_")})
+    canonical.update(fields)
+    frozen_input = _stable(canonical)
+    policy = _invoke(descriptor.evaluate, canonical, frozen_facts=frozen_input,
+                     mode=strategy.mode, cfg=strategy.config)
+    policy = validate_candidate_decision_payload(policy)
+    if (_stable(policy.get("normalized_input")) != frozen_input
+            or policy["mode"] != strategy.mode
+            or policy.get("symbol") != str(row.get("symbol") or "").strip().upper()
+            or policy.get("contract_symbol") != _contract_id(row)
+            or policy["accepted"] != (not policy["rejects"])):
+        raise ValueError("template evaluator changed canonical input or decision scope")
+    rejects = merge_opening_rejects(policy["rejects"], opening_qualification_rejects(
+        canonical, mode=strategy.mode, min_net_premium_cny=strategy.config.min_net_income,
+        max_abs_delta=strategy.config.max_abs_delta,
+    ))
+    opening = build_candidate_decision(
+        mode=strategy.mode, symbol=policy["symbol"], contract_symbol=policy["contract_symbol"],
+        accepted=not rejects, rejects=rejects, normalized_input=canonical,
+    )
+    return build_underwriting_result(fields, opening)
+
+
 def evaluate_candidates(rows: list[dict[str, Any]], *, strategy: ResolvedStrategy) -> dict[str, Any]:
     """Evaluate rows already prepared by calculate_constraints, without repeating capacity."""
-    descriptor = _execution_template(strategy)
     decisions = []
     accepted = []
     for row in rows:
-        transported = validate_strategy_identity(row, mode=strategy.mode)
-        if transported is not None and transported != strategy:
-            raise ValueError("candidate identity conflicts with evaluated strategy")
-        for field, expected in (("account", strategy.account), ("market", strategy.market), ("option_type", strategy.mode)):
-            actual = row.get(field)
-            if expected is not None and actual is not None and str(actual).lower() != expected:
-                raise ValueError(f"candidate {field} conflicts with resolved strategy")
-        fields = underwriting_fields(row, mode=strategy.mode, cfg=strategy.config)
-        fields = {**{key: value for key, value in row.items() if key.startswith("policy_")}, **fields}
-        canonical = {**row, **fields}
-        # Reproject policy scalars after shared annotations; never recompute capacity here.
-        constraints = _constraint_fields(descriptor, canonical, mode=strategy.mode, cfg=strategy.config)
-        if constraints.get("effective_min_strike") is not None:
-            floor = _float(row.get("effective_min_strike"))
-            if isinstance(row.get("effective_min_strike"), bool) or floor is None or not math.isfinite(floor):
-                raise ValueError("candidate requires calculate_constraints before evaluation: invalid effective_min_strike")
-        fields.update({key: value for key, value in constraints.items() if key.startswith("policy_")})
-        canonical.update(fields)
-        policy = _invoke(descriptor.evaluate, canonical, mode=strategy.mode, cfg=strategy.config)
-        policy = validate_candidate_decision_payload(policy)
-        if (_stable(policy.get("normalized_input")) != _stable(canonical)
-                or policy["mode"] != strategy.mode
-                or policy.get("symbol") != str(row.get("symbol") or "").strip().upper()
-                or policy.get("contract_symbol") != _contract_id(row)
-                or policy["accepted"] != (not policy["rejects"])):
-            raise ValueError("template evaluator changed canonical input or decision scope")
-        rejects = merge_opening_rejects(policy["rejects"], opening_qualification_rejects(
-            canonical, mode=strategy.mode, min_net_premium_cny=strategy.config.min_net_income,
-            max_abs_delta=strategy.config.max_abs_delta,
-        ))
-        opening = build_candidate_decision(
-            mode=strategy.mode, symbol=policy["symbol"], contract_symbol=policy["contract_symbol"],
-            accepted=not rejects, rejects=rejects, normalized_input=canonical,
-        )
-        decision = build_underwriting_result(fields, opening)
+        decision = evaluate_candidate_decision(row, strategy=strategy)
         decisions.append(decision)
         if decision["accepted"]:
             accepted.append({**row, **decision["fields"]})
@@ -438,20 +456,59 @@ def _execution_template(strategy: ResolvedStrategy) -> StrategyTemplate:
     return descriptor
 
 
-def _stable(value: Any) -> Any:
+def _stable(value: Any, numbers: dict | None = None) -> Any:
     # Compare every field, including display/provenance fields excluded by fingerprints.
+    kind = type(value)
+    if value is None or kind is str or kind is bool:
+        return value
+    if kind is int or kind is float:
+        if kind is float and math.isnan(value):
+            return None
+        if numbers is None:
+            return canonicalize_decision_value(value)
+        key = (kind, value)
+        normalized = numbers.get(key)
+        if normalized is None:
+            normalized = canonicalize_decision_value(value)
+            numbers[key] = normalized
+        return normalized
     if isinstance(value, dict):
-        return tuple((key, _stable(item)) for key, item in sorted(value.items()))
+        if numbers is None:
+            numbers = {}
+        return tuple((key, _stable(item, numbers)) for key, item in sorted(value.items()))
     if isinstance(value, (list, tuple)):
-        return tuple(_stable(item) for item in value)
-    if (isinstance(value, float) and math.isnan(value)) or type(value).__name__ == "NAType":
+        if numbers is None:
+            numbers = {}
+        return tuple(_stable(item, numbers) for item in value)
+    if (isinstance(value, float) and math.isnan(value)) or kind.__name__ == "NAType":
         return None
     return canonicalize_decision_value(value)
 
 
-def _invoke(operation, facts, **kwargs):
-    supplied, arguments = deepcopy(facts), deepcopy(kwargs)
-    before, settings = _stable(supplied), deepcopy(arguments)
+def _copy_candidate_facts(facts, memo=None):
+    # Candidate rows are wide and mostly immutable scalars. Preserve deepcopy's
+    # alias handling for nested facts, including references back to the row.
+    if type(facts) is not dict:
+        return deepcopy(facts, memo)
+    if memo is None:
+        memo = {}
+    elif id(facts) in memo:
+        return memo[id(facts)]
+    copied = {}
+    memo[id(facts)] = copied
+    for key, value in facts.items():
+        if type(value) is dict:
+            value = _copy_candidate_facts(value, memo)
+        elif value is not None and type(value) not in (str, int, float, bool):
+            value = deepcopy(value, memo)
+        copied[key if type(key) is str else deepcopy(key, memo)] = value
+    return copied
+
+
+def _invoke(operation, facts, *, frozen_facts=None, **kwargs):
+    supplied, arguments = _copy_candidate_facts(facts), deepcopy(kwargs)
+    before = _stable(supplied) if frozen_facts is None else frozen_facts
+    settings = deepcopy(arguments)
     result = operation(supplied, **arguments)
     if _stable(supplied) != before or arguments != settings:
         raise ValueError("template mutated frozen facts or configuration")
@@ -465,9 +522,19 @@ def _contract_id(row):
 def rank_candidates(rows: list[dict[str, Any]], *, mode: str,
                     strategy: ResolvedStrategy | None = None) -> list[dict[str, Any]]:
     """Dispatch evaluated rows without screening again or changing baseline tail order."""
-    candidate_ranking_profile(rows, mode=mode)
-    resolutions = [validate_strategy_identity(row, mode=mode) for row in rows]
-    bound = [item for item in resolutions if item is not None]
+    identities = [_validated_strategy_identity(row, mode=mode) for row in rows]
+    ranking_profile_from_identities(identities)
+    # Row-specific market/account checks ran above. Restore each distinct transported
+    # policy once; JSON retains distinctions such as a boolean versus a number.
+    seen = set()
+    bound = []
+    for identity in identities:
+        if identity is None:
+            continue
+        encoded = json.dumps(identity, sort_keys=True, allow_nan=False)
+        if encoded not in seen:
+            bound.append(_restore_strategy(identity))
+            seen.add(encoded)
     if strategy is not None:
         if strategy.mode != mode or any(
             item.descriptor != strategy.descriptor or item.ranking_profile != strategy.ranking_profile
@@ -484,11 +551,27 @@ def rank_candidates(rows: list[dict[str, Any]], *, mode: str,
     originals = {_contract_id(row): _stable(row) for row in rows}
     if len(originals) != len(rows) or "" in originals:
         raise ValueError("duplicate or missing ranking contract identity")
-    ranked = _invoke(descriptor.rank, rows, mode=mode, ranking_profile=strategy.ranking_profile)
+    if type(rows) is list:
+        supplied = []
+        memo = {id(rows): supplied}
+        supplied.extend(_copy_candidate_facts(row, memo) for row in rows)
+    else:
+        supplied = deepcopy(rows)
+    ranked = descriptor.rank(supplied, mode=mode, ranking_profile=strategy.ranking_profile)
+    if len(supplied) != len(originals) or any(
+        _stable(row) != expected for row, expected in zip(supplied, originals.values())
+    ):
+        raise ValueError("template mutated frozen facts or configuration")
     if not isinstance(ranked, list) or any(not isinstance(row, dict) for row in ranked):
         raise ValueError("template ranking must be a permutation")
-    actual = {_contract_id(row): _stable(row) for row in ranked}
-    if len(ranked) != len(rows) or len(actual) != len(ranked) or actual != originals:
+    # Most rankers reorder the verified rows. Only independently returned copies
+    # require another comparison of every nested fact.
+    verified = dict(zip(originals, supplied))
+    returned = {_contract_id(row): row for row in ranked}
+    if len(ranked) != len(rows) or returned.keys() != originals.keys() or any(
+        row is not verified[key] and _stable(row) != originals[key]
+        for key, row in returned.items()
+    ):
         raise ValueError("template ranking changed candidate membership or facts")
     return ranked
 

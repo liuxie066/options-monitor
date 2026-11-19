@@ -124,7 +124,7 @@ def atomic_write_json(
     obj: Any,
     *,
     encoding: str = "utf-8",
-    indent: int = 2,
+    indent: int | None = 2,
 ) -> None:
     payload = json.dumps(obj, ensure_ascii=False, indent=indent) + "\n"
     atomic_write_text(path, payload, encoding=encoding)

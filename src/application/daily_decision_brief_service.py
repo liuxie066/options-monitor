@@ -281,15 +281,11 @@ def assemble_daily_decision_brief(
         call_available,
         _accepted_candidate_snapshot,
     ) = (
-        _load_opening_candidate_families(
-            base=base_path,
-            run_id=run_id_norm,
-            account=account_norm,
+        _project_opening_candidate_families(
             market=market_norm,
             source_artifacts=source_artifacts,
             data_gaps=data_gaps,
-            snapshot=bundle_owners.get("opening"),
-            unavailable_reason=candidate_bundle_unavailable_reason,
+            validated_snapshot=bundle_owners.get("opening"),
             not_applicable=(candidate_bundle is not None and not opening_applicable),
             applicable_modes=expected_owner_modes["opening"],
         )
@@ -866,16 +862,12 @@ def assemble_daily_decision_briefs(
     return out
 
 
-def _load_opening_candidate_families(
+def _project_opening_candidate_families(
     *,
-    base: Path,
-    run_id: str,
-    account: str,
     market: str,
     source_artifacts: list[dict[str, Any]],
     data_gaps: list[dict[str, Any]],
-    snapshot: Mapping[str, Any] | None = None,
-    unavailable_reason: str | None = None,
+    validated_snapshot: dict[str, Any] | None,
     not_applicable: bool = False,
     applicable_modes: set[str] | None = None,
 ) -> tuple[
@@ -888,21 +880,8 @@ def _load_opening_candidate_families(
     if not_applicable:
         return [], False, [], False, None
     modes = set(applicable_modes or ())
-    accepted_snapshot: dict[str, Any] | None = None
-    try:
-        if snapshot is None:
-            raise OpeningCandidateSnapshotError(
-                unavailable_reason or "opening candidate snapshot is not manifest-bound"
-            )
-        else:
-            validate_opening_candidate_snapshot(
-                snapshot,
-                expected_run_id=run_id,
-                expected_account=account,
-                require_current_contract=True,
-            )
-            accepted_snapshot = dict(snapshot)
-    except OpeningCandidateSnapshotError as exc:
+    # The bundle loader validates the opening contract and its dependency files.
+    if validated_snapshot is None:
         gap_modes = modes or {"put", "call"}
         for mode, family in (("put", "sell_put"), ("call", "covered_call")):
             if mode not in gap_modes:
@@ -912,11 +891,11 @@ def _load_opening_candidate_families(
                     "scope": "strategy",
                     "strategy_family": family,
                     "reason": "opening_candidate_snapshot_unavailable",
-                    "error_type": type(exc).__name__,
+                    "error_type": OpeningCandidateSnapshotError.__name__,
                 }
             )
         return [], False, [], False, None
-    if str(accepted_snapshot.get("market") or "").upper() != market:
+    if str(validated_snapshot.get("market") or "").upper() != market:
         gap_modes = modes or {"put", "call"}
         for mode, family in (("put", "sell_put"), ("call", "covered_call")):
             if mode not in gap_modes:
@@ -935,18 +914,18 @@ def _load_opening_candidate_families(
             "kind": "opening_candidate_snapshot",
             "path": "state/opening_candidate_snapshot.json",
             "row_count": len(
-                accepted_snapshot.get("ranked_candidates") or []
+                validated_snapshot.get("ranked_candidates") or []
             ),
-            "content_sha256": accepted_snapshot.get("content_sha256"),
+            "content_sha256": validated_snapshot.get("content_sha256"),
         }
     )
     result_by_mode = {
         str(item.get("strategy_mode") or ""): dict(item)
-        for item in accepted_snapshot.get("strategy_results") or []
+        for item in validated_snapshot.get("strategy_results") or []
         if isinstance(item, Mapping)
     }
     rows_by_mode: dict[str, list[dict[str, Any]]] = {"put": [], "call": []}
-    for item in ranked_opening_candidates(accepted_snapshot):
+    for item in ranked_opening_candidates(validated_snapshot, copy_facts=False):
         mode = str(item.get("strategy_mode") or "")
         if mode not in rows_by_mode:
             continue
@@ -959,7 +938,7 @@ def _load_opening_candidate_families(
         row["_source_row"] = item.get("rank")
         rows_by_mode[mode].append(row)
 
-    universe = candidate_universe_summary(accepted_snapshot)
+    universe = candidate_universe_summary(validated_snapshot)
     partial_modes: set[str] = set()
     for affected in universe.get("affected_scopes") or []:
         if not isinstance(affected, Mapping):
@@ -1020,7 +999,7 @@ def _load_opening_candidate_families(
         available["put"],
         rows_by_mode["call"],
         available["call"],
-        accepted_snapshot,
+        validated_snapshot,
     )
 
 

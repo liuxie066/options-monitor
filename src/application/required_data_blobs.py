@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import binascii
 import csv
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from functools import partial
 import gzip
@@ -13,7 +15,7 @@ import math
 import os
 from pathlib import Path, PurePosixPath
 import stat
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 from uuid import uuid4
 
 import pandas as pd
@@ -147,7 +149,7 @@ def build_required_data_scan_blob_payload(
     }
     if _materialize_raw_json_unchecked(payload) != bytes(raw_json_bytes):
         raise RequiredDataBlobError("canonical required-data blob cannot exactly materialize raw JSON")
-    materialized = _materialize_csv_unchecked(payload)
+    materialized = _apply_multiplier_overrides(base_csv, rows, column_names, overrides)
     if materialized != bytes(required_data_csv_bytes):
         raise RequiredDataBlobError("canonical required-data blob cannot exactly materialize final CSV")
     return payload
@@ -169,6 +171,21 @@ def _canonical_scan_blob_bytes_unchecked(payload: Mapping[str, Any]) -> bytes:
         )
         + "\n"
     ).encode("utf-8")
+
+
+_VERIFIED_PROJECTIONS: ContextVar[dict[str, tuple[bytes, bytes]] | None] = ContextVar(
+    "verified_scan_blob_projections", default=None,
+)
+
+
+@contextmanager
+def scan_blob_read_scope() -> Iterator[None]:
+    """Keep small, verified immutable projections during one tick."""
+    token = _VERIFIED_PROJECTIONS.set({})
+    try:
+        yield
+    finally:
+        _VERIFIED_PROJECTIONS.reset(token)
 
 
 def load_required_data_scan_blob(
@@ -210,9 +227,20 @@ def load_required_data_scan_blob(
         payload = json.loads(canonical.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise RequiredDataBlobError("required-data blob JSON is unreadable") from exc
-    validated, csv_bytes, raw_bytes = _validate_required_data_scan_blob_payload(payload)
-    if _canonical_scan_blob_bytes_unchecked(validated) != canonical:
-        raise RequiredDataBlobError("required-data blob bytes are not canonical")
+    projections = _VERIFIED_PROJECTIONS.get()
+    digest = ref["blob_sha256"]
+    cached = projections.get(digest) if projections is not None else None
+    if cached is None:
+        validated, csv_bytes, raw_bytes = _validate_required_data_scan_blob_payload(payload)
+        if _canonical_scan_blob_bytes_unchecked(validated) != canonical:
+            raise RequiredDataBlobError("required-data blob bytes are not canonical")
+        if projections is not None and len(projections) < 8 and len(csv_bytes) + len(raw_bytes) <= 1024 * 1024:
+            projections[digest] = (csv_bytes, raw_bytes)
+    else:
+        # These exact bytes were canonical on the first read. Each caller owns
+        # its decoded payload, and reopening and hashing still detects replacement.
+        validated = payload
+        csv_bytes, raw_bytes = cached
     return {
         "payload": validated,
         "canonical_bytes": canonical,
@@ -652,7 +680,15 @@ def _materialize_csv_unchecked(payload: Mapping[str, Any]) -> bytes:
     columns = list(projection["columns"])
     rows = list(payload["provider_payload"]["rows"])
     initial = _render_provider_csv(rows=rows, columns=columns)
-    overrides = list(projection["multiplier_overrides"])
+    return _apply_multiplier_overrides(initial, rows, columns, projection["multiplier_overrides"])
+
+
+def _apply_multiplier_overrides(
+    initial: bytes,
+    rows: list[dict[str, Any]],
+    columns: list[str],
+    overrides: list[dict[str, Any]],
+) -> bytes:
     if not overrides:
         return initial
     frame = pd.read_csv(io.BytesIO(initial), float_precision="round_trip", converters={field: str for field in ("multiplier", "chain_multiplier", "snapshot_multiplier")})
@@ -682,6 +718,10 @@ def _projection_overrides(
     columns: list[str],
 ) -> list[dict[str, Any]]:
     provider_rows = _csv_rows(provider_csv_bytes, columns=columns)
+    if provider_csv_bytes == final_csv_bytes:
+        for row in provider_rows:
+            _row_identity(row)
+        return []
     final_rows = _csv_rows(final_csv_bytes, columns=columns)
     if len(provider_rows) != len(final_rows):
         raise RequiredDataBlobError("required-data CSV row count mismatch")
@@ -1016,5 +1056,6 @@ __all__ = [
     "required_data_shadow_base64_matches",
     "required_data_shadow_file_matches",
     "retire_required_data_shadow_file",
+    "scan_blob_read_scope",
     "validate_required_data_scan_blob_ref",
 ]

@@ -238,7 +238,7 @@ def test_underlier_shared_merge_does_not_gain_option_receipts(tmp_path):
     assert REQUEST not in observation.to_dict() and RECEIVE not in observation.to_dict()
 
 
-def _symbol_payload(monkeypatch, tmp_path, clock, mode, *, failure=None, missing=()):
+def _symbol_payload(monkeypatch, tmp_path, clock, mode, *, failure=None, missing=(), rate=_rate):
     codes = [f"US.NVDA261106{mode[0].upper()}{strike}000" for strike in (150, 145)]
     response = failure if failure is not None else _rows(codes[1])
     gateway = Gateway(clock, [(1, _rows(codes[0])), (2, response)])
@@ -260,7 +260,7 @@ def _symbol_payload(monkeypatch, tmp_path, clock, mode, *, failure=None, missing
         "expiration_statuses": {EXPIRY: "ok"}}))
     monkeypatch.setattr(symbols, "fetch_realized_volatility_snapshot", lambda *a, **k: rv)
     monkeypatch.setattr(symbols, "retry_futu_gateway_call", _retry)
-    monkeypatch.setattr(symbols, "rate_limited_opend_call", _rate)
+    monkeypatch.setattr(symbols, "rate_limited_opend_call", rate)
     monkeypatch.setattr(symbols, "_utc_now_iso", lambda: _iso(clock.seconds))
     real_now = quotes._utc_now
     monkeypatch.setattr(quotes, "_utc_now", lambda value: real_now(
@@ -292,6 +292,18 @@ def _symbol_payload(monkeypatch, tmp_path, clock, mode, *, failure=None, missing
     ))
     assert gateway.closed == 0
     return payload, owner[0]
+
+
+def test_snapshot_gate_timing_excludes_provider_work(monkeypatch, tmp_path, clock):
+    from src.application import opend_call_coordinator as coordinator
+
+    # The two admissions take 0.25s and 0.5s; the fake provider advances its own clock.
+    stamps = iter((1.0, 1.25, 20.0, 20.5))
+    monkeypatch.setattr(coordinator, "monotonic", lambda: next(stamps))
+    monkeypatch.setattr(coordinator.FileRateLimiter, "acquire", lambda self, **kwargs: 0)
+    payload, result = _symbol_payload(monkeypatch, tmp_path, clock, "put", rate=coordinator.rate_limited_opend_call)
+    assert result.opend_call_count == 2
+    assert payload["meta"]["fetch_diagnostics"]["option_snapshot_gate_elapsed_sec"] == 0.75
 
 
 def _metrics(row, mode, decision):

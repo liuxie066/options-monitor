@@ -7,6 +7,7 @@ from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from copy import deepcopy
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping
 
@@ -115,6 +116,7 @@ class _DeliveryValidation:
         previous = self._states.get(identity, {})
         observed_sources: dict[tuple, str | None] = {}
         changed: dict[str, Any] = {}
+        changed_hashes: dict[str, str] = {}
         current: dict[str, tuple[str, dict, dict[tuple, str]]] = {}
         for market_date, raw_day in raw_days.items():
             try:
@@ -139,16 +141,20 @@ class _DeliveryValidation:
                 current[market_date] = cached
             else:
                 changed[market_date] = raw_day
+                changed_hashes[market_date] = day_hash
         if changed or identity not in self._states:
             sources: _SuccessfulRevisionSources = {}
             normalized = _normalize_delivery_state(
                 {**raw, "days": changed}, base=base, path=path, account=account, market=market,
                 successful_sources=sources,
             )
+            dependencies_by_date: dict[str, dict[tuple, str]] = {}
+            for key, (_, source_raw) in sources.items():
+                dependencies_by_date.setdefault(key[3], {})[key] = _observed_source_content_hash(source_raw)
             for market_date, day in normalized["days"].items():
-                dependencies = {key: _observed_source_content_hash(source[1]) for key, source in sources.items()
-                                if key[3] == market_date}
-                current[market_date] = (content_hash(raw_days[market_date]), deepcopy(day), dependencies)
+                current[market_date] = (
+                    changed_hashes[market_date], deepcopy(day), dependencies_by_date.get(market_date, {}),
+                )
         self._states[identity] = current
         return {"schema_version": raw["schema_version"], "account": account, "market": market,
                 "days": {market_date: deepcopy(cached[1]) for market_date, cached in sorted(current.items())}}
@@ -201,6 +207,7 @@ class _BriefHistoryObservation(DailyBriefReadScope):
         self._validated_sources: dict[tuple[str, int, str], tuple] = {}
         self._revisions: dict[str, list[int]] = {}
         self._delivery: dict[str, Any] | None = None
+        self._fanout_by_date: dict[str, list[dict[str, Any]]] | None = None
 
     def matches(self, *, base: Path, account: str, market: str) -> bool:
         return self._identity == (Path(base).resolve(), account, market)
@@ -231,6 +238,17 @@ class _BriefHistoryObservation(DailyBriefReadScope):
                 account=self._identity[1], market=self._identity[2], market_date=market_date,
                 conn=self.connection())
         return list(self._revisions[market_date])
+
+    def fanout_children(self, market_date: str) -> list[dict[str, Any]]:
+        if self._fanout_by_date is None:
+            base, account, market = self._identity
+            by_date: dict[str, list[dict[str, Any]]] = {}
+            for child in read_daily_brief_fanout_children(base=base, account=account, market=market):
+                day = child["spec"]["metadata"].get("market_trading_date")
+                if isinstance(day, str):
+                    by_date.setdefault(day, []).append(child)
+            self._fanout_by_date = by_date
+        return self._fanout_by_date.get(market_date, [])
 
     def delivery_state(self, *, base: Path, account: str, market: str) -> dict[str, Any]:
         if not self.matches(base=base, account=_normalize_account(account), market=_normalize_market(market)):
@@ -290,7 +308,7 @@ def _exclusive_lock(path: Path) -> Iterator[None]:
 
 def _persist_json(path: Path, payload: Any) -> None:
     with daily_brief_phase("persist", operation="atomic_write"):
-        atomic_write_json(path, payload)
+        atomic_write_json(path, payload, indent=None)
 
 
 def persist_daily_decision_brief_success(
@@ -396,7 +414,7 @@ def _append_decision(*, base: Path, source: Mapping[str, Any], successful: bool,
     def build(revision: int, previous: dict[str, Any] | None) -> dict[str, Any]:
         value = {**original, "revision": revision}
         if successful and previous and previous.get("market_trading_date") == original["market_trading_date"]:
-            return reconcile_daily_decision_brief_evidence(normalize_persisted_daily_decision_brief(previous), value)
+            return reconcile_daily_decision_brief_evidence(previous, value)
         return normalize_daily_decision_brief(value)
 
     legacy = any(paths.account_state_dir(base, original["account"]).glob(f"daily_decision_brief.{original['market']}.*.r*.json"))
@@ -1821,8 +1839,11 @@ def read_combo_candidate_exposures(
             if isinstance(item, Mapping)
         )
 
-    fanout_children = read_daily_brief_fanout_children(base=base_path, account=account_norm,
-        market=market_norm, market_trading_date=date_norm)
+    if isinstance(read_scope, _BriefHistoryObservation):
+        fanout_children = read_scope.fanout_children(date_norm)
+    else:
+        fanout_children = read_daily_brief_fanout_children(base=base_path, account=account_norm,
+            market=market_norm, market_trading_date=date_norm)
     for child in fanout_children:
         metadata = child["spec"]["metadata"]
         if metadata["delivery_kind"] != "fixed_failure":
@@ -2502,6 +2523,7 @@ def _normalize_delivery_envelope(
             market_trading_date=market_date,
             revision=revision,
             source_digest=source_digest,
+            read_only=True,
             successful_sources=successful_sources,
         )
         source_run_id = str(source_brief.get("run_id") or "").strip() or None
@@ -2718,6 +2740,7 @@ def _read_validated_successful_revision_source(
     market_trading_date: str,
     revision: int,
     source_digest: str,
+    read_only: bool = False,
     successful_sources: _SuccessfulRevisionSources | None = None,
 ) -> tuple[dict[str, Any], Mapping[str, Any]]:
     # Keep history batches at their enclosing owner; do not emit per-source events.
@@ -2730,7 +2753,8 @@ def _read_validated_successful_revision_source(
     with timing:
         key = (str(base.resolve()), account, market, market_trading_date, revision, source_digest)
         if successful_sources is not None and key in successful_sources:
-            return successful_sources[key]
+            brief, raw = successful_sources[key]
+            return (brief if read_only else deepcopy(brief)), raw
         revision_path = _revision_path(base, account, market, market_trading_date, revision)
         raw = _history_raw(base=base, account=account, market=market, market_date=market_trading_date, revision=revision)
         if raw is _MISSING:
@@ -2741,10 +2765,11 @@ def _read_validated_successful_revision_source(
         cache_key = (*key, observation_digest)
         cached = _VALIDATED_BRIEF_CACHE.get(cache_key)
         if cached is not None:
-            # Every read must hand back its own object: callers have always been
-            # free to copy-on-write a brief, and a shared instance would let one
-            # caller's edit leak into the next read.
-            brief, compatible_digests = deepcopy(cached[0]), cached[1]
+            # Envelope validation only inspects this brief. Other callers receive
+            # an independent object so their edits cannot change cached evidence.
+            brief, compatible_digests = cached
+            if not read_only:
+                brief = deepcopy(brief)
         else:
             try:
                 brief, compatible_digests = normalize_persisted_daily_decision_brief_with_digests(raw)
@@ -2754,8 +2779,8 @@ def _read_validated_successful_revision_source(
                 ) from exc
             if len(_VALIDATED_BRIEF_CACHE) >= _VALIDATED_BRIEF_CACHE_LIMIT:
                 del _VALIDATED_BRIEF_CACHE[next(iter(_VALIDATED_BRIEF_CACHE))]
-            # Store a copy: the caller owns the object it gets back.
-            _VALIDATED_BRIEF_CACHE[cache_key] = (deepcopy(brief), compatible_digests)
+            # Normalization produced a fresh tree. Mutable callers need an independent copy.
+            _VALIDATED_BRIEF_CACHE[cache_key] = (brief if read_only else deepcopy(brief), compatible_digests)
         if brief["account"] != account or brief["market"] != market:
             raise DailyDecisionBriefStateError(f"daily brief state identity mismatch: {revision_path}")
         if brief["market_trading_date"] != market_trading_date or int(brief["revision"]) != revision:
@@ -3154,33 +3179,33 @@ def _normalize_candidate_identities(
 ) -> list[str]:
     if isinstance(values, (str, bytes)) or not isinstance(values, (list, tuple, set, frozenset)):
         raise ValueError("candidate_identities must be a collection")
-    out: set[str] = set()
-    for raw in values:
-        identity = str(raw or "").strip()
-        if identity.startswith(f"position-roll:v1:{account}:{market}:"):
-            suffix = identity.removeprefix(f"position-roll:v1:{account}:{market}:")
-            direction, _, digest = suffix.partition(":")
-            if direction not in {"roll_up", "roll_down"} or not _SHA256_RE.fullmatch(digest):
-                raise ValueError(f"candidate identity is incompatible: {identity!r}")
-            out.add(identity)
-            continue
-        match = _CANDIDATE_IDENTITY_RE.fullmatch(identity)
-        if not match or match.group("account") != account or match.group("market") != market:
+    return sorted({_validated_candidate_identity(str(raw or "").strip(), account, market) for raw in values})
+
+
+@lru_cache(maxsize=1024)
+def _validated_candidate_identity(identity: str, account: str, market: str) -> str:
+    if identity.startswith(f"position-roll:v1:{account}:{market}:"):
+        suffix = identity.removeprefix(f"position-roll:v1:{account}:{market}:")
+        direction, _, digest = suffix.partition(":")
+        if direction not in {"roll_up", "roll_down"} or not _SHA256_RE.fullmatch(digest):
             raise ValueError(f"candidate identity is incompatible: {identity!r}")
-        try:
-            rebuilt = build_daily_brief_candidate_identity(
-                account=match.group("account"),
-                market=match.group("market"),
-                symbol=match.group("symbol"),
-                strategy_family=match.group("family"),
-                wheel_branch_id=match.group("branch_id"),
-            )
-        except ValueError as exc:
-            raise ValueError(f"candidate identity is incompatible: {identity!r}") from exc
-        if rebuilt != identity:
-            raise ValueError(f"candidate identity is not canonical: {identity!r}")
-        out.add(identity)
-    return sorted(out)
+        return identity
+    match = _CANDIDATE_IDENTITY_RE.fullmatch(identity)
+    if not match or match.group("account") != account or match.group("market") != market:
+        raise ValueError(f"candidate identity is incompatible: {identity!r}")
+    try:
+        rebuilt = build_daily_brief_candidate_identity(
+            account=match.group("account"),
+            market=match.group("market"),
+            symbol=match.group("symbol"),
+            strategy_family=match.group("family"),
+            wheel_branch_id=match.group("branch_id"),
+        )
+    except ValueError as exc:
+        raise ValueError(f"candidate identity is incompatible: {identity!r}") from exc
+    if rebuilt != identity:
+        raise ValueError(f"candidate identity is not canonical: {identity!r}")
+    return identity
 
 
 def _normalize_display_evidence(
@@ -3188,17 +3213,18 @@ def _normalize_display_evidence(
 ) -> list[dict[str, str]]:
     if not isinstance(values, list):
         raise ValueError("display_evidence must be a list")
+    expected = set(identities)
     states: dict[str, str] = {}
     for row in values:
         if not isinstance(row, Mapping) or set(row) != {"identity", "state"}:
             raise ValueError("display_evidence rows must contain identity and state")
         identity, state = row["identity"], row["state"]
-        if not isinstance(identity, str) or identity not in identities or identity in states:
+        if not isinstance(identity, str) or identity not in expected or identity in states:
             raise ValueError("display_evidence identity is missing, repeated, or incompatible")
         if not isinstance(state, str) or state not in {"expanded", "summary_notified", "not_shown"}:
             raise ValueError("display_evidence state is invalid")
         states[identity] = state
-    if set(states) != set(identities):
+    if states.keys() != expected:
         raise ValueError("display_evidence must cover every candidate identity exactly once")
     return [{"identity": identity, "state": states[identity]} for identity in identities]
 

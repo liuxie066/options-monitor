@@ -1078,6 +1078,22 @@ def test_rejected_contract_is_sealed_and_agent_reports_recorded_reason(
     assert event["message"] == "annualized net return below formal minimum or unavailable"
 
 
+def test_seal_distinguishes_boolean_from_equal_integer_in_candidate_input(tmp_path):
+    from domain.domain.engine import evaluate_opening_candidate_policy
+
+    candidate = _candidate(contract_symbol="NVDA260918P00090000", period_return=0.01)
+    candidate["custom_fact"] = True
+    decision = evaluate_opening_candidate_policy(candidate, mode="put")
+    supplied = {**decision["normalized_input"], "custom_fact": 1}
+    assert supplied == decision["normalized_input"]
+    with pytest.raises(OpeningCandidateSnapshotError, match="normalized input mismatch"):
+        _seal_snapshot(
+            tmp_path, run_id="run-input-type", scan_statuses=[_scan_status("NVDA", "put", "completed")],
+            final_candidates={"put": []},
+            candidate_evaluations={"put": [{"normalized_input": supplied, "opening_decision": decision}]},
+        )
+
+
 def test_rejected_decision_cannot_escape_scanned_symbol_scope(
     tmp_path: Path,
 ) -> None:
@@ -1271,6 +1287,59 @@ def test_partial_scope_is_explicit_but_optional_metrics_do_not_make_partial(
     }
 
 
+@pytest.mark.parametrize("damage", ["snapshot", "dependency"])
+def test_seal_detects_changes_between_publication_and_readback(tmp_path, monkeypatch, damage):
+    from src.application import opening_candidate_snapshot as owner
+
+    publish = owner.write_account_run_state_bytes_once_safely
+
+    def changed_after_publish(**kwargs):
+        path = publish(**kwargs)
+        if damage == "snapshot":
+            path.write_bytes(b"{}")
+        else:
+            dependency = tmp_path / "output_runs/run-1/state/required_data_snapshot_manifest.json"
+            dependency.write_bytes(b"changed dependency")
+        return path
+
+    monkeypatch.setattr(owner, "write_account_run_state_bytes_once_safely", changed_after_publish)
+    error = "adoption mismatch" if damage == "snapshot" else "dependency hash mismatch"
+    with pytest.raises(OpeningCandidateSnapshotError, match=error):
+        _seal(tmp_path)
+
+
+def test_scoped_reads_recheck_changed_file_and_dependencies(tmp_path, monkeypatch):
+    from src.application import opening_candidate_snapshot as owner
+
+    args = dict(base=tmp_path, run_id="run-1", account="lx", require_current_contract=True)
+    validate = owner.validate_opening_candidate_snapshot
+    validations = []
+
+    def counted(*args, **kwargs):
+        validations.append(kwargs["expected_account"])
+        return validate(*args, **kwargs)
+
+    monkeypatch.setattr(owner, "validate_opening_candidate_snapshot", counted)
+    with owner.opening_snapshot_read_scope():
+        sealed = _seal(tmp_path)
+        _publish_opening_manifest(tmp_path, sealed)
+        first = owner.load_opening_candidate_snapshot(**args)
+        first["candidate_decisions"].clear()
+        second = owner.load_opening_candidate_snapshot(**args)
+        assert second["candidate_decisions"] and validations == ["lx"]
+        dependency = tmp_path / "output_runs/run-1/state/required_data_snapshot_manifest.json"
+        original = dependency.read_bytes()
+        dependency.write_bytes(original + b" ")
+        with pytest.raises(OpeningCandidateSnapshotError, match="dependency hash mismatch"):
+            owner.load_opening_candidate_snapshot(**args)
+        dependency.write_bytes(original)
+        second["candidate_decisions"].clear()
+        _snapshot_path(tmp_path).write_text(json.dumps(second))
+        with pytest.raises(OpeningCandidateSnapshotError, match="content hash mismatch"):
+            owner.load_opening_candidate_snapshot(**args)
+    assert validations == ["lx", "lx"]
+
+
 def test_tamper_wrong_scope_and_missing_dependency_fail_closed(tmp_path: Path) -> None:
     _seal(tmp_path)
     snapshot_path = _snapshot_path(tmp_path)
@@ -1324,7 +1393,7 @@ def test_immutable_conflict_and_terminal_latest_pointer_fail_closed(
 
 def test_missing_cny_premium_survives_seal_and_brief_as_data_gap(tmp_path):
     from domain.domain.engine import evaluate_opening_candidate_policy
-    from src.application.daily_decision_brief_service import _load_opening_candidate_families
+    from src.application.daily_decision_brief_service import _project_opening_candidate_families
     from src.application.daily_decision_brief_renderer import _strategy_data_gap_reminders
 
     row = _candidate(contract_symbol="NVDA-CNY-MISSING", period_return=0.02)
@@ -1339,8 +1408,8 @@ def test_missing_cny_premium_survives_seal_and_brief_as_data_gap(tmp_path):
     summary = candidate_universe_summary(payload)
     assert summary["affected_scopes"][0]["reason_code"] == "net_premium_cny_unavailable"
     gaps = []
-    _load_opening_candidate_families(base=tmp_path, run_id="run-cny-missing", account="lx", market="US",
-        source_artifacts=[], data_gaps=gaps, snapshot=payload)
+    _project_opening_candidate_families(market="US",
+        source_artifacts=[], data_gaps=gaps, validated_snapshot=payload)
     assert any(row.get("reason_code") == "net_premium_cny_unavailable" for row in gaps)
     assert any("人民币净权利金无法计算" in line for line in _strategy_data_gap_reminders({"data_gaps": gaps}))
 
@@ -1351,7 +1420,7 @@ def test_missing_cny_premium_survives_seal_and_brief_as_data_gap(tmp_path):
 def test_one_blocked_call_scope_preserves_other_call_results(
     tmp_path, blocked_status, reason, has_candidate,
 ):
-    from src.application.daily_decision_brief_service import _load_opening_candidate_families
+    from src.application.daily_decision_brief_service import _project_opening_candidate_families
 
     candidate = _candidate(contract_symbol="NVDA260918C00100000", period_return=0.04)
     candidate.update(
@@ -1376,9 +1445,8 @@ def test_one_blocked_call_scope_preserves_other_call_results(
         "affected_scopes": [{"symbol": "FUTU", "strategy_mode": "call", "reason_code": reason}],
     }
     gaps = []
-    _puts, _put_available, calls, call_available, accepted = _load_opening_candidate_families(
-        base=tmp_path, run_id="run-scoped-call", account="sy", market="US",
-        data_gaps=gaps, source_artifacts=[], snapshot=payload, applicable_modes=("call",),
+    _puts, _put_available, calls, call_available, accepted = _project_opening_candidate_families(
+        market="US", data_gaps=gaps, source_artifacts=[], validated_snapshot=payload, applicable_modes=("call",),
     )
     assert accepted is not None
     assert call_available is True

@@ -76,6 +76,9 @@ from src.application.tick_notification_flow import (
 )
 from src.application.tick_brief_preparation import TickBriefPreparation, prepare_tick_briefs
 from src.application.daily_decision_brief_repository import daily_brief_delivery_validation_scope
+from src.application.opening_candidate_snapshot import opening_snapshot_read_scope
+from src.application.required_data_blobs import scan_blob_read_scope
+from src.infrastructure.decision_history_sqlite import history_hash_read_scope
 from src.application.multi_tick_finalization import (
     _record_finalize_degraded,
     failed_scan_accounts,
@@ -290,6 +293,8 @@ def _opening_chain_warmup_context(
     }
 
 
+@scan_blob_read_scope()
+@history_hash_read_scope()
 def main(
     argv: list[str] | None = None,
     *,
@@ -1196,6 +1201,7 @@ def _commit_prepared_tick_scan_targets(
             )
 
 
+@opening_snapshot_read_scope()
 @daily_brief_delivery_validation_scope()
 def _run_notification_with_post_delivery_fallback(
     *, notification_request: TickNotificationRequest,

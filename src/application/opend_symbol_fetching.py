@@ -233,19 +233,14 @@ def _build_option_chain_scope_coverage(
 ) -> dict[str, object]:
     statuses = expiration_statuses if isinstance(expiration_statuses, dict) else {}
     scopes: list[dict[str, object]] = []
+    codes_by_scope: dict[tuple[str, str], set[str]] = {}
+    for side, expiration, code in zip(chain["_ot"], chain["expiration"].astype(str), chain["code"]):
+        normalized_code = str(code).strip()
+        if normalized_code:
+            codes_by_scope.setdefault((side, expiration), set()).add(normalized_code)
     for option_type in option_types:
         for expiration in expirations:
-            scoped = chain[
-                (chain["_ot"] == option_type)
-                & (chain["expiration"].astype(str) == expiration)
-            ]
-            codes = sorted(
-                {
-                    str(value).strip()
-                    for value in scoped["code"].tolist()
-                    if str(value).strip()
-                }
-            )
+            codes = sorted(codes_by_scope.get((option_type, expiration), ()))
             scopes.append(
                 {
                     "option_type": option_type,
@@ -882,11 +877,13 @@ def fetch_symbol_request(
         # Derive expirations (strike_time) and pick first N
         chain = cast(pd.DataFrame, chain.copy())
         chain['expiration'] = chain['strike_time'].astype(str).str.slice(0, 10)
-        expirations = sorted({x for x in chain['expiration'].tolist() if isinstance(x, str) and len(x) >= 10})
+        available_expirations = {x for x in chain['expiration'] if isinstance(x, str) and len(x) >= 10}
         if explicit_expirations_norm:
-            expirations = [exp for exp in explicit_expirations_norm if exp in set(expirations)]
-        elif request.limit_expirations:
-            expirations = expirations[: int(request.limit_expirations)]
+            expirations = [exp for exp in explicit_expirations_norm if exp in available_expirations]
+        else:
+            expirations = sorted(available_expirations)
+            if request.limit_expirations:
+                expirations = expirations[: int(request.limit_expirations)]
 
         chain = cast(pd.DataFrame, chain[chain['expiration'].isin(expirations)].copy())
 
@@ -956,7 +953,7 @@ def fetch_symbol_request(
             retry_base_delay_sec=retry_base_delay_sec,
             retry_max_delay_sec=retry_max_delay_sec,
             retry_call=retry_futu_gateway_call,
-            rate_limited_call=rate_limited_opend_call,
+            rate_limited_call=partial(rate_limited_opend_call, snapshot_gate_observation=fetch_diagnostics),
             classify_error=classify_option_chain_error,
         )
         if cache is not None:

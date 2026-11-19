@@ -152,21 +152,19 @@ def match_post_trade_combo_pairs(
         key=lambda item: item.candidate_exposure_id,
     )
 
-    puts = [
-        item
-        for item in normalized_lots
-        if item.option_type == "put" and item.position_side == "short"
-    ]
-    calls = [
-        item
-        for item in normalized_lots
-        if item.option_type == "call" and item.position_side == "long"
-    ]
-    unsupported = [
-        item
-        for item in normalized_lots
-        if item not in puts and item not in calls
-    ]
+    puts = []
+    calls_by_scope: dict[tuple, list[_Lot]] = {}
+    eligible_lots = []
+    unsupported = []
+    for lot in normalized_lots:
+        if lot.option_type == "put" and lot.position_side == "short":
+            puts.append(lot)
+        elif lot.option_type == "call" and lot.position_side == "long":
+            calls_by_scope.setdefault(_pair_scope(lot), []).append(lot)
+        else:
+            unsupported.append(lot)
+            continue
+        eligible_lots.append(lot)
     excluded_lots.extend(
         {
             "record_id": item.lot_id,
@@ -185,7 +183,7 @@ def match_post_trade_combo_pairs(
         (
             edge
             for put in puts
-            for call in calls
+            for call in calls_by_scope.get(_pair_scope(put), ())
             if (edge := _build_edge(put, call, normalized_exposures)) is not None
         ),
         key=lambda item: item.inference_id,
@@ -210,17 +208,20 @@ def match_post_trade_combo_pairs(
         len({lot.lot_id for lot in normalized_lots}) == len(normalized_lots)
         and len({edge.inference_id for edge in edges}) == len(edges)
     )
-    forced_ids = {
-        edge.inference_id
-        for edge in edges
-        # Preserve the solver's weight scale when skipping an unselected edge.
-        if not unique_graph_ids
-        or edge.inference_id in optimum_edge_ids
-        or len(edge_ids_by_record[edge.put.lot_id]) <= 1
-        or len(edge_ids_by_record[edge.call.lot_id]) <= 1
-        if _maximum_weight_matching(edges, forbidden_ids={edge.inference_id})[0]
-        < optimum_score
-    }
+    forced_ids = set()
+    for edge in edges:
+        if unique_graph_ids:
+            put_degree = len(edge_ids_by_record[edge.put.lot_id])
+            call_degree = len(edge_ids_by_record[edge.call.lot_id])
+            # An isolated positive-weight pair belongs to every optimum.
+            # Removing it can only decrease the weight scale for the rest.
+            if put_degree == call_degree == 1:
+                forced_ids.add(edge.inference_id)
+                continue
+            if edge.inference_id not in optimum_edge_ids and min(put_degree, call_degree) > 1:
+                continue
+        if _maximum_weight_matching(edges, forbidden_ids={edge.inference_id})[0] < optimum_score:
+            forced_ids.add(edge.inference_id)
 
     proposals: list[dict[str, Any]] = []
     for edge in edges:
@@ -256,9 +257,8 @@ def match_post_trade_combo_pairs(
             "position_side": item.position_side,
             "status": "waiting_for_counterpart",
         }
-        for item in normalized_lots
+        for item in eligible_lots
         if item.lot_id not in connected_lot_ids
-        and item in puts + calls
     ]
     waiting.sort(key=lambda item: (item["account"], item["record_id"]))
     excluded_lots.sort(
@@ -440,24 +440,19 @@ def _normalize_exposure(raw: Mapping[str, Any]) -> _Exposure | None:
     )
 
 
+def _pair_scope(lot: _Lot) -> tuple:
+    return (
+        lot.account, lot.broker, lot.broker_account_ref, lot.market, lot.market_date,
+        lot.symbol, lot.contracts_opened, lot.currency, lot.multiplier, lot.expiration_ymd,
+    )
+
+
 def _build_edge(
     put: _Lot,
     call: _Lot,
     exposures: Sequence[_Exposure],
 ) -> _Edge | None:
-    if (
-        put.account != call.account
-        or put.broker != call.broker
-        or put.broker_account_ref != call.broker_account_ref
-        or put.market != call.market
-        or put.market_date != call.market_date
-        or put.symbol != call.symbol
-        or put.contracts_opened != call.contracts_opened
-        or put.currency != call.currency
-        or put.multiplier != call.multiplier
-        or put.strike >= call.strike
-        or put.expiration_ymd != call.expiration_ymd
-    ):
+    if put.strike >= call.strike:
         return None
     structure_mode = "same_expiry_pair"
     valid_evidence = tuple(

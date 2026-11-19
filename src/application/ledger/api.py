@@ -270,6 +270,7 @@ from src.application.ledger.combo_membership import (
 )
 from src.application.ledger.combo_reconciliation import (
     combo_attribution_candidates_from_rows,
+    combo_attribution_history_scopes,
     list_combo_pair_inferences,
     reject_post_trade_combo_pair,
     reconcile_combo_pair_inferences,
@@ -478,6 +479,7 @@ __all__ = [
     "read_trade_attribution_decision",
     "lot_id_for_open_event",
     "combo_attribution_candidates_from_rows",
+    "combo_attribution_history_scopes",
     "ATTRIBUTION_POLICY_VERSION", "assert_trade_attribution_unclaimed",
     "ledger_resource_identity", "read_trade_attribution_facts",
     "read_trade_attribution_snapshot",

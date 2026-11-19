@@ -5,6 +5,7 @@ import hashlib
 import json
 import sqlite3
 from contextlib import closing, contextmanager, nullcontext
+from contextvars import ContextVar
 from pathlib import Path
 from threading import RLock
 from typing import Any, Callable, Iterator, Mapping
@@ -26,7 +27,39 @@ def canonical_json(value: Any) -> str:
 
 
 def content_hash(value: Any) -> str:
-    return hashlib.sha256(canonical_json(value).encode()).hexdigest()
+    return _json_hash(canonical_json(value))
+
+
+def _json_hash(encoded: str) -> str:
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+_CANONICAL_HISTORY_HASHES: ContextVar[set[str] | None] = ContextVar(
+    "canonical_history_hashes", default=None,
+)
+
+
+@contextmanager
+def history_hash_read_scope() -> Iterator[None]:
+    """Reuse canonical encodings verified within one tick, retaining only digests."""
+    token = _CANONICAL_HISTORY_HASHES.set(set())
+    try:
+        yield
+    finally:
+        _CANONICAL_HISTORY_HASHES.reset(token)
+
+
+def _decoded_content_hash(encoded: str, value: Any) -> str:
+    known = _CANONICAL_HISTORY_HASHES.get()
+    if known is None or not isinstance(encoded, str):
+        return content_hash(value)
+    raw_hash = _json_hash(encoded)
+    if raw_hash in known:
+        return raw_hash
+    canonical_hash = content_hash(value)
+    if raw_hash == canonical_hash:
+        known.add(raw_hash)
+    return canonical_hash
 
 
 def history_path(base: Path) -> Path:
@@ -95,10 +128,18 @@ class DecisionHistoryStore:
             return None
         try:
             result = dict(row)
-            for name in ("payload", "input"):
-                result[name] = json.loads(result.pop(name + "_json"))
-                if content_hash(result[name]) != result[name + "_hash"]:
-                    raise DecisionHistoryError("history_content_corrupt")
+            payload_json = result.pop("payload_json")
+            input_json = result.pop("input_json")
+            result["payload"] = json.loads(payload_json)
+            payload_hash = _decoded_content_hash(payload_json, result["payload"])
+            if payload_hash != result["payload_hash"]:
+                raise DecisionHistoryError("history_content_corrupt")
+            # Callers can edit input and payload independently. Identical stored
+            # JSON needs two objects, but only one canonical digest.
+            result["input"] = json.loads(input_json)
+            input_hash = payload_hash if input_json == payload_json else _decoded_content_hash(input_json, result["input"])
+            if input_hash != result["input_hash"]:
+                raise DecisionHistoryError("history_content_corrupt")
             result["scope"] = json.loads(result.pop("scope_json"))
             if content_hash(result["scope"]) != result["scope_hash"]:
                 raise DecisionHistoryError("history_scope_corrupt")
@@ -167,11 +208,12 @@ class DecisionHistoryStore:
     @staticmethod
     def insert(conn: sqlite3.Connection, *, source: Mapping[str, Any], payload: Mapping[str, Any],
                successful: bool, scope: Mapping[str, Any]) -> None:
+        scope_json, input_json, payload_json = (canonical_json(item) for item in (scope, source, payload))
         conn.execute("""INSERT INTO decisions(account,market,market_date,run_id,revision,successful,scope_json,scope_hash,
                      input_json,input_hash,payload_json,payload_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
                      (payload["account"], payload["market"], payload["market_trading_date"], payload["run_id"], payload["revision"],
-                      int(successful), canonical_json(scope), content_hash(scope), canonical_json(source), content_hash(source),
-                      canonical_json(payload), content_hash(payload)))
+                      int(successful), scope_json, _json_hash(scope_json), input_json, _json_hash(input_json),
+                      payload_json, _json_hash(payload_json)))
 
     @staticmethod
     def import_reports(conn: sqlite3.Connection, *, account: str, market: str) -> list[dict[str, Any]]:

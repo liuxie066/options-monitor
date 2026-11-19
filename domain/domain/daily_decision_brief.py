@@ -1624,7 +1624,12 @@ def _digest(value: Any) -> str:
 
 
 def _json_safe(value: Any) -> Any:
-    if isinstance(value, Mapping):
+    kind = type(value)
+    if value is None or kind is str or kind is bool or kind is int:
+        return value
+    if kind is float:
+        return value if math.isfinite(value) else None
+    if kind is dict or isinstance(value, Mapping):
         return {str(key): _json_safe(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_json_safe(item) for item in value]

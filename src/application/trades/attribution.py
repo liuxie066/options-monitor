@@ -22,7 +22,7 @@ from src.application.ledger.api import (
     preview_trade_attribution_migration, apply_trade_attribution_migration,
     read_trade_attribution_snapshot, open_trade_attribution_snapshot_reader, trade_attribution_facts_from_events,
     encode_evidence_cursor, decode_evidence_cursor, TradeEventPaginationError,
-    combo_attribution_candidates_from_rows, ATTRIBUTION_POLICY_VERSION,
+    combo_attribution_history_scopes, ATTRIBUTION_POLICY_VERSION,
     record_trade_attribution_conflicts, ordinary_attribution_window, ordinary_attribution_observation_complete,
 )
 from src.application.futu_quote_routing import runtime_config_market
@@ -93,10 +93,7 @@ def attribution_focus_open_event_id(rows: Mapping[str, Any], *, account: str, ex
 
 def read_attribution_combo_evidence(rows: Mapping[str, Any], *, account: str, runtime_root: Path,
                                     now_ms: int, focus_open_event_id: str | None = None) -> dict[str, Any]:
-    preview = combo_attribution_candidates_from_rows(rows, account=account, runtime_environment="",
-        exposures=[], effective_now_ms=now_ms, include_claimed=True)
-    scopes = {(item["market"], item["market_date"]) for item in preview["lot_facts"]
-              if focus_open_event_id is None or item["open_event_id"] == focus_open_event_id}
+    scopes = combo_attribution_history_scopes(rows, account=account, focus_open_event_id=focus_open_event_id)
     exposures, reads = {}, []
     history = {}
     for market in sorted({market for market, _day in scopes}):

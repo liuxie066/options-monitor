@@ -457,6 +457,23 @@ def test_fully_fetched_chain_filtered_to_empty_is_normalized_to_success_empty(
     ]
 
 
+def test_scope_coverage_deduplicates_per_side_and_expiration_in_request_order():
+    from src.application.opend_symbol_fetching import _build_option_chain_scope_coverage
+
+    chain = pd.DataFrame([
+        ("put", "2026-06-19", " P1 "), ("put", "2026-06-19", "P1"),
+        ("call", "2026-06-19", "C2"), ("call", "2026-06-19", "C1"),
+        ("put", "2026-07-17", "P2"),
+    ], columns=["_ot", "expiration", "code"])
+    coverage = _build_option_chain_scope_coverage(
+        chain=chain, option_types=("call", "put"), expirations=["2026-07-17", "2026-06-19"],
+        expiration_statuses={"2026-06-19": "fetched", "2026-07-17": "cached"},
+    )
+    assert [(scope["chain_status"], scope["filtered_contract_codes"]) for scope in coverage["scopes"]] == [
+        ("cached", []), ("fetched", ["C1", "C2"]), ("cached", ["P2"]), ("fetched", ["P1"]),
+    ]
+
+
 def test_observed_missing_spot_is_not_fetched_again(
     monkeypatch,
     tmp_path: Path,
