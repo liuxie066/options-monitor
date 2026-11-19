@@ -3,9 +3,9 @@
 ## 边界
 
 Futu OpenD deal push 是实时成交入口。OM 标准化成交后维护期权和生命周期
-账本；股票或 ETF 成交结算完成后，OM 只向本机 portfolio-management 服务
-发送账户刷新提示。PM 自行读取 Futu 完整持仓快照并更新绝对
-`quantity` 和 `average_cost`。
+账本。对已校验的股票、ETF 和期权成交，OM 向本机 portfolio-management 服务
+发送账户刷新提示。PM 自行读取富途账户快照并核验写入结果。PM 的定时核对覆盖
+漏收推送或刷新时券商快照仍未更新的情况。
 
 同步意图不携带推算持仓、成交数量或成本。OM 不直接写 PM/Feishu，PM
 也不写 OM ledger 或 Feishu `transactions`。
@@ -50,7 +50,7 @@ backfill 时才会产生提示。旧 `trade_intake.holdings_sync.enabled` 只保
 ## 运行语义
 
 - 期权成交返回 `option_deal`，不会调用 PM。
-- 股票或 ETF 使用 canonical broker deal key 去重；提示只含 `account` 和该 key
+- 股票、ETF 和期权使用 canonical broker deal key 去重；提示只含 `account` 和该 key
   的 SHA-256 `request_id`，不传成交增量或券商身份。
 - 正股/ETF 的 `execution_input.instrument_ref.currency`、`execution_input.currency` 与
   `NormalizedTradeDeal.currency` 必须非空且一致，由 canonical symbol identity
