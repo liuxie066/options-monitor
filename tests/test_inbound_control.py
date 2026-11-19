@@ -35,6 +35,63 @@ from src.application.bot.control.runtime import handle_bot_turn
 from src.application.bot.control.settings import BotSettings
 
 
+def test_latest_runtime_audit_reads_during_reserved_write(tmp_path):
+    from src.application.agent_tools.runtime_status_impl import _bot_runtime_summary
+
+    store = InboundAuditStore(tmp_path / "audit.sqlite3")
+    store.list_recent()
+    with closing(sqlite3.connect(store.path)) as writer:
+        with writer:
+            writer.executemany(
+                """INSERT INTO inbound_command_audit
+                   (command_id, channel, sender_id, raw_text, decision, created_at, finished_at)
+                   VALUES (?, 'feishu', 'synthetic', '', 'accepted', ?, ?)""",
+                [(key, date, date) for key, date in [
+                    ("first", "2026-11-19"), ("latest", "2026-11-19"), ("old", "2026-11-18"),
+                ]],
+            )
+        writer.execute("BEGIN IMMEDIATE")
+        assert store.latest_for_status()["command_id"] == "latest"
+        summary = _bot_runtime_summary(
+            base=tmp_path, runtime_root=tmp_path,
+            payload={"feishu_ws": {"audit_db": str(store.path)}}, mask_path=str,
+        )
+        assert summary["audit"]["latest"]["created_at"] == "2026-11-19"
+        assert "error" not in summary["audit"]
+
+
+def test_latest_runtime_audit_retries_busy_only(tmp_path, monkeypatch):
+    from src.application.bot.control import audit
+
+    store = InboundAuditStore(tmp_path / "audit.sqlite3")
+    store.list_recent()
+    retried = []
+    monkeypatch.setattr(audit, "_STATUS_SQLITE_TIMEOUT_SECONDS", 0)
+    with closing(sqlite3.connect(store.path)) as writer:
+        writer.execute("BEGIN EXCLUSIVE")
+
+        def release_lock(delay):
+            retried.append(delay)
+            writer.rollback()
+
+        monkeypatch.setattr(audit.time, "sleep", release_lock)
+        assert store.latest_for_status() is None
+        assert len(retried) == 1
+        retried.clear()
+        writer.execute("BEGIN EXCLUSIVE")
+        monkeypatch.setattr(audit.time, "sleep", retried.append)
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            store.latest_for_status()
+        assert len(retried) == 2
+        writer.rollback()
+        retried.clear()
+        with writer:
+            writer.execute("ALTER TABLE inbound_command_audit RENAME COLUMN created_at TO bad_column")
+        with pytest.raises(sqlite3.OperationalError, match="no such column"):
+            store.latest_for_status()
+        assert retried == []
+
+
 def _request(
     text: str,
     message_id: str | None = None,

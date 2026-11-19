@@ -4,7 +4,7 @@ import hashlib
 import json
 import sqlite3
 import time
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from uuid import uuid4
@@ -12,9 +12,17 @@ from uuid import uuid4
 from src.application.agent_tool_contracts import AgentToolError, mask_path
 from src.application.agent_tool_config import repo_base
 from src.application.settings import build_effective_env
-from src.infrastructure.private_storage import connect_private_sqlite, private_path
+from src.infrastructure.private_storage import (
+    connect_private_sqlite,
+    private_path,
+    validate_private_sqlite_target,
+)
 from src.infrastructure.io_utils import utc_now as utc_now_iso
 from src.application.payload_helpers import optional_text as _optional_str
+
+
+_STATUS_SQLITE_TIMEOUT_SECONDS = 2.0
+_STATUS_SQLITE_RETRY_DELAYS = (0.1, 0.2)
 
 
 def default_audit_db_path(
@@ -81,6 +89,39 @@ class InboundAuditStore:
                 (normalized_channel, normalized_command_id),
             ).fetchone()
         return _row_to_dict(row)
+
+    def latest_for_status(self) -> dict[str, Any] | None:
+        """Read the latest audit row without running the inbound writer's schema setup."""
+        for retry_delay in (*_STATUS_SQLITE_RETRY_DELAYS, None):
+            try:
+                return self._read_latest_for_status()
+            except sqlite3.OperationalError as exc:
+                code = getattr(exc, "sqlite_errorcode", 0) & 0xff
+                if retry_delay is None or code not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                    raise
+                time.sleep(retry_delay)
+
+    def _read_latest_for_status(self) -> dict[str, Any] | None:
+        validate_private_sqlite_target(self.path)
+        with closing(sqlite3.connect(
+            self.path.as_uri() + "?mode=ro", uri=True, timeout=_STATUS_SQLITE_TIMEOUT_SECONDS,
+        )) as conn:
+            conn.row_factory = sqlite3.Row
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='inbound_command_audit'",
+            ).fetchone() is None:
+                return None
+            # Sort only timestamps and IDs. Fetch the large response payload once.
+            row = conn.execute(
+                """
+                SELECT * FROM inbound_command_audit
+                WHERE id = (
+                    SELECT id FROM inbound_command_audit
+                    ORDER BY created_at DESC, id DESC LIMIT 1
+                )
+                """,
+            ).fetchone()
+            return _row_to_dict(row)
 
     def list_recent(
         self,

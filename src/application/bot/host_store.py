@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from contextlib import closing
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from math import isfinite
@@ -17,13 +18,18 @@ from src.application.bot.contracts import (
     new_id,
     utc_now_iso,
 )
-from src.infrastructure.private_storage import connect_private_sqlite, private_path
+from src.infrastructure.private_storage import (
+    connect_private_sqlite,
+    private_path,
+    validate_private_sqlite_target,
+)
 
 
 REPLY_DELIVERY_LEASE_SECONDS = 300
 REPLY_CAPABILITY_TTL_SECONDS = 24 * 60 * 60
 FEISHU_REPLY_REPLAY_SECONDS = 60 * 60
 REPLY_OUTCOME_UNKNOWN = "delivery_outcome_unknown"
+_REPLY_PAYLOAD_CLEANUP_CONDITION = "status IN ('delivered', 'terminal_failed', 'expired') AND payload_json != '{}'"
 
 
 class BotHostStore:
@@ -411,7 +417,6 @@ class BotHostStore:
             return state
 
     def is_cancel_requested(self, run_id: str) -> bool:
-        from contextlib import closing
         from src.application.bot.migration import assert_bot_ready
 
         # Reader checkpoints poll concurrently with Host persistence; they must
@@ -535,6 +540,25 @@ class BotHostStore:
             row = conn.execute("SELECT payload_json FROM bot_reply_outbox WHERE delivery_key=?", (delivery_key,)).fetchone()
         return json.loads(row[0]) if row else {}
 
+    def _has_reply_work(self) -> bool:
+        try:
+            validate_private_sqlite_target(self.path)
+        except FileNotFoundError:
+            return False
+        with closing(self._connect()) as conn:
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='bot_reply_outbox'",
+            ).fetchone() is None:
+                return False
+            return conn.execute(
+                f"""
+                SELECT 1 FROM bot_reply_outbox
+                WHERE status IN ('pending', 'retryable_failed', 'delivering')
+                   OR ({_REPLY_PAYLOAD_CLEANUP_CONDITION})
+                LIMIT 1
+                """,
+            ).fetchone() is not None
+
     def claim_reply(
         self,
         *,
@@ -543,6 +567,13 @@ class BotHostStore:
         before: str | None = None,
         authorize: Callable[[dict[str, Any]], bool] | None = None,
     ) -> dict[str, Any] | None:
+        # Polls skip the write path when there is no recovery or legacy payload cleanup.
+        # Check all channels because lease and expiry maintenance below is shared.
+        if not delivery_key and not self._has_reply_work():
+            from src.application.bot.migration import assert_bot_ready
+
+            assert_bot_ready(self.path, connect=self._connect)
+            return None
         self._ensure_schema()
         now = before or utc_now_iso()
         with self._connect() as conn:
@@ -890,11 +921,10 @@ class BotHostStore:
             if "termination_reason" not in run_columns:
                 conn.execute("ALTER TABLE bot_runs ADD COLUMN termination_reason TEXT")
             conn.execute(
-                """
+                f"""
                 UPDATE bot_reply_outbox
-                SET payload_json = '{}', last_error = NULL
-                WHERE status IN ('delivered', 'terminal_failed', 'expired')
-                  AND payload_json != '{}'
+                SET payload_json = '{{}}', last_error = NULL
+                WHERE {_REPLY_PAYLOAD_CLEANUP_CONDITION}
                 """
             )
             if "metrics_json" not in run_columns:
