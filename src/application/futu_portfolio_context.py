@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-
 from src.application.runtime_paths import resolve_runtime_root
 from src.infrastructure.exchange_rates import shared_exchange_rate_cache_path
 
@@ -1059,7 +1058,7 @@ def fetch_futu_portfolio_context(
                 context, read_mmf_shared(account), account=account,
                 physical_account_id=physical_account_id, environment=trd_env,
             )
-        except (ValueError, TypeError, KeyError, RuntimeError, OSError):
+        except (ValueError, TypeError, KeyError, RuntimeError, OSError, OverflowError):
             check_fetch_control(deadline, cancelled)
             context["cash_balance_reliable"] = False
             context["cash_balance_unavailable_by_row"]["shared_mmf_funding"] = "shared_mmf_funding_unverified"

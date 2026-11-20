@@ -7,9 +7,7 @@ from math import isfinite
 def apply_mmf_funding(context, funding, *, account, physical_account_id, environment):
     if funding.get("account") != account:
         raise ValueError("PM MMF funding account mismatch")
-    if funding.get("status") == "none":
-        return
-    if funding.get("status") != "verified":
+    if funding.get("status") not in {"none", "verified"}:
         raise ValueError("PM MMF funding is unverified")
     fingerprint = "sha256:" + sha256(str(physical_account_id).encode()).hexdigest()
     if (
@@ -20,9 +18,14 @@ def apply_mmf_funding(context, funding, *, account, physical_account_id, environ
     ):
         raise ValueError("PM MMF funding scope mismatch")
     observed_at = datetime.fromisoformat(funding["observed_at"])
-    if observed_at.tzinfo is None or not (
-        timedelta(0) <= datetime.now(timezone.utc) - observed_at <= timedelta(minutes=15)
-    ):
+    current_at = datetime.fromisoformat(context["cash_source_observed_at"])
+    if observed_at.tzinfo is None or current_at.tzinfo is None or not observed_at <= current_at:
+        raise ValueError("PM MMF funding does not apply to this balance observation")
+    if funding["status"] == "none":
+        if funding["adjustments"]:
+            raise ValueError("Unexpected adjustment in zero-funding statement")
+        return
+    if not timedelta(0) <= datetime.now(timezone.utc) - observed_at <= timedelta(minutes=15):
         raise ValueError("PM MMF funding balance is stale")
 
     def finite(value):

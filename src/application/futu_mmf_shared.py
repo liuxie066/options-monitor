@@ -31,6 +31,8 @@ def read_mmf_shared(account: str) -> dict:
         or payload.get("status") not in {"none", "verified", "unverified"}
     ):
         raise ValueError("Invalid shared money-fund reconciliation object")
+    if payload["status"] == "none" and (payload.get("transfers") != [] or payload.get("adjustments") != {}):
+        raise ValueError("No-adjustment statement must have empty transfer rows and amounts")
     if payload["status"] == "verified":
         _verify_transfer_totals(payload)
     return payload

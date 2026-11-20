@@ -24,8 +24,14 @@ def test_mmf_funding_applies_same_snapshot_native_balances_once():
         "cash": {"CNY": 0, "HKD": -84134.88, "USD": 0}, "fund_assets_cny": "1032301.98",
         "adjustments": {"HKD": "84134.88"},
     }
+    context["cash_source_observed_at"] = funding["observed_at"]
     scope = {"account": "sy", "physical_account_id": "123", "environment": "REAL"}
     before = deepcopy(context)
+    zero = {**funding, "status": "none", "adjustments": {}}
+    with pytest.raises(ValueError, match="scope"):
+        apply_mmf_funding(context, {**zero, "environment": "SIMULATE"}, **scope)
+    with pytest.raises(ValueError, match="observation"):
+        apply_mmf_funding(context, {**zero, "observed_at": "2099-01-01T00:00:00Z"}, **scope)
     with pytest.raises(ValueError, match="diverged"):
         apply_mmf_funding(context, {**funding, "cash": {**funding["cash"], "HKD": 0}}, **scope)
     assert context == before

@@ -297,7 +297,10 @@ def load_account_portfolio_context(
     needs_current_mmf_evidence = (
         source_plan.primary_source == "futu" and mmf_shared_configured()
     )
-    if isinstance(cached, dict) and not needs_current_mmf_evidence:
+    if (
+        isinstance(cached, dict) and not needs_current_mmf_evidence
+        and cached.get("cash_source") != "futu_cash_like_assets_with_pm_mmf"
+    ):
         cached_snapshot = cached.get("position_snapshot_input")
         if isinstance(cached_snapshot, Mapping):
             cached = deepcopy(cached)
