@@ -72,7 +72,10 @@ def test_scheduled_symbols_summary_keeps_csv_without_rendering_text(tmp_path, mo
     rows = [{"symbol": "0700.HK", "strategy": "sell_put"}]
     report_builders.build_symbols_summary(rows, tmp_path)
     expected_csv = (tmp_path / "symbols_summary.csv").read_bytes()
-    capsys.readouterr()
+    assert capsys.readouterr().out.splitlines() == [
+        "[DONE] symbols summary text -> symbols_summary.txt",
+        "[DONE] symbols summary -> symbols_summary.csv",
+    ]
 
     scheduled = tmp_path / "scheduled"
     scheduled.mkdir()

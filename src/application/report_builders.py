@@ -36,8 +36,8 @@ def build_symbols_summary(summary_rows: list[dict], report_dir: Path, *, is_sche
             lines.append(format_summary_row(r))
 
     txt_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
-    print(f"[DONE] symbols summary text -> {txt_path}")
-    print(f"[DONE] symbols summary -> {csv_path}")
+    print("[DONE] symbols summary text -> symbols_summary.txt")
+    print("[DONE] symbols summary -> symbols_summary.csv")
 
 def build_symbols_digest(symbols: list[str], report_dir: Path):
     lines = ['# Symbols Strategy Digest', '']
