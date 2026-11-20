@@ -45,8 +45,7 @@ def test_real_plugin_install_reuse_change_and_release_isolation(tmp_path, instal
     environment = tmp_path / 'venv'
     venv.EnvBuilder(with_pip=True).create(environment)
     python = environment / 'bin/python'
-    env = {**os.environ, 'PIP_NO_INDEX': '1', 'UV_OFFLINE': '1', 'PIP_NO_BUILD_ISOLATION': '1',
-           'UV_NO_BUILD_ISOLATION': '1'}
+    env = {**os.environ, 'PIP_NO_INDEX': '1', 'UV_OFFLINE': '1', 'UV_NO_BUILD_ISOLATION': '1'}
     # Use the local uv cache solely to seed the disposable build environment.
     # No project runtime or global package installation is modified.
     build = subprocess.run(['uv', 'pip', 'install', '-p', str(python), '--offline', 'setuptools', 'wheel'],
@@ -56,7 +55,7 @@ def test_real_plugin_install_reuse_change_and_release_isolation(tmp_path, instal
     calls = []
 
     def run(command, **kwargs):
-        if 'install' in command and '--target' in command and command[0] != 'uv':
+        if 'pip' in command and 'wheel' in command:
             command = [*command, '--no-build-isolation']
         calls.append(command)
         return subprocess.run(command, **kwargs)
@@ -71,7 +70,7 @@ def test_real_plugin_install_reuse_change_and_release_isolation(tmp_path, instal
     source = target / 'plugins/portfolio-management/src/om_pm_plugin/__init__.py'
     source.write_text('VALUE=2\n')
     third = upgrade._prepare_source_plugins(target_dir=target, previous_dir=previous, **arguments)
-    assert third[0]['installed'] and len(calls) == 1
+    assert third[0]['installed'] and len(calls) == (2 if installer == 'pip' else 1)
     assert read_source_plugin(target, 'pm')['version'] == '0.1.0'
     script = ('import sys,json,importlib.metadata as m; sys.path.insert(0,sys.argv[1]); '
               'import src,om_pm_plugin; print(json.dumps([om_pm_plugin.VALUE,m.version("om-pm-plugin")]))')

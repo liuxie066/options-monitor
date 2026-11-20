@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tomllib
 
 import pytest
 
@@ -13,6 +14,7 @@ from src.application import service_upgrade as upgrade
 from src.application import runtime_bundle
 from tests.service_deploy_test_support import (
     _create_fake_venv_python_at,
+    _fake_dependency_wheel,
     _write_runtime_target_with_server_deps,
 )
 
@@ -29,6 +31,7 @@ class OfflineRuntime:
         self.previous = previous
         self.installed = installed
         self.commands = []
+        self.source_wheels = {}
         self.pm_installs = []
         self.lb_installs = []
         self.pm_validation_fails = False
@@ -43,6 +46,21 @@ class OfflineRuntime:
             stdout = self.probe_output
         elif command[:3] == [sys.executable, "-m", "venv"] or command[:2] == ["uv", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
+        elif "wheel" in command and "--wheel-dir" in command:
+            source = next((part for part in command if part.startswith("./plugins/")), None)
+            if "./plugins/portfolio-management" in command:
+                self.pm_installs.append(list(command))
+            if "requirements/longbridge.txt" in command:
+                self.lb_installs.append(list(command))
+            if source:
+                project = Path(kwargs["cwd"]) / source
+                name = tomllib.loads((project / "pyproject.toml").read_text())["project"]["name"]
+                destination = Path(command[command.index("--wheel-dir") + 1])
+                wheel = destination / f"{name.replace('-', '_')}-1.0-py3-none-any.whl"
+                wheel.touch()
+                self.source_wheels[str(wheel)] = source
+            else:
+                _fake_dependency_wheel(command)
         elif "install" in command:
             if "./plugins/portfolio-management" in command:
                 self.pm_installs.append(list(command))
@@ -51,8 +69,7 @@ class OfflineRuntime:
             if command[0] == "uv" and self.uv_fails:
                 status = 1
             if status == 0 and "--target" in command:
-                import tomllib
-                source = next(part for part in command if part.startswith("./plugins/"))
+                source = self.source_wheels.get(command[-1], command[-1])
                 project = Path(kwargs["cwd"]) / source
                 spec = tomllib.loads((project / "pyproject.toml").read_text())["project"]
                 site = Path(command[command.index("--target") + 1])
@@ -61,7 +78,7 @@ class OfflineRuntime:
                 metadata = site / (name.replace("-", "_") + ".dist-info")
                 metadata.mkdir()
                 (metadata / "METADATA").write_text(f"Name: {name}\nVersion: {spec['version']}\n")
-        elif command[1:3] == ["-m", "ensurepip"]:
+        elif command[1:3] == ["-m", "ensurepip"] or ("pip" in command and command[-1] == "check"):
             pass
         elif command == ["sh", "-lc", "command -v uv"]:
             stdout = "/offline/uv\n"

@@ -15,6 +15,7 @@ from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_defaults import upgrade_keep_venvs
 from src.application.config_yaml import build_yaml_runtime_config_file, resolve_yaml_runtime_config
 from src.application.plugin_runtime import read_source_plugin
+from tests.plugin_release_helpers import wheel_files, write_wheel
 from tests.test_config_yaml import REPO_ROOT, _minimal_yaml
 from tests.test_pm_package_upgrade import OfflineRuntime, _upgrade, transition
 
@@ -153,7 +154,8 @@ def test_unchanged_plugin_reuses_verified_files_changed_plugin_installs_only_it(
     assert changed['venv_reused'] and changed['dependency_hash'] == original['dependency_hash']
     assert {item['plugin']: item['installed'] for item in changed['source_plugins']} == {'pm': True, 'wechat': False}
     installs = [command for command in runner.commands if 'install' in command]
-    assert len(installs) == 1 and './plugins/portfolio-management' in installs[0]
+    assert len(installs) == 1 and installs[0][-1] in runner.source_wheels
+    assert runner.source_wheels[installs[0][-1]] == './plugins/portfolio-management'
     assert '--no-deps' in installs[0] and '--target' in installs[0]
     assert read_source_plugin(previous, 'pm')['files'] == old_files
     installed_source = target / '.om-source-plugins/pm/site/om_pm_plugin/__init__.py'
@@ -197,6 +199,66 @@ def test_dependency_change_rebuilds_existing_cache(transition, monkeypatch):
                                               run_cmd=runner, operations=[])
     assert not changed['venv_reused'] and changed['dependency_hash'] != original['dependency_hash']
     assert any('example-dependency==2' in command for command in runner.commands)
+
+
+def test_pip_prepares_and_installs_real_wheels_from_local_find_links(tmp_path):
+    target = tmp_path / "release"
+    target.mkdir()
+    (target / "requirements.txt").write_text("om-wheel-fixture\n")
+    (target / "constraints.txt").write_text("om-wheel-fixture==1.0\n")
+    local_wheels = tmp_path / "local-wheels"
+    local_wheels.mkdir()
+    for version in ("1.0", "2.0"):
+        wheel = local_wheels / f"om_wheel_fixture-{version}-py3-none-any.whl"
+        write_wheel(wheel, wheel_files("om-wheel-fixture", "om_wheel_fixture", version))
+    shared = tmp_path / "shared"
+    prepare = [
+        os.sys.executable, str(REPO_ROOT / "scripts/prepare_wheels.py"), "--wheel-dir", str(shared),
+    ]
+    inputs = ["--", "-r", "requirements.txt", "-c", "constraints.txt"]
+    env = {**os.environ, "PIP_CONFIG_FILE": os.devnull, "PIP_NO_INDEX": "1",
+           "PIP_CACHE_DIR": str(tmp_path / "pip-cache"), "PIP_FIND_LINKS": str(local_wheels)}
+    missing = subprocess.run([*prepare, *inputs], cwd=target, env=env, capture_output=True, text=True)
+    assert missing.returncode != 0 and not list(shared.glob("*.whl"))
+    published = subprocess.check_output([*prepare, "--allow-index", *inputs], cwd=target, env=env, text=True)
+    assert "published" in published
+    cached = subprocess.check_output([*prepare, *inputs], cwd=target, env=env, text=True)
+    assert "reused" in cached
+    build = tmp_path / "venv"
+    python = build / "bin/python"
+    commands = []
+    upgrade._run_pip_runtime_prepare(
+        target_dir=target, venv_dir=build, venv_python=python, include_server=False,
+        run_cmd=subprocess.run, operations=[], commands=commands, bootstrap_python=os.sys.executable,
+        env={**env, "PIP_FIND_LINKS": str(shared)},
+    )
+    installed = subprocess.check_output(
+        [str(python), "-c", 'from importlib.metadata import version; print(version("om-wheel-fixture"))'],
+        text=True,
+    )
+    assert installed.strip() == "1.0"
+    install = next(command for command in commands if "install" in command)
+    assert "--no-index" in install and Path(install[-1]).parent != shared
+    assert not Path(install[-1]).parent.exists()
+
+
+@pytest.mark.parametrize("phase", ["wheel", "install", "check"])
+def test_failed_pip_preparation_leaves_current_release_in_place(transition, phase):
+    previous, target, current, events = transition
+    offline = OfflineRuntime(previous, installed=False)
+
+    def run(command, **kwargs):
+        if "pip" in command and phase in command:
+            return subprocess.CompletedProcess(command, 1, "", f"fixture {phase} failure")
+        return offline(command, **kwargs)
+
+    result = _upgrade(transition, run)
+    assert not result["ok"]
+    assert f"fixture {phase} failure" in result["error"]
+    assert not result["symlink_switched"] and current.resolve() == previous
+    assert not (target / ".venv").exists()
+    assert not list((current.parent / "cache/venvs").glob("om-upgrade-wheels-*"))
+    assert not events
 
 
 def test_plugin_uv_auto_fallback_retries_only_plugin(transition, monkeypatch):

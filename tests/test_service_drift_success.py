@@ -448,3 +448,21 @@ def test_secret_migration_unknown_filter_preserves_credential_exclusion(include_
     result = _unrelated_secret_migration_drift(source)
     assert result == ({"activation_unknown_units": [timer]} if include_timer else {})
     assert source == before
+
+
+@pytest.mark.parametrize("action", ["is-active", "is-enabled", "show"])
+def test_systemctl_status_queries_never_use_sudo(action):
+    from src.application.service_drift import _run_systemctl
+
+    calls = []
+    def runner(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=1, stdout="", stderr="Access denied")
+
+    ctx = {"profile": {"deploy_user": "liuxie"}}
+    result = _run_systemctl(ctx, [action, "options-monitor-upgrade.timer"], run_cmd=runner)
+    assert result["ok"] is False
+    assert calls == [["systemctl", action, "options-monitor-upgrade.timer"]]
+
+    _run_systemctl(ctx, ["restart", "options-monitor-feishu-ws.service"], run_cmd=runner)
+    assert calls[-1] == ["sudo", "-n", "systemctl", "restart", "options-monitor-feishu-ws.service"]
