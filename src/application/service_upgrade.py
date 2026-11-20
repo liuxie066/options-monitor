@@ -1022,7 +1022,8 @@ def _post_upgrade_service_health(
     if feishu_service in services:
         command = _feishu_ws_check_command(profile=profile, repo_root=repo_root)
         env = _child_env_from_profile(profile)
-        result = _run_command(command, cwd=repo_root, run_cmd=run_cmd, env=env, timeout=60)
+        # The health CLI verifies the managed SDK inventory before checking its APIs.
+        result = _run_command(command, cwd=repo_root, run_cmd=run_cmd, env=env, timeout=180)
         result["operation"] = "post_upgrade_service_health"
         result["check"] = "feishu-ws-check"
         result["service"] = feishu_service
@@ -2786,6 +2787,7 @@ def _validate_target_managed_plugins(
     # Exercise the target's ordinary finder/loaders, not the previous store or staged import path.
     code = (
         "import importlib, json, sys\n"
+        "sys.dont_write_bytecode = True\n"
         "from pathlib import Path\n"
         "sys.path.insert(0, sys.argv[1])\n"
         "import src\n"
@@ -2815,7 +2817,7 @@ def _validate_target_managed_plugins(
     )
     _run_required(
         [str(_release_python(target_dir)), "-I", "-c", code, str(target_dir), json.dumps(selected)],
-        cwd=target_dir, run_cmd=run_cmd, operations=operations, timeout=30,
+        cwd=target_dir, run_cmd=run_cmd, operations=operations, timeout=180,
     )
 
 

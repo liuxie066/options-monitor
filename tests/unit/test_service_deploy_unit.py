@@ -1472,7 +1472,8 @@ def test_service_drift_privileged_executable_fails_if_install_did_not_publish(
     assert out["returncode"] == 1
     assert "ownership verification failed" in out["error"]
 
-def test_post_upgrade_service_health_reports_feishu_ws_check_failure(tmp_path: Path) -> None:
+@pytest.mark.parametrize("check_outcome", ["healthy", "invalid_credentials", "timeout"])
+def test_post_upgrade_service_health_reports_feishu_ws_check(tmp_path: Path, check_outcome: str) -> None:
     from src.application.service_upgrade import _post_upgrade_service_health
 
     repo = tmp_path / "repo"
@@ -1487,11 +1488,19 @@ def test_post_upgrade_service_health_reports_feishu_ws_check_failure(tmp_path: P
 
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
         if list(command)[:3] == [str(repo / "om"), "inbound", "feishu-ws"]:
-            return subprocess.CompletedProcess(command, 2, stdout="", stderr="missing Feishu app credentials\n")
+            assert _kwargs["timeout"] == 180
+            if check_outcome == "timeout":
+                raise subprocess.TimeoutExpired(command, _kwargs["timeout"])
+            if check_outcome == "invalid_credentials":
+                return subprocess.CompletedProcess(command, 2, stdout="", stderr="missing Feishu app credentials\n")
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     out = _post_upgrade_service_health(profile=profile, repo_root=repo, run_cmd=_run_cmd, operations=operations)
 
+    if check_outcome == "healthy":
+        assert out["ok"] is True
+        assert any(row["check"] == "feishu-ws-check" for row in out["checks"])
+        return
     assert out["ok"] is False
     assert out["status"] == "error"
     assert out["failed_checks"][0]["check"] == "feishu-ws-check"
