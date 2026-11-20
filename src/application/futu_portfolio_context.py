@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import subprocess
 
 from src.application.runtime_paths import resolve_runtime_root
 from src.infrastructure.exchange_rates import shared_exchange_rate_cache_path
@@ -1049,21 +1048,21 @@ def fetch_futu_portfolio_context(
         exchange_rate_observation=exchange_rate_observation,
         position_snapshot_input=snapshot_input,
     )
-    from src.application.futu_mmf_oss import mmf_oss_configured, read_mmf_oss
+    from src.application.futu_mmf_shared import mmf_shared_configured, read_mmf_shared
 
-    if mmf_oss_configured():
+    if mmf_shared_configured():
         from src.application.futu_mmf_funding import apply_mmf_funding
 
         check_fetch_control(deadline, cancelled)
         try:
             apply_mmf_funding(
-                context, read_mmf_oss(account), account=account,
+                context, read_mmf_shared(account), account=account,
                 physical_account_id=physical_account_id, environment=trd_env,
             )
-        except (ValueError, TypeError, KeyError, RuntimeError, OSError, subprocess.SubprocessError):
+        except (ValueError, TypeError, KeyError, RuntimeError, OSError):
             check_fetch_control(deadline, cancelled)
             context["cash_balance_reliable"] = False
-            context["cash_balance_unavailable_by_row"]["oss_mmf_funding"] = "oss_mmf_funding_unverified"
+            context["cash_balance_unavailable_by_row"]["shared_mmf_funding"] = "shared_mmf_funding_unverified"
     check_fetch_control(deadline, cancelled)
     return context
 
