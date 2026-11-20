@@ -39,6 +39,7 @@
 /scripts/python_runtime.sh -export-ignore
 /scripts/auto_close_schedule.sh -export-ignore
 /scripts/release_check.py -export-ignore
+/scripts/om_root_upgrade.py -export-ignore
 
 # User documentation and programmatic docs/architecture resources remain.
 /requirements/dev.txt export-ignore
