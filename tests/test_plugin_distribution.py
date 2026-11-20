@@ -151,10 +151,19 @@ def official(tmp_path, monkeypatch, plugin_python):
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "isolated-runtime"))
     for key in ("OM_ENV_FILE",):
         monkeypatch.delenv(key, raising=False)
+    plugin_roots = {item["module"] for item in runtime.PLUGINS.values()}
+    original_modules = {
+        name: module for name, module in sys.modules.items()
+        if name.partition(".")[0] in plugin_roots
+    }
+    for name in original_modules:
+        sys.modules.pop(name)
     yield root, assets, catalog, downloads
     for name in list(sys.modules):
-        if any(name == item["module"] or name.startswith(item["module"] + ".") for item in runtime.PLUGINS.values()):
+        if name.partition(".")[0] in plugin_roots:
             sys.modules.pop(name)
+    # Preserve the modules already imported during collection and their class identities.
+    sys.modules.update(original_modules)
 
 
 def test_cli_list_offline_and_install_preview_has_no_persistent_effect(official, capsys):
