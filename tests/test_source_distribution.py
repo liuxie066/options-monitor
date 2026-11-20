@@ -31,6 +31,7 @@ PRODUCT_FILES = {
     "docs/architecture/data-storage-runtime-source-inventory.v1.json",
     "scripts/install.sh", "scripts/install_agent_plugin.sh", "scripts/python_runtime.sh",
     "scripts/auto_close_schedule.sh", "scripts/release_check.py",
+    "scripts/om_root_upgrade.py",
 }
 DEVELOPER_FILES = {
     ".gitattributes", ".gitignore", ".github/workflows/future.yml", ".githooks/pre-commit",
@@ -80,9 +81,10 @@ def test_runtime_source_copy_respects_product_export_policy(tmp_path):
     source, _ = source_fixture(tmp_path)
     target = tmp_path / "runtime"
     build_runtime_bundle.copy_source(source, target)
-    # Plugins ship separately as wheels; release_check is used by source upgrades only.
+    # Plugins ship separately as wheels; these upgrade helpers are for source installs.
     expected = {name for name in PRODUCT_FILES
-                if not name.startswith("plugins/") and name != "scripts/release_check.py"}
+                if not name.startswith("plugins/")
+                and name not in {"scripts/release_check.py", "scripts/om_root_upgrade.py"}}
     assert file_inventory(target) == expected
 
 

@@ -556,6 +556,7 @@ confirmed 升级/回滚先取得该 guard，再绑定 current、版本、profile
 默认不自动跨 major；需要跨 major 时显式传 `--allow-major`。
 
 在阿里云的 Linux/systemd 源码部署上，root 可使用单独安装的 `/usr/local/sbin/om-root-upgrade`。
+发布源码归档提供 `scripts/om_root_upgrade.py`，核验官方归档后，安装为 root 所有、权限 0700 的入口。
 无参数显示入口状态。传入 root 所有、权限为 0600 的 JSON 文件先预览，例如
 `om-root-upgrade /root/om-upgrade-plan.json`。确认同一份清单后加 `--confirm`。
 清单含 `from`、`to`、状态显示中的 `profile_sha256` 和 `files`。
