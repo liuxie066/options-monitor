@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sqlite3
 from contextlib import closing, contextmanager, nullcontext
 from contextvars import ContextVar
@@ -11,6 +12,9 @@ from threading import RLock
 from typing import Any, Callable, Iterator, Mapping
 
 from src.infrastructure.private_storage import connect_private_sqlite
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 # Serialize mixed read-only/writable handles in this process. SQLite still owns
@@ -119,6 +123,13 @@ class DecisionHistoryStore:
                     if write:
                         conn.commit()
             except sqlite3.Error as exc:
+                _LOGGER.exception(
+                    "Decision history SQLite error (db=%s, write=%s, sqlite_errorname=%s, sqlite_errorcode=%s)",
+                    self.path,
+                    write,
+                    getattr(exc, "sqlite_errorname", None),
+                    getattr(exc, "sqlite_errorcode", None),
+                )
                 raise DecisionHistoryError("history_database_error") from exc
 
     @staticmethod

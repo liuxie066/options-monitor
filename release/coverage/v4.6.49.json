@@ -1,0 +1,34 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.49",
+  "base": {
+    "tag": "v4.6.48",
+    "commit": "206d7916b97286f92b564ae2d7d8b2144dccc2d2"
+  },
+  "reviewed_head": "acf8474f5d857e8773b42fc0c72edcbf8a81e4f0",
+  "commits": [
+    {
+      "sha": "acf8474f5d857e8773b42fc0c72edcbf8a81e4f0",
+      "subject": "Fix timeouts in managed plugin and Feishu upgrade validation"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "延长升级和回滚的托管插件批量验证及飞书健康检查时限，避免插件加载较慢时误判失败。批量验证禁止生成 Python 字节码，避免超时后留下不完整文件。",
+      "commits": [
+        "acf8474f5d857e8773b42fc0c72edcbf8a81e4f0"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "acf8474f5d857e8773b42fc0c72edcbf8a81e4f0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1231",
+        "docs/RELEASE_PROCESS.md"
+      ]
+    }
+  ]
+}

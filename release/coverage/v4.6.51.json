@@ -1,0 +1,34 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.51",
+  "base": {
+    "tag": "v4.6.50",
+    "commit": "1c966b8cb7240c9b24534359dab11cafa1f586b4"
+  },
+  "reviewed_head": "70f64d31cc2c1faf22c3d92e6d5e88be8a0139ed",
+  "commits": [
+    {
+      "sha": "70f64d31cc2c1faf22c3d92e6d5e88be8a0139ed",
+      "subject": "Hold the native upgrade guard through root preflight"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "root 升级入口在确认预检期间保留原有升级锁，缩短并行升级抢先切换的窗口，并限制本次升级进程使用 systemd 代理。",
+      "commits": [
+        "70f64d31cc2c1faf22c3d92e6d5e88be8a0139ed"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "70f64d31cc2c1faf22c3d92e6d5e88be8a0139ed",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1237",
+        "docs/RELEASE_PROCESS.md"
+      ]
+    }
+  ]
+}

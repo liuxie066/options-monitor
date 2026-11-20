@@ -555,6 +555,20 @@ confirmed 升级/回滚先取得该 guard，再绑定 current、版本、profile
 
 默认不自动跨 major；需要跨 major 时显式传 `--allow-major`。
 
+在阿里云的 Linux/systemd 源码部署上，root 可使用单独安装的 `/usr/local/sbin/om-root-upgrade`。
+发布源码归档提供 `scripts/om_root_upgrade.py`，核验官方归档后，安装为 root 所有、权限 0700 的入口。
+无参数显示入口状态。传入 root 所有、权限为 0600 的 JSON 文件先预览，例如
+`om-root-upgrade /root/om-upgrade-plan.json`。确认同一份清单后加 `--confirm`。
+清单含 `from`、`to`、状态显示中的 `profile_sha256` 和 `files`。
+`files` 的键是相对于 `/etc/systemd/system` 的改写路径，每项含现有文件的 `before` 和
+已审阅目标内容的 `after` SHA-256。先准备并核验已发布的目标源码和解释器，升级入口复用
+`liuxie` 的升级器，仅在本次执行期间代理清单内的修改和 systemd 重启。入口排除两套外部 OpenD。
+如果预览要求新增、退役、启用服务或变更特殊文件权限，入口会在切换前拒绝升级。
+旧版飞书凭据物化单元会触发额外启动，仅使用没有该单元改写的升级计划。
+确认时入口在重新预检期间持有项目原有的升级锁。已在暂存期间持锁的 root 启动器也可通过
+`--guard-fd` 传入对应描述符。入口在创建 OM 子进程前交还锁，由子进程按原流程立即竞争。
+如果另一进程在交接时先拿到锁，本次确认将由原有升级锁检查拒绝。systemd 代理仅受理来自本次升级进程会话的请求。
+
 service drift 仅将单元目录中的 `.service` / `.timer` 文件列入单元对账，
 `.bak`、`.disabled` 等备份文件不会被退役。`--confirm` 只自动退役部署器明确管理的
 产品单元，包括已停用的历史产品单元；账号专属 OpenD 名称按 profile 中显式记录的账号识别，
@@ -682,6 +696,8 @@ true 也不补装。首次安装可用 `scripts/install.sh --with-position-advic
 回滚保留回滚目标原有的安装选择，不下载、安装或迁移插件。确认回滚时，在暂存配置、切换
 `current` 和操作服务之前，以目标解释器校验目标已有托管插件的 receipt 和实际加载；
 坏 receipt 或导入失败会中止，即使选择不重启服务也不能跳过。预览只校验本地 receipt，不加载插件。
+升级和回滚共用的托管插件批量校验限时 180 秒。校验进程禁止写入 Python 字节码，超时后仍可检查原样的插件目录。
+切换后的飞书健康检查也单独限时 180 秒，以容纳托管飞书 SDK 的文件清单及导入校验。
 对于支持 Provider 包的回滚目标，还以目标解释器校验其 pip 安装的 Provider、行情可用性和所需 SDK；缺失或不兼容时不切换、不补装。历史内置 Provider 目标沿用原合同。
 `market-opend`、`broker-futu`、`broker-longbridge` 也使用同一官方管理路径；长桥 SDK 仍是显式独立前提，基础运行包自检不能替代其迁移资格。
 
