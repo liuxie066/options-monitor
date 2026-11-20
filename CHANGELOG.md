@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Improvements
+- Linux/systemd 新增 root 运维升级入口，沿用部署用户准备应用，由 root 按核准清单代办 systemd 操作，并保护外部管理的 OpenD。
+
 ## 4.6.49 - 2026-11-20
 
 ### Bug Fixes
