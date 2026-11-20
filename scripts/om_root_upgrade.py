@@ -1,6 +1,7 @@
 #!/usr/bin/python3 -I
 """Root-operated, approval-bound OM upgrade for an existing Linux installation."""
 import argparse
+from contextlib import ExitStack
 import fcntl
 import hashlib
 import json
@@ -23,6 +24,7 @@ PROFILE = RUNTIME / "service.profile.json"
 UNITS = Path("/etc/systemd/system")
 SYSTEMCTL = "/usr/bin/systemctl"
 OPEN_D = {f"options-monitor-opend-{account}.service" for account in ("lx", "sy")}
+LEGACY_FEISHU_CREDENTIAL_UNIT = "options-monitor-feishu-agent-credential.service"
 UNIT = re.compile(r"options-monitor-[a-z0-9-]+\.(?:service|timer)")
 VERSION = re.compile(r"\d+\.\d+\.\d+")
 SHA = re.compile(r"[a-f0-9]{64}")
@@ -113,6 +115,8 @@ def read_preview(release, account):
                 "execution_drift_units"):
         require(not data[key], f"unsupported service drift: {key}")
     files = set(data["mismatched_units"])
+    require(LEGACY_FEISHU_CREDENTIAL_UNIT not in files,
+            "the legacy Feishu credential unit would need an unapproved start")
     files.update(str(Path(path).relative_to(UNITS)) for path in data["mismatched_managed_files"])
     for path in files:
         unit_path(path)
@@ -210,7 +214,26 @@ def handle(args, content, files, restarts):
                 "command outside plan")
         subprocess.run([SYSTEMCTL, "restart", args[3]], check=True, timeout=60)
 
-def apply(target, plan, restarts, account):
+def lock_upgrade_guard(account, inherited=None):
+    path = RUNTIME / "locks" / "upgrade.lock.guard"
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW) if inherited is None else inherited
+    try:
+        metadata = os.fstat(fd)
+        require(stat.S_ISREG(metadata.st_mode) and metadata.st_uid == account.pw_uid
+                and metadata.st_nlink == 1 and os.path.samestat(metadata, path.lstat()),
+                "invalid native upgrade guard")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        os.set_inheritable(fd, False)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+def verify_peer(client, account, session):
+    pid, uid, _ = struct.unpack("3i", client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+    require(uid == account.pw_uid and os.getsid(pid) == session, "unexpected upgrade peer")
+
+def apply(target, plan, restarts, account, guard_fd=None):
     with (
         tempfile.TemporaryDirectory(prefix="om-root-upgrade-", dir="/run") as socket_directory,
         tempfile.TemporaryDirectory(prefix="om-root-upgrade-", dir="/var/tmp") as shim_directory,
@@ -229,7 +252,13 @@ def apply(target, plan, restarts, account):
             broker.listen(4)
             broker.settimeout(0.25)
             argv = restricted([*upgrade_command(target, plan), "--confirm"])
-            with subprocess.Popen(argv, cwd=target, **child_options(account, shim_root, endpoint)) as process:
+            if guard_fd is not None:
+                guard_path = RUNTIME / "locks" / "upgrade.lock.guard"
+                require(os.path.samestat(os.fstat(guard_fd), guard_path.lstat()), "native upgrade guard was replaced")
+                fcntl.flock(guard_fd, fcntl.LOCK_UN)
+            with subprocess.Popen(
+                argv, cwd=target, start_new_session=True, **child_options(account, shim_root, endpoint),
+            ) as process:
                 try:
                     while process.poll() is None:
                         try:
@@ -240,8 +269,7 @@ def apply(target, plan, restarts, account):
                             client.settimeout(5)
                             ok = False
                             try:
-                                _, uid, _ = struct.unpack("3i", client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
-                                require(uid == account.pw_uid, "unexpected peer")
+                                verify_peer(client, account, process.pid)
                                 with client.makefile("rb") as wire:
                                     args, content = json.loads(wire.readline(LIMIT))
                                 handle(args, content, plan["files"], restarts)
@@ -261,8 +289,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("plan", type=Path, nargs="?", help="root-owned private JSON policy")
     parser.add_argument("--confirm", action="store_true")
+    parser.add_argument("--guard-fd", type=int, help="use the native upgrade guard descriptor held during staging")
     args = parser.parse_args()
     require(os.geteuid() == 0 and hasattr(socket, "SO_PEERCRED"), "requires root on Linux")
+    require(args.guard_fd is None or (args.confirm and args.guard_fd >= 3), "guard descriptor needs confirmation")
     account = pwd.getpwnam(ACCOUNT)
     require(account.pw_uid != 0, "deploy user cannot be root")
     if args.plan is None:
@@ -273,13 +303,17 @@ def main():
                           "external_opend_units": sorted(OPEN_D)}))
         return 0
     fd = os.open("/run/om-root-upgrade.lock", os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, "a") as lock:
+    with os.fdopen(fd, "a") as lock, ExitStack() as scope:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        guard_fd = None
+        if args.confirm:
+            guard_fd = lock_upgrade_guard(account, args.guard_fd)
+            scope.callback(os.close, guard_fd)
         actual, target, plan, restarts = read_plan(Path(os.path.abspath(args.plan)), account)
         check_upgrade(target, plan, account)
         print(json.dumps({"status": "confirmed" if args.confirm else "preview", "from": actual.name,
                           "to": target.name, "files": sorted(plan["files"]), "restarts": sorted(restarts)}), flush=True)
-        return apply(target, plan, restarts, account) if args.confirm else 0
+        return apply(target, plan, restarts, account, guard_fd) if args.confirm else 0
 
 if __name__ == "__main__":
     try:

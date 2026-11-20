@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug Fixes
+- root 升级入口在确认预检期间保留原有升级锁，缩短并行升级抢先切换的窗口，并限制本次升级进程使用 systemd 代理。
+
 ## 4.6.50 - 2026-11-20
 
 ### Improvements
