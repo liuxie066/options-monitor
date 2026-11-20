@@ -682,6 +682,7 @@ true 也不补装。首次安装可用 `scripts/install.sh --with-position-advic
 回滚保留回滚目标原有的安装选择，不下载、安装或迁移插件。确认回滚时，在暂存配置、切换
 `current` 和操作服务之前，以目标解释器校验目标已有托管插件的 receipt 和实际加载；
 坏 receipt 或导入失败会中止，即使选择不重启服务也不能跳过。预览只校验本地 receipt，不加载插件。
+升级和回滚共用的托管插件批量校验限时 180 秒。校验进程禁止写入 Python 字节码，超时后仍可检查原样的插件目录。
 对于支持 Provider 包的回滚目标，还以目标解释器校验其 pip 安装的 Provider、行情可用性和所需 SDK；缺失或不兼容时不切换、不补装。历史内置 Provider 目标沿用原合同。
 `market-opend`、`broker-futu`、`broker-longbridge` 也使用同一官方管理路径；长桥 SDK 仍是显式独立前提，基础运行包自检不能替代其迁移资格。
 

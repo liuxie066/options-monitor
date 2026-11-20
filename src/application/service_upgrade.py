@@ -2786,6 +2786,7 @@ def _validate_target_managed_plugins(
     # Exercise the target's ordinary finder/loaders, not the previous store or staged import path.
     code = (
         "import importlib, json, sys\n"
+        "sys.dont_write_bytecode = True\n"
         "from pathlib import Path\n"
         "sys.path.insert(0, sys.argv[1])\n"
         "import src\n"
@@ -2815,7 +2816,7 @@ def _validate_target_managed_plugins(
     )
     _run_required(
         [str(_release_python(target_dir)), "-I", "-c", code, str(target_dir), json.dumps(selected)],
-        cwd=target_dir, run_cmd=run_cmd, operations=operations, timeout=30,
+        cwd=target_dir, run_cmd=run_cmd, operations=operations, timeout=180,
     )
 
 

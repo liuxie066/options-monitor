@@ -242,6 +242,8 @@ def managed_transition(monkeypatch, transition, request, managed_python):
             return _offline_import(command, **kwargs)
         if "-c" in command and "read_managed_plugin" in command[command.index("-c") + 1]:
             assert command[0] == str(upgrade._release_python(target))
+            assert kwargs.get("timeout") == 180
+            assert "sys.dont_write_bytecode = True" in command[command.index("-c") + 1]
             validation_commands.append(command)
             events.append("managed_validate")
             # Run the actual isolated target import check, with the validated test interpreter.
