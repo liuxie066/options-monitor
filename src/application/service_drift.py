@@ -1329,13 +1329,18 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
         expected_files=expected_managed_files,
         ctx=ctx,
     )
+    external_opend_units = sorted(set(effective_profile.get("external_opend_units", [])))
+    external_dropin_dirs = {f"{name}.d" for name in external_opend_units}
+    installed_managed_files = [
+        path for path in installed_managed_files if Path(path).parent.name not in external_dropin_dirs
+    ]
     expected_services = _service_names_from_profile(_bundle_profile(bundle))
     profile_services = _service_names_from_profile(persisted_profile)
     installed_units = _installed_units(provider=provider, expected_files=expected_files, ctx=ctx)
     missing_profile_units = sorted(set(expected_services) - set(profile_services))
     extra_profile_units = sorted(set(profile_services) - set(expected_services))
     missing_installed_units = sorted(set(expected_files) - set(installed_units))
-    extra_installed_units = sorted(set(installed_units) - set(expected_files))
+    extra_installed_units = sorted(set(installed_units) - set(expected_files) - set(external_opend_units))
     accounts = profile.get("accounts")
     extra_managed_units = (
         sorted(set(extra_installed_units) & managed_systemd_unit_names(
@@ -1464,6 +1469,8 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
         "missing_installed_units": missing_installed_units,
         "extra_profile_units": extra_profile_units,
         "extra_installed_units": extra_installed_units,
+        "external_opend_units": external_opend_units,
+        "extra_managed_units": extra_managed_units,
         "mismatched_units": mismatched_units,
         "expected_managed_files": sorted(expected_managed_files),
         "installed_managed_files": installed_managed_files,
@@ -2125,7 +2132,6 @@ def _apply_service_drift(
         before.get("preserved_activation_units") or []
     )
     execution_drift = set(before.get("execution_drift_units") or [])
-    extra_installed = set(before.get("extra_installed_units") or [])
     live_systemctl = _live_systemctl_enabled(ctx)
     systemd_definition_changed = bool(
         written_units
@@ -2214,12 +2220,7 @@ def _apply_service_drift(
         preserved_activation & mismatched & set(written_units)
     )
     retired_paths_changed = False
-    accounts = ctx["profile"].get("accounts")
-    managed_units = managed_systemd_unit_names(
-        accounts=accounts if isinstance(accounts, list) else [],
-        group_query_bot_instance_ids=_group_query_bot_instance_ids(ctx["profile"]),
-    )
-    for name in sorted(extra_installed & managed_units):
+    for name in before.get("extra_managed_units", []):
         if live_systemctl:
             stop_result = _run_systemctl(ctx, ["disable", "--now", name], run_cmd=run_cmd)
             operations.append(stop_result)

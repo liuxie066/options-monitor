@@ -1642,6 +1642,41 @@ def test_service_drift_preserves_profile_opend_service(tmp_path: Path) -> None:
     assert out["mismatched_units"] == []
 
 
+def test_service_drift_preserves_external_opend_units_and_dropins(tmp_path: Path) -> None:
+    repo, runtime, systemd_root = _drift_roots(tmp_path)
+    bundle = _render_bundle(repo, runtime, accounts=["lx", "sy"], markets=["hk"])
+    profile = json.loads(next(item["content"] for item in bundle["files"]
+                              if item["kind"] == "service_profile"))
+    names = [f"options-monitor-opend-{account}.service" for account in ("lx", "sy")]
+    profile["external_opend_units"] = names
+    profile_path = runtime / "service.profile.json"
+    profile_path.write_text(json.dumps(profile))
+    _write_systemd_units_from_bundle(bundle, systemd_root)
+    installed = {}
+    for name in names:
+        unit = systemd_root / name
+        dropin = systemd_root / (name + ".d") / "zzzz-secret-credentials.conf"
+        dropin.parent.mkdir()
+        installed[unit] = "[Service]\nExecStart=/fixture/remembered-opend\n"
+        installed[dropin] = "[Service]\nEnvironment=FIXTURE=1\n"
+    for path, content in installed.items():
+        path.write_text(content)
+    calls = []
+    runner = _fake_systemd_query_runner(record=lambda command, kwargs: calls.append(command))
+    preview = _drift_at(repo, runtime, systemd_root, run_cmd=runner)
+    assert preview["external_opend_units"] == names
+    assert set(names) <= set(preview["installed_units"])
+    for key in ("expected_services", "extra_managed_units", "mismatched_units"):
+        assert set(names).isdisjoint(preview[key])
+    assert preview["extra_managed_files"] == []
+    applied = _drift_at(repo, runtime, systemd_root, confirm=True, run_cmd=runner)
+    assert applied["summary"]["ok"]
+    assert applied["applied"]["retired_units"] == []
+    assert all(path.read_text() == content for path, content in installed.items())
+    assert not any(set(command) & set(names) for command in calls)
+    assert json.loads(profile_path.read_text())["external_opend_units"] == names
+
+
 def test_service_drift_preserves_quality_monitoring_opt_in_and_detects_metadata_drift(tmp_path: Path) -> None:
     from src.application.service_deploy import render_service_bundle
     from src.application.service_drift import service_drift
