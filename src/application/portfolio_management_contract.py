@@ -34,6 +34,7 @@ _VIEW_PATHS = {
 CAPITAL_FACTS_PATH = "/api/v1/analysis/capital-facts"
 VALUATION_EVIDENCE_PATH = "/api/v1/analysis/valuation-evidence"
 HOLDINGS_REFRESH_PATH = "/api/v1/futu/holdings/durable-refresh-requests"
+MMF_FUNDING_PATH = "/api/v1/futu/mmf-funding"
 CONTRACT_OPERATIONS = {
     **{
         ("GET", path): 200
@@ -41,6 +42,7 @@ CONTRACT_OPERATIONS = {
         if path.startswith("/api/v1/")
     },
     ("GET", CAPITAL_FACTS_PATH): 200,
+    ("GET", MMF_FUNDING_PATH): 200,
     ("POST", VALUATION_EVIDENCE_PATH): 200,
     ("POST", HOLDINGS_REFRESH_PATH): 202,
 }

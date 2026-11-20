@@ -292,7 +292,12 @@ def load_account_portfolio_context(
         raise
     except Exception:
         cached = None
-    if isinstance(cached, dict):
+    from src.application.portfolio_management import portfolio_management_enabled
+
+    needs_current_mmf_evidence = (
+        source_plan.primary_source == "futu" and portfolio_management_enabled(config)
+    )
+    if isinstance(cached, dict) and not needs_current_mmf_evidence:
         cached_snapshot = cached.get("position_snapshot_input")
         if isinstance(cached_snapshot, Mapping):
             cached = deepcopy(cached)

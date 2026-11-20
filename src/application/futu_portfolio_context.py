@@ -1047,6 +1047,27 @@ def fetch_futu_portfolio_context(
         exchange_rate_observation=exchange_rate_observation,
         position_snapshot_input=snapshot_input,
     )
+    from src.application.portfolio_management import (
+        portfolio_management_enabled,
+        resolve_portfolio_management_client,
+    )
+
+    if portfolio_management_enabled(dict(cfg)):
+        from src.application.futu_mmf_funding import apply_mmf_funding
+
+        check_fetch_control(deadline, cancelled)
+        try:
+            funding = resolve_portfolio_management_client(dict(cfg)).read_mmf_funding(
+                account=account,
+            )
+            apply_mmf_funding(
+                context, funding, account=account, physical_account_id=physical_account_id,
+                environment=trd_env,
+            )
+        except (ValueError, TypeError, KeyError, AttributeError, RuntimeError, OSError):
+            check_fetch_control(deadline, cancelled)
+            context["cash_balance_reliable"] = False
+            context["cash_balance_unavailable_by_row"]["pm_mmf_funding"] = "pm_mmf_funding_unverified"
     check_fetch_control(deadline, cancelled)
     return context
 

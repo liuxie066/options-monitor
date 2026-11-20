@@ -629,6 +629,112 @@
         "title": "HoldingsResponse",
         "type": "object"
       },
+      "MmfFundingResponse": {
+        "properties": {
+          "account": {
+            "title": "Account",
+            "type": "string"
+          },
+          "account_fingerprint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Fingerprint"
+          },
+          "adjustments": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adjustments"
+          },
+          "cash": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "number"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cash"
+          },
+          "environment": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Environment"
+          },
+          "fund_assets_cny": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fund Assets Cny"
+          },
+          "observed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed At"
+          },
+          "snapshot_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshot Id"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "account",
+          "status"
+        ],
+        "title": "MmfFundingResponse",
+        "type": "object"
+      },
       "NavResponse": {
         "additionalProperties": true,
         "properties": {
@@ -1793,6 +1899,105 @@
         "summary": "Sync Futu Holdings Query",
         "tags": [
           "holdings"
+        ]
+      }
+    },
+    "/api/v1/futu/mmf-funding": {
+      "get": {
+        "operationId": "get_mmf_funding_api_v1_futu_mmf_funding_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "account",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_-]*$",
+              "title": "Account",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MmfFundingResponse"
+                }
+              }
+            },
+            "description": "Successful Response",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Get Mmf Funding",
+        "tags": [
+          "cash"
         ]
       }
     },
