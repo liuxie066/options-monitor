@@ -445,6 +445,7 @@ om bot run --text "评价一下我的持仓"
 | 完成首次配置、外部接入与扫描 | [首次运行指南](docs/GETTING_STARTED.md) |
 | 管理账户、策略、通知与密钥 | [配置指南](CONFIGURATION_GUIDE.md)、[配置生成规则](CONFIGS.md)、[密钥管理](docs/SECRET_STORAGE.md) |
 | 部署后台服务和确认运行目录 | [部署指南](DEPLOY.md)、[Linux / Mac 部署](docs/DEPLOY_LINUX_MAC.md) |
+| 在 Linux 上按周检查、升级 OpenD 并记录回执 | [OpenD 周度升级](docs/DEPLOY_LINUX_MAC.md#opend-weekly-upgrades) |
 | 查看状态、排错与恢复 | [运行手册](RUNBOOK.md) |
 | 了解已发布版本的升级条件与回滚边界 | [发布与升级流程（仓库文档）](https://github.com/liuxie066/options-monitor/blob/main/docs/RELEASE_PROCESS.md) |
 | 查找其他主题 | [完整文档索引](docs/INDEX.md) |

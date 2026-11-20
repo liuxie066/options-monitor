@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1589 (`src`: 634, `domain`: 99, `scripts`: 34, `tests`: 818)
-- Internal import edges: 14316 total, 4748 production/script edges excluding tests
+- Python files scanned: 1591 (`src`: 635, `domain`: 99, `scripts`: 34, `tests`: 819)
+- Internal import edges: 14329 total, 4755 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -33,14 +33,14 @@ flowchart LR
   storage["domain.storage"]
   application -->|746| domain
   application -->|4| domain_services
-  application -->|238| infrastructure
+  application -->|239| infrastructure
   application -->|2| om_strategy_core
   application -->|65| storage
   domain_services -->|6| domain
   domain_services -->|2| storage
   infrastructure -->|47| application
   infrastructure -->|9| domain
-  interfaces -->|262| application
+  interfaces -->|263| application
   interfaces -->|4| domain
   interfaces -->|6| infrastructure
   om_strategy_core -->|9| domain
@@ -51,11 +51,11 @@ flowchart LR
   scripts -->|2| tests
   src -->|1| application
   storage -->|1| domain
-  tests -->|7213| application
+  tests -->|7216| application
   tests -->|785| domain
   tests -->|2| domain_services
   tests -->|511| infrastructure
-  tests -->|534| interfaces
+  tests -->|536| interfaces
   tests -->|14| om_strategy_core
   tests -->|93| scripts
   tests -->|79| storage
@@ -66,8 +66,8 @@ flowchart LR
 | from | to | imports |
 |---|---|---|
 | application | domain | 746 |
-| interfaces | application | 262 |
-| application | infrastructure | 238 |
+| interfaces | application | 263 |
+| application | infrastructure | 239 |
 | scripts | application | 103 |
 | application | storage | 65 |
 | infrastructure | application | 47 |
@@ -90,9 +90,9 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 7213 |
+| tests | application | 7216 |
 | tests | domain | 785 |
-| tests | interfaces | 534 |
+| tests | interfaces | 536 |
 | tests | infrastructure | 511 |
 | tests | scripts | 93 |
 | tests | storage | 79 |
@@ -106,9 +106,9 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | from | to | imports |
 |---|---|---|
 | src.application | domain.domain | 323 |
-| src.interfaces | src.application | 204 |
+| src.interfaces | src.application | 205 |
 | src.application.ledger | domain.domain | 184 |
-| src.application | src.infrastructure | 169 |
+| src.application | src.infrastructure | 170 |
 | scripts | src.application | 83 |
 | src.application.ledger | domain.domain.ledger | 78 |
 | src.application.trades | domain.domain | 68 |
@@ -199,11 +199,11 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.account_config | 79 |
 | domain.domain.trade_contract_identity | 74 |
 | domain.domain.decision_state_fingerprint | 64 |
-| src.infrastructure.io_utils | 62 |
+| src.infrastructure.io_utils | 63 |
 | domain.domain.option_position_identity | 62 |
 | src.application.runtime_paths | 56 |
 | domain.domain.ledger.position_fields | 53 |
-| src.application.plugin_runtime | 51 |
+| src.application.plugin_runtime | 52 |
 | src.infrastructure.futu_gateway | 47 |
 | domain.domain.trade_execution | 40 |
 

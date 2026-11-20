@@ -54,6 +54,7 @@ _SHARED_TIMER_NAMES = frozenset(
         "options-monitor-runtime-status.timer",
         "options-monitor-trade-intake-heartbeat.timer",
         "options-monitor-upgrade.timer",
+        "options-monitor-futu-update.timer",
     }
 )
 
@@ -71,6 +72,11 @@ PROJECTION_VERIFY_LAUNCHD_CALENDAR = {"Hour": 9, "Minute": 30}
 AUTO_UPGRADE_SYSTEMD_CALENDAR = "*-*-* 06:10:00 Asia/Shanghai"
 AUTO_UPGRADE_LAUNCHD_CALENDAR = {"Hour": 6, "Minute": 10}
 DEFAULT_OPEND_EXECUTABLE = "FutuOpenD"
+OPEND_UPGRADE_SERVICE = "options-monitor-futu-update.service"
+OPEND_UPGRADE_TIMER = "options-monitor-futu-update.timer"
+OPEND_UPGRADE_CALENDAR = "Sun *-*-* 10:00:00 Asia/Shanghai"
+
+
 QUALITY_REFRESH_INTERVAL_SYSTEMD = "15min"
 QUALITY_RECHECK_INTERVAL_SYSTEMD = "1min"
 QUALITY_DAY_END_SYSTEMD_CALENDARS = {
@@ -404,6 +410,12 @@ def _opend_service_plans_from_authoring_config(
         accounts=accounts,
         executable=executable,
     )
+
+
+def validate_opend_upgrade_units(units: list[str]) -> None:
+    if (not units or len(set(units)) != len(units)
+            or not all(re.fullmatch(r"options-monitor-opend(?:-[a-z0-9_-]+)?\.service", unit) for unit in units)):
+        raise ValueError("select distinct OM OpenD systemd services")
 
 
 def _opend_executable_path(root: Path, executable: str | Path) -> Path:
@@ -1122,6 +1134,8 @@ def render_service_bundle(
     use_default_deploy_user: bool = True,
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
     include_auto_upgrade: bool = False,
+    opend_upgrade_units: list[str] | None = None,
+    opend_upgrade_send_receipt: bool = False,
     include_opend: bool = False,
     opend_root: str | Path | None = None,
     opend_executable: str | Path | None = None,
@@ -1258,6 +1272,12 @@ def render_service_bundle(
             default=default_opend_root(deploy_home=systemd_home),
         )
         opend_service_plans = [_legacy_opend_service_plan(root=opend_root_path, executable=opend_executable_value)]
+    if opend_upgrade_units:
+        validate_opend_upgrade_units(opend_upgrade_units)
+        if target_key != "systemd" or not systemd_user or systemd_user == "root":
+            raise ValueError("OpenD automatic upgrades require systemd and a non-root deploy user")
+    elif opend_upgrade_send_receipt:
+        raise ValueError("OpenD receipt delivery requires at least one OpenD upgrade service")
     om = str(repo / "om")
     lock_root = runtime / "locks"
     log_root = runtime / "logs"
@@ -1791,6 +1811,41 @@ def render_service_bundle(
                     kind="systemd_timer",
                     service_name=quality_day_end_timer,
                 )
+        if opend_upgrade_units:
+            opend_upgrade_args = [
+                om, "service", "opend-upgrade", "--runtime-root", str(runtime),
+                "--unit", *opend_upgrade_units, "--confirm",
+            ]
+            if opend_upgrade_send_receipt:
+                opend_upgrade_args.append("--send-receipt")
+            add(
+                f"systemd/{OPEND_UPGRADE_SERVICE}",
+                _systemd_unit(
+                    description="Options Monitor weekly Futu OpenD update",
+                    repo_root=repo,
+                    runtime_root=runtime,
+                    env_file=env_file_path,
+                    deploy_user=systemd_user,
+                    deploy_home=systemd_home,
+                    exec_args=opend_upgrade_args,
+                ),
+                install_path=f"/etc/systemd/system/{OPEND_UPGRADE_SERVICE}",
+                kind="systemd_service",
+                service_name=OPEND_UPGRADE_SERVICE,
+            )
+            add(
+                f"systemd/{OPEND_UPGRADE_TIMER}",
+                _systemd_timer(
+                    description="Options Monitor weekly Futu OpenD update timer",
+                    unit_name=OPEND_UPGRADE_SERVICE,
+                    calendar=OPEND_UPGRADE_CALENDAR,
+                    persistent=False,
+                ),
+                install_path=f"/etc/systemd/system/{OPEND_UPGRADE_TIMER}",
+                kind="systemd_timer",
+                service_name=OPEND_UPGRADE_TIMER,
+            )
+
         if include_auto_upgrade:
             upgrade_service = "options-monitor-upgrade.service"
             upgrade_timer = "options-monitor-upgrade.timer"
@@ -1945,6 +2000,8 @@ def render_service_bundle(
                 inbound_operations_enabled=inbound_operations_enabled,
                 group_query_bot_units=group_query_units,
             )
+            if opend_upgrade_send_receipt:
+                secret_credential_bindings[OPEND_UPGRADE_SERVICE] = (FEISHU_BOT_APP_SECRET,)
             secret_deploy_user = str(systemd_user or "root")
             for consumer, logical_names in secret_credential_bindings.items():
                 add(
@@ -2421,6 +2478,11 @@ def render_service_bundle(
         } if include_secret_credentials else None,
         group_query_bot_instances=group_query_instances or None,
     )
+    if opend_upgrade_units:
+        profile["opend_upgrade"] = {
+            "units": list(opend_upgrade_units), "send_receipt": opend_upgrade_send_receipt,
+        }
+
     profile_content = json.dumps(profile, ensure_ascii=False, indent=2) + "\n"
     add(
         "service.profile.json",
@@ -3046,6 +3108,7 @@ def render_service_bundle_from_profile(
         group_query_bot_instances_raw if isinstance(group_query_bot_instances_raw, list) else []
     )
     services = _service_names_from_profile(profile)
+    opend_upgrade = profile.get("opend_upgrade") or {}
     include_auto_upgrade = bool(
         isinstance(profile.get("auto_upgrade"), dict)
         and profile["auto_upgrade"].get("enabled")
@@ -3096,6 +3159,8 @@ def render_service_bundle_from_profile(
         "use_default_deploy_user": False,
         "timeout_seconds": profile.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS),
         "include_auto_upgrade": include_auto_upgrade,
+        "opend_upgrade_units": opend_upgrade.get("units"),
+        "opend_upgrade_send_receipt": bool(opend_upgrade.get("send_receipt")),
         "include_opend": include_opend,
         "opend_root": opend_root,
         "opend_executable": opend_executable,

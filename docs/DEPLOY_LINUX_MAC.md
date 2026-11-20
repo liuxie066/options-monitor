@@ -338,6 +338,41 @@ launchd 没有每任务 IANA 日历时区；对应 plist 使用每分钟日历�
 `options-monitor-tick-hk.timer` 使用 `OnCalendar=Mon..Fri *-*-* 09..16:00/10:00 Asia/Hong_Kong`，按香港时间 10 分钟整数边界唤醒；是否真正扫描/通知仍由 `tick-cron` scheduler 的 run points 决定。
 `options-monitor-upgrade.timer` 只有在 render 时传了 `--include-auto-upgrade` 才会生成；它每天北京时间 06:10 检查最新 release tag，发现可升级版本后会从本机 git cache materialize 目标 release、创建 `.venv`、安装 runtime/server 依赖、校验 `om-agent spec` 和 tick 运行解释器，再切换 `/opt/options-monitor/current` 并写入 `upgrade_status.json`。默认 cache root 是 repo symlink 同级的 `_cache/`，也可用 `OM_UPGRADE_CACHE_ROOT` 或 `--cache-root` 覆盖；`_cache/git/options-monitor.git` 首次 mirror clone，后续增量 fetch，依赖下载缓存复用 `_cache/uv` / `_cache/pip`。release 目录不保留 `.git`，所以升级检查和下一次升级会在需要时从 git cache 读取 remote 与 release tags。依赖安装默认 `OM_UPGRADE_INSTALLER=auto`，会优先使用宿主机已安装的 `uv`，并把当前运行中的 Python 3.12+ `sys.executable` 传给 `uv venv --python`；uv 不可用或 auto 模式失败时回退 pip。升级流程不会自动安装 uv；可用 `OM_UPGRADE_INSTALLER=pip|uv` 强制选择。只配置 `PIP_INDEX_URL` 时会自动映射给 uv 的 `UV_INDEX_URL`。
 
+### OpenD weekly upgrades
+
+由 OM 的 `market-opend` 插件检查富途官方 Ubuntu x86_64 包。Linux systemd
+部署可通过 `om service install` 或 `om service render` 的
+`--opend-upgrade-unit` 显式选中一个或多个现有 OpenD unit。使用实际部署的
+unit 名称，单实例可使用 `options-monitor-opend.service`，多实例按实际账号
+标签选取。原生 timer `options-monitor-futu-update.timer` 每周日
+北京时间 10:00 触发。错过该时间不补跑，切换只能在 10:00–10:19 开始。
+启用时按对应的 service 预览、安装、启动流程核对变更及 timer 的运行状态。
+
+每个选中 unit 应与升级 oneshot 使用同一非 root 部署用户。unit 的
+`WorkingDirectory` 应指向各自应用目录下的 `current` 相对软链接，其目标应为
+`Futu_OpenD_<version>_Ubuntu18.04`。各实例使用独立的版本目录、回环 API
+端口，以及版本目录之外的 `FutuOpenD.xml` 和登录状态。启动入口必须使用这些
+持久配置。部署用户需要写入各实例应用目录，且只需获准通过非交互式 sudo
+重启所选 unit。这些前置权限由部署方配置。
+
+安装或启用前，可用部署用户运行只读预览。下面以默认单实例 unit 为例：
+
+```bash
+./om service opend-upgrade --runtime-root /var/lib/options-monitor \
+  --unit options-monitor-opend.service
+```
+
+确认运行时，首轮会对当前进程、端口、行情和交易登录状态取证。有新版时先准备
+全部目标包，再逐个切换相对链接、重启和验收。切换失败时按逆序尝试恢复已切换
+实例，并分别记录回滚验证结果。旧版本目录保留。失败后保留的候选目录须由部署
+方检查，再决定如何处理。
+
+每轮确认运行将结果写入 runtime root 的 `opend_upgrade_status.json`，并在
+`journalctl -u options-monitor-futu-update.service` 输出回执。安装或渲染时可显式
+加 `--opend-upgrade-send-receipt`，使用当前 OM 配置的飞书机器人收件人发送，
+并持久化投递结果。该方式需要已安装的飞书插件及有效出站配置。文件状态
+`unconfirmed` 表示投递结果未知，同一轮不会自动重发。
+
 ### 升级后 OpenD 就绪门禁
 
 `src/application/service_upgrade.py::_post_upgrade_service_health` 是升级、补偿和回滚共用的健康门禁。systemd 服务检查保持单次；OpenD 端点按 5 秒间隔等待端口及行情、交易登录就绪，端口开放本身不算健康。

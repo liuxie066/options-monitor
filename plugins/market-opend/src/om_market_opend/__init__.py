@@ -58,4 +58,9 @@ class OpenDMarketDataProvider:
         return prefetch_market_earnings_calendars(**kwargs)
 
 
-__all__ = ["OpenDMarketDataProvider"]
+def run_opend_upgrade(**kwargs):
+    from .upgrade import run_upgrade
+    return run_upgrade(**kwargs)
+
+
+__all__ = ["OpenDMarketDataProvider", "run_opend_upgrade"]

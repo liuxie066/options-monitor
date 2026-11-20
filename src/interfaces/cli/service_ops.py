@@ -44,6 +44,13 @@ def service_repo_base() -> Path:
     return Path(os.path.abspath(__file__)).parents[3]
 
 
+def _add_opend_upgrade_render_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--opend-upgrade-unit", dest="opend_upgrade_units", nargs="+",
+                        help="opt in to weekly updates for these exact OpenD systemd services")
+    parser.add_argument("--opend-upgrade-send-receipt", action="store_true", default=None,
+                        help="send the weekly receipt to OM's configured Feishu bot recipient")
+
+
 def add_service_update_commands(subparsers: Any) -> None:
     service = subparsers.add_parser("service", help="render and inspect platform service definitions")
     service_sub = service.add_subparsers(dest="service_command", required=True)
@@ -64,12 +71,18 @@ def add_service_update_commands(subparsers: Any) -> None:
             lifecycle.add_argument("--accounts", nargs="+", default=None)
             lifecycle.add_argument("--markets", nargs="+", choices=("us", "hk"), default=None)
             lifecycle.add_argument("--include-opend", action="store_true")
+            _add_opend_upgrade_render_options(lifecycle)
             lifecycle.add_argument("--include-feishu-ws", action="store_true")
             lifecycle.add_argument("--include-wechat-clawbot", action="store_true")
             lifecycle.add_argument(
                 "--group-query-bot-instances", default=None,
                 help="JSON file listing explicit group-query bot/API instances")
             lifecycle.add_argument("--channel-market", choices=("us", "hk"), default=None)
+    opend_upgrade = service_sub.add_parser("opend-upgrade", help="check or upgrade selected OpenD systemd services")
+    opend_upgrade.add_argument("--unit", nargs="+", required=True)
+    opend_upgrade.add_argument("--runtime-root", default=None)
+    opend_upgrade.add_argument("--confirm", action="store_true", help="apply during the Sunday maintenance window")
+    opend_upgrade.add_argument("--send-receipt", action="store_true", help="send the receipt to OM's configured Feishu bot recipient")
     service_render = service_sub.add_parser("render", help="render systemd or launchd service files")
     service_render.add_argument("--target", required=True, choices=("systemd", "launchd"))
     service_render.add_argument("--repo-root", default=None, help="repository path; defaults to this CLI's path, preserving symlinks")
@@ -105,6 +118,7 @@ def add_service_update_commands(subparsers: Any) -> None:
         action="store_true",
         help="render the long-running Futu OpenD gateway service",
     )
+    _add_opend_upgrade_render_options(service_render)
     service_render.add_argument("--opend-root", default=None, help="Futu OpenD installation/current directory")
     service_render.add_argument("--opend-executable", default=None, help="Futu OpenD executable name or absolute path")
     service_render.add_argument(
@@ -400,6 +414,20 @@ def handle_service_update_command(
     service_upgrade_fn: Callable[..., dict[str, Any]] = service_upgrade,
     service_rollback_fn: Callable[..., dict[str, Any]] = service_rollback,
 ) -> dict[str, Any]:
+    if args.command == "service" and args.service_command == "opend-upgrade":
+        from src.application.opend_upgrade_receipt import run_opend_upgrade
+
+        if args.send_receipt and not args.confirm:
+            raise AgentToolError(code="INPUT_ERROR", message="--send-receipt requires --confirm")
+        repo = repo_base_fn()
+        runtime = resolve_runtime_root(repo_root=repo, runtime_root=args.runtime_root).runtime_root
+        data = run_opend_upgrade(repo_root=repo, runtime_root=runtime, units=args.unit,
+                                 confirm=args.confirm, send_receipt=args.send_receipt)
+        ok = data["status"] in {"already_current", "update_available", "upgraded"}
+        if args.send_receipt:
+            ok = ok and data.get("delivery", {}).get("status") == "delivered"
+        return build_response(tool_name="service.opend-upgrade", ok=ok, data=data)
+
     if args.command == "service" and args.service_command == "backup-layout":
         try:
             data = plan_backup_layout(
@@ -452,6 +480,9 @@ def handle_service_update_command(
         if args.service_command == "install":
             options["env_file"] = args.env_file or os.environ.get("OM_ENV_FILE")
             options.update({key: getattr(args, key) for key in ("accounts", "markets", "include_opend", "include_feishu_ws", "include_wechat_clawbot", "channel_market")})
+            if args.opend_upgrade_units is not None or args.opend_upgrade_send_receipt:
+                options.update(opend_upgrade_units=args.opend_upgrade_units,
+                               opend_upgrade_send_receipt=args.opend_upgrade_send_receipt)
             group_query_instances = _group_query_bot_instances_from_args(args)
             if group_query_instances is not None:
                 options["group_query_bot_instances"] = group_query_instances
@@ -474,6 +505,8 @@ def handle_service_update_command(
             deploy_home=args.deploy_home,
             timeout_seconds=args.timeout_seconds,
             include_auto_upgrade=bool(args.include_auto_upgrade),
+            opend_upgrade_units=args.opend_upgrade_units,
+            opend_upgrade_send_receipt=bool(args.opend_upgrade_send_receipt),
             include_opend=bool(args.include_opend),
             opend_root=args.opend_root,
             opend_executable=args.opend_executable,
