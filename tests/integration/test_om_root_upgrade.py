@@ -1,6 +1,42 @@
+import fcntl
+import os
+import struct
+from types import SimpleNamespace
+
 import pytest
 
 from scripts import om_root_upgrade as entry
+
+
+def test_native_upgrade_guard_carries_through_inherited_descriptor(monkeypatch, tmp_path):
+    monkeypatch.setattr(entry, "RUNTIME", tmp_path)
+    locks = tmp_path / "locks"
+    locks.mkdir()
+    guard = locks / "upgrade.lock.guard"
+    guard.touch()
+    account = SimpleNamespace(pw_uid=os.getuid())
+    with guard.open("rb") as reservation, guard.open("rb") as competitor:
+        fcntl.flock(reservation.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fd = os.dup(reservation.fileno())
+        assert entry.lock_upgrade_guard(account, fd) == fd
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(competitor.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            fcntl.flock(competitor.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(fd)
+
+
+def test_broker_requires_upgrade_session_even_for_deploy_user(monkeypatch):
+    monkeypatch.setattr(entry.socket, "SO_PEERCRED", 17, raising=False)
+    monkeypatch.setattr(entry.os, "getsid", lambda pid: {21: 15, 22: 16}[pid])
+    account = SimpleNamespace(pw_uid=1001)
+    child = SimpleNamespace(getsockopt=lambda *_args: struct.pack("3i", 21, 1001, 1001))
+    outsider = SimpleNamespace(getsockopt=lambda *_args: struct.pack("3i", 22, 1001, 1001))
+    entry.verify_peer(child, account, 15)
+    with pytest.raises(ValueError, match="unexpected upgrade peer"):
+        entry.verify_peer(outsider, account, 15)
 
 
 @pytest.mark.parametrize("path", [
