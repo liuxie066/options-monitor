@@ -1,0 +1,137 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.46",
+  "base": {
+    "tag": "v4.6.45",
+    "commit": "e361cef10b45a2675508c4942ecc98f10903671e"
+  },
+  "reviewed_head": "e627a6089f9f27a9ee3e35b04d0882a3d5f198a3",
+  "commits": [
+    {
+      "sha": "b1529a79f0496d1054e02c1592183b495f749b3a",
+      "subject": "fix(bot): avoid SQLite contention in reply recovery"
+    },
+    {
+      "sha": "1d075edbca9ea32200cecbcfd38b71dca96793b7",
+      "subject": "Merge pull request #1221 from liuxie066/fix/feishu-reply-sqlite-contention"
+    },
+    {
+      "sha": "68a686bfbf2f8a6470258e67fb1ffa8597650f91",
+      "subject": "feat: add weekly OpenD upgrades to market plugin"
+    },
+    {
+      "sha": "64e22f62970e24fa4ee256eeae1f65942c4e6799",
+      "subject": "Merge pull request #1222 from liuxie066/cindy/tranquil-mirzakhani"
+    },
+    {
+      "sha": "a61d23cca2ffe1af49cf1e27046105dcd0c68aa6",
+      "subject": "Use confirmed Futu money-fund transit in opening funds"
+    },
+    {
+      "sha": "618aef13efed89d04d76d77d31ff847db3410090",
+      "subject": "Read Futu money-fund reconciliation from shared OSS"
+    },
+    {
+      "sha": "768c626d0db59732331554848d02258226f8a209",
+      "subject": "Read MMF reconciliation from the shared directory"
+    },
+    {
+      "sha": "a2be3d40315964e3c6ddd5c263e3872d684183cc",
+      "subject": "Validate zero MMF adjustments against broker observations"
+    },
+    {
+      "sha": "e627a6089f9f27a9ee3e35b04d0882a3d5f198a3",
+      "subject": "Merge pull request #1224 from liuxie066/cindy/happy-mendel"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "富途货基互转已扣未到账时，OM 读取 PM 发布的同机对账文件，将经核验的金额计入可开仓资金。到账后由现金余额接续。（#1224）",
+      "commits": [
+        "a61d23cca2ffe1af49cf1e27046105dcd0c68aa6",
+        "768c626d0db59732331554848d02258226f8a209",
+        "a2be3d40315964e3c6ddd5c263e3872d684183cc",
+        "e627a6089f9f27a9ee3e35b04d0882a3d5f198a3"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "为市场 OpenD 插件新增每周升级与状态回执，支持通过服务命令核对升级结果。（#1222）",
+      "commits": [
+        "68a686bfbf2f8a6470258e67fb1ffa8597650f91",
+        "64e22f62970e24fa4ee256eeae1f65942c4e6799"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "飞书回复恢复改用只读检查并缩短状态写入持锁时间，减少 SQLite 写入竞争。（#1221）",
+      "commits": [
+        "b1529a79f0496d1054e02c1592183b495f749b3a",
+        "1d075edbca9ea32200cecbcfd38b71dca96793b7"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "618aef13efed89d04d76d77d31ff847db3410090",
+      "reason": "中间 OSS 传输实现已在同一 PR 中由同机共享目录替换，最终版本不包含 OSS 功能。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "b1529a79f0496d1054e02c1592183b495f749b3a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1221"
+      ]
+    },
+    {
+      "commit": "1d075edbca9ea32200cecbcfd38b71dca96793b7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1221"
+      ]
+    },
+    {
+      "commit": "68a686bfbf2f8a6470258e67fb1ffa8597650f91",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1222"
+      ]
+    },
+    {
+      "commit": "64e22f62970e24fa4ee256eeae1f65942c4e6799",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1222"
+      ]
+    },
+    {
+      "commit": "a61d23cca2ffe1af49cf1e27046105dcd0c68aa6",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1224"
+      ]
+    },
+    {
+      "commit": "618aef13efed89d04d76d77d31ff847db3410090",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1224"
+      ]
+    },
+    {
+      "commit": "768c626d0db59732331554848d02258226f8a209",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1224"
+      ]
+    },
+    {
+      "commit": "a2be3d40315964e3c6ddd5c263e3872d684183cc",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1224"
+      ]
+    },
+    {
+      "commit": "e627a6089f9f27a9ee3e35b04d0882a3d5f198a3",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1224"
+      ]
+    }
+  ]
+}
