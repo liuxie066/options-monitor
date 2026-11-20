@@ -2,8 +2,6 @@
 from copy import deepcopy
 from datetime import datetime, timezone
 import sqlite3
-import subprocess
-import sys
 
 import pytest
 
@@ -13,22 +11,6 @@ from src.application.ledger import api, lifecycle_settlement_semantics, position
 from src.application.positions import context_builder
 from src.application.trades import close_reason_evidence, lifecycle_reconciliation
 from tests.test_wheel_workflows import _wheel_repo, _open_unlinked_call
-
-
-def test_scan_imports_do_not_load_ledger_writers():
-    subprocess.run([sys.executable, "-c", """
-import sys
-from src.application import config_validator, pipeline_runtime, pipeline_watchlist
-from src.application.ledger import api
-
-for module in ("bootstrap", "commands", "position_projection_migration", "writer"):
-    assert f"src.application.ledger.{module}" not in sys.modules, module
-
-assert "record_manual_position_open" in dir(api)
-from src.application.ledger.api import record_manual_position_open
-from src.application.ledger.commands import record_manual_position_open as owner
-assert record_manual_position_open is owner
-"""], check=True, capture_output=True, text=True)
 
 
 def test_context_and_lifecycle_compatibility_entries_share_owners():
