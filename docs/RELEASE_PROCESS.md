@@ -534,7 +534,7 @@ confirmed 升级/回滚先取得该 guard，再绑定 current、版本、profile
 
 `update verify` 汇总当前 symlink、版本、runtime config freshness、事件源配置、最近 upgrade status 和升级时保存的 service health 快照；`services.source=upgrade_status`，对应状态记录时间是 `upgrade.updated_at`，这不是当前 systemd live 查询。`--no-check-latest` 会跳过升级目标资格查询（包括 Git tag 和 GitHub Release），适合 release 已确认后快速复核远端状态。`upgrade.status` / `upgrade.last_status` 表示最近一次升级结果，`upgrade.has_status_record` 表示是否存在 `upgrade_status.json`；是否有新版本只看 `version.upgrade_available`。需要当前服务事实时，另行执行 `./om service drift --runtime-root /var/lib/options-monitor` 和对应 systemd 只读检查。
 
-当 `service.profile.json` 声明 `deploy_user` 时，升级和回滚的预览、执行都要求当前有效 UID 与该系统用户一致。无法解析用户或 UID 不一致时返回 `deployment_user_check_failed`，在目标查询、锁和状态文件写入之前停止。请以部署用户运行整个命令，仅由既有服务操作按需使用 sudo；不要用 sudo 包裹升级命令，以免原子替换后的配置归属 root。未声明部署用户的旧 profile 保留原有行为。
+当 `service.profile.json` 声明 `deploy_user` 时，升级和回滚的预览、执行都要求当前有效 UID 与该系统用户一致。无法解析用户或 UID 不一致时返回 `deployment_user_check_failed`，在目标查询、锁和状态文件写入之前停止。请以部署用户运行整个命令。systemd 只读状态查询由该用户直接执行，服务变更沿用既有授权路径。不要用 sudo 包裹升级命令，以免原子替换后的配置归属 root。未声明部署用户的旧 profile 保留原有行为。
 
 升级默认 dry-run：
 
@@ -636,7 +636,11 @@ liuxie ALL=(root) NOPASSWD: /usr/bin/systemctl restart options-monitor-feishu-ws
 
 缓存内部固定使用 `origin`；`--remote-name` 只选择当前 Git checkout 的来源 URL。已有缓存缺少非空 `remote.origin.url` 时检查和物料提取会拒绝继续，不会猜测其他 remote。先人工核对缓存来源，再恢复其 `origin` 配置；程序不自动重命名或重建缓存。
 
-Release runtime 依赖安装默认使用 `OM_UPGRADE_INSTALLER=auto`：先检测宿主机 PATH 上的 `uv`，可用时把当前运行中的 Python 3.12+ `sys.executable` 传给 `uv venv --python`，再执行 `uv pip install -p .venv/bin/python ...`；不可用或 auto 模式下 uv 安装失败时回退到原 pip 流程。升级流程不会自动安装 uv；需要加速时应在宿主机安装一次。可用 `OM_UPGRADE_INSTALLER=pip` 强制旧流程，或 `OM_UPGRADE_INSTALLER=uv` 强制 uv 且失败即中止升级。依赖下载缓存默认复用 `_cache/uv` 和 `_cache/pip`；只配置了 `PIP_INDEX_URL` 时，升级会把它映射为 uv 命令的 `UV_INDEX_URL`。
+Release runtime 依赖安装默认使用 `OM_UPGRADE_INSTALLER=auto`。宿主机有 `uv` 时，用当前运行的 Python 3.12+ 创建环境并通过 `uv pip install` 安装依赖。找不到 uv 或 uv 安装失败时，auto 模式回退到 pip。`OM_UPGRADE_INSTALLER=pip` 可直接选择 pip 路径，`OM_UPGRADE_INSTALLER=uv` 则在 uv 失败时中止。依赖下载缓存默认复用 `_cache/uv` 和 `_cache/pip`。只配置了 `PIP_INDEX_URL` 时，升级会把它映射为 uv 命令的 `UV_INDEX_URL`。
+
+pip 路径在共享虚拟环境缓存未命中时，先用 `pip wheel` 按目标版本的约束统一准备基础、服务端及已选插件的依赖。备包复用 `PIP_CACHE_DIR`，也可通过 `PIP_FIND_LINKS` 使用已有 wheel。安装阶段只读取本次备好的本地 wheel，并执行 `pip check`。需要重新安装的源码插件也先构建 wheel，再离线安装到该 release 的插件目录。备包、安装或校验失败会中止升级，当前 release 链接留在旧版。
+
+同机部署可由部署用户先运行 `python scripts/prepare_wheels.py --wheel-dir <共享目录> -- -r requirements.txt -c constraints.txt`，命令从目标源码目录执行，按实际选用的 server、插件和 SDK 追加依赖和约束。命令默认只从本地 wheel 目录备包。冷缓存可显式加 `--allow-index`，从配置的软件源补齐。每份准备完成的 wheel 原子发布，同名异内容会报错。请使用可信的本地依赖清单和软件源，源码插件本身仍在对应的 release 内构建。使用已验的本地 wheel 集执行离线升级时，为预览和确认传入相同的 `OM_UPGRADE_INSTALLER=pip`、`PIP_NO_INDEX=1` 和本地 `PIP_FIND_LINKS`，并核对控制器实际所需的 pip 和插件构建依赖。
 
 确认升级时，用当前 release 声明的 Python 隔离读取 `om-pm-plugin`、`longbridge`
 与 `om-position-advice-plugin`

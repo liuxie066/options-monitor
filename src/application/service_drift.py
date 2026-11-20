@@ -2305,7 +2305,9 @@ def _delete_unit_with_sudo_fallback(path: Path, *, run_cmd: Callable[..., Any]) 
 
 
 def _run_systemctl(ctx: dict[str, Any], args: list[str], *, run_cmd: Callable[..., Any]) -> dict[str, Any]:
-    command = [*_systemctl_prefix(ctx["profile"]), *args]
+    read_only = bool(args) and args[0] in {"is-active", "is-enabled", "show"}
+    prefix = ["systemctl"] if read_only else _systemctl_prefix(ctx["profile"])
+    command = [*prefix, *args]
     try:
         proc = run_cmd(command, capture_output=True, text=True, timeout=60, check=False)
     except Exception as exc:
@@ -2326,7 +2328,7 @@ def _run_systemctl(ctx: dict[str, Any], args: list[str], *, run_cmd: Callable[..
         "stdout": stdout[-2000:],
         "stderr": stderr[-2000:],
     }
-    if result["ok"] or not command or command[0] == "sudo":
+    if read_only or result["ok"] or not command or command[0] == "sudo":
         return result
     if not _looks_like_systemctl_permission_error(stdout=stdout, stderr=stderr):
         return result

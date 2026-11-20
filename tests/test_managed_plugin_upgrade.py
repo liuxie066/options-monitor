@@ -379,7 +379,9 @@ def test_managed_channels_exclude_source_flags_without_losing_other_pip_selectio
     other = "wechat" if plugin_id == "feishu" else "feishu"
     assert read_managed_plugin(ctx.target, other) is None
     for name in ("feishu", "wechat"):
-        commands = [cmd for cmd in ctx.offline.commands if "install" in cmd and f"./plugins/{name}-channel" in cmd]
+        source = f"./plugins/{name}-channel"
+        commands = [cmd for cmd in ctx.offline.commands if "install" in cmd and
+                    (source in cmd or ctx.offline.source_wheels.get(cmd[-1]) == source)]
         assert bool(commands) is (name == other and other_pip)
     assert ctx.events.index("managed_validate") < ctx.events.index("configs") < ctx.events.index("switch")
 
@@ -967,7 +969,8 @@ def test_source_upgrade_preserves_previous_interpreter_pip_provider_selection(
         result = ctx.runner(command, **kwargs)
         if result.returncode == 0 and "install" in command:
             for key in selected:
-                if "./plugins/" + PLUGINS[key]["source"] in command:
+                source = "./plugins/" + PLUGINS[key]["source"]
+                if source in command or ctx.offline.source_wheels.get(command[-1]) == source:
                     install_source(key, new_site)
         return result
     result = upgrade.service_upgrade(repo_root=ctx.current, runtime_root=ctx.runtime, releases_root=ctx.target.parent,

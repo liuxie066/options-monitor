@@ -24,7 +24,7 @@ class AdviceRuntime(OfflineRuntime):
         self.advice_validation_fails = False
 
     def __call__(self, command, **kwargs):
-        if "install" in command and "./plugins/position-advice" in command:
+        if ("install" in command or "wheel" in command) and "./plugins/position-advice" in command:
             self.advice_installs.append(list(command))
         if "-c" in command and "require_position_advice_plugin" in command[command.index("-c") + 1]:
             self.pm_validation_fails = self.advice_validation_fails

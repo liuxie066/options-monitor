@@ -31,7 +31,7 @@ class MessageRuntime(OfflineRuntime):
         if command[0] == str(upgrade._release_python(self.previous)) and "om-feishu-channel-plugin" in code:
             self.commands.append(list(command))
             return subprocess.CompletedProcess(command, 0, self.message_probe_output, "")
-        if "install" in command and any(f"./plugins/{p}" in command for p, _ in PACKAGES):
+        if ("install" in command or "wheel" in command) and any(f"./plugins/{p}" in command for p, _ in PACKAGES):
             self.message_installs.append(list(command))
         if "load_channel_plugin" in code:
             self.commands.append(list(command))
