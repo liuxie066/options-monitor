@@ -5,12 +5,19 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from src.application.agent_tool_contracts import AgentToolError
 
 
 MARKETS = ("us", "hk")
 GENERATED_KEY = "_generated"
 GENERATED_SCHEMA_VERSION = "1.0"
+
+
+class IndentedYamlDumper(yaml.SafeDumper):
+    def increase_indent(self, flow: bool = False, indentless: bool = False) -> Any:
+        return super().increase_indent(flow, False)
 
 
 def normalize_config_market(value: str) -> str:
@@ -94,12 +101,6 @@ def path_for_metadata(path: Path, *, repo_root: Path) -> str:
 
 
 def dump_yaml(payload: dict[str, Any]) -> str:
-    import yaml
-
-    class IndentedYamlDumper(yaml.SafeDumper):
-        def increase_indent(self, flow: bool = False, indentless: bool = False) -> Any:
-            return super().increase_indent(flow, False)
-
     text = yaml.dump(
         payload,
         Dumper=IndentedYamlDumper,
