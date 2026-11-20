@@ -81,8 +81,19 @@ def test_same_contract_from_another_physical_account_cannot_fill_ledger_gap():
 @pytest.mark.parametrize("option_type,reason", [
     ("call", "account_stock_capacity_exceeded"), ("put", "account_cash_capacity_exceeded"),
 ])
-def test_fill_conversion_releases_only_its_remaining_reservation(option_type, reason):
+def test_fill_conversion_releases_only_its_remaining_reservation(option_type, reason, monkeypatch):
+    from domain.domain import risk_capacity
+
+    original = risk_capacity._reconcile_booked_positions
+    calls = []
+
+    def reconcile(*args, **kwargs):
+        calls.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(risk_capacity, "_reconcile_booked_positions", reconcile)
     args = _inputs(option_type)
+    args["_booked_positions"] = {}
     branch = {"wheel_branch_id": "branch", "direction": option_type, "symbol": "NVDA",
               "lifecycle_status": "active", "integrity_status": "trusted",
               "active_intent_reserved_shares": 100, "active_intent_ids": ["intent"],
@@ -99,6 +110,15 @@ def test_fill_conversion_releases_only_its_remaining_reservation(option_type, re
     _assert(evaluate_booked_option_capacity(**args), ["capacity_basis_unavailable"], complete=False)
     branch["lifecycle_status"] = "ended"
     _assert(evaluate_booked_option_capacity(**args))
+    assert len(calls) == 1
+
+
+def test_booked_positions_for_combo_do_not_bypass_stock_validation():
+    args = _inputs()
+    args["snapshot"]["rows"][0]["quantity"] = "NaN"
+    args["_booked_positions"] = {}
+    _assert(evaluate_booked_option_capacity(**args, check_account_capacity=False))
+    _assert(evaluate_booked_option_capacity(**args), ["capacity_basis_unavailable"], complete=False)
 
 
 def test_foreign_collateral_uses_shared_native_cash_owner(monkeypatch):

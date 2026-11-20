@@ -153,7 +153,7 @@ def _run_puts(root, *, experimental=False, injected=True, cash_available=True, c
 
 def test_put_underwriting_ranks_accepted_contracts_once_per_symbol(frozen_scan, monkeypatch):
     from domain.domain import strategy_core
-    from src.application import sell_put_strategy_risk
+    from src.application import sell_put_steps, sell_put_strategy_risk
 
     sizes = []
     rank = strategy_core.rank_candidates
@@ -164,9 +164,28 @@ def test_put_underwriting_ranks_accepted_contracts_once_per_symbol(frozen_scan, 
 
     monkeypatch.setattr(strategy_core, "rank_candidates", counted)
     monkeypatch.setattr(sell_put_strategy_risk, "rank_candidates", counted)
+    final_frames = []
+    output_conversions = []
+    enrich = sell_put_steps.enrich_and_filter_sell_put_underwriting
+    to_dict = pd.DataFrame.to_dict
+
+    def capture_frame(**kwargs):
+        frame = enrich(**kwargs)
+        final_frames.append(frame)
+        return frame
+
+    def count_final_conversion(frame, *args, **kwargs):
+        if any(frame is final for final in final_frames):
+            output_conversions.append(frame)
+        return to_dict(frame, *args, **kwargs)
+
+    monkeypatch.setattr(sell_put_steps, "enrich_and_filter_sell_put_underwriting", capture_frame)
+    monkeypatch.setattr(pd.DataFrame, "to_dict", count_final_conversion)
     finals, decisions, _ = _run_puts(frozen_scan)
     assert sizes == [2, 2]
     assert len(finals) == 4 and len(decisions) == 5
+    assert len(output_conversions) == 2
+    assert all(out is final for out, final in zip(output_conversions, final_frames, strict=True))
 
 
 def test_real_put_steps_multi_symbol_rank_complete_passes_and_reversion(frozen_scan):

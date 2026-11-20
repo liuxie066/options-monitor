@@ -11,8 +11,10 @@ import importlib.abc
 import importlib.metadata
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
+import stat
 import sys
 import tomllib
 
@@ -89,7 +91,7 @@ def require_plugin(plugin_id: str):
     )
 
 
-def _validate_inventory(site: Path, files: dict) -> None:
+def _validate_inventory(site: Path, files: dict, *, dependency_tree: bool = False) -> None:
     if site.is_symlink() or not site.is_dir() or not isinstance(files, dict) or not files:
         raise ValueError("plugin package directory or inventory missing")
     for name, digest in files.items():
@@ -97,18 +99,53 @@ def _validate_inventory(site: Path, files: dict) -> None:
                 or any(part in {"", ".", ".."} for part in name.split("/"))
                 or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)):
             raise ValueError("plugin file inventory mismatch")
-        path = site / name
-        if (not path.resolve().is_relative_to(site.resolve()) or path.is_symlink()
-                or not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest):
-            raise ValueError("plugin file inventory mismatch")
+        if not dependency_tree:
+            path = site / name
+            if (not path.resolve().is_relative_to(site.resolve()) or path.is_symlink()
+                    or not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest):
+                raise ValueError("plugin file inventory mismatch")
+    if dependency_tree:
+        _validate_dependency_files(site, files)
+        return
     for path in site.rglob("*"):
         if path.is_symlink():
             raise ValueError("plugin links are forbidden")
-        if path.is_file() and path.relative_to(site).as_posix() not in files:
-            source = path.parent.parent / (path.name.split(".")[0] + ".py")
-            if not (path.parent.name == "__pycache__" and path.suffix == ".pyc"
-                    and source.relative_to(site).as_posix() in files):
+        if path.is_file():
+            relative = path.relative_to(site)
+            if relative.as_posix() not in files and not _listed_source_bytecode(relative, files):
                 raise ValueError("unlisted plugin file")
+
+
+def _listed_source_bytecode(path: Path, files: dict) -> bool:
+    source = path.parent.parent / (path.name.split(".")[0] + ".py")
+    return path.parent.name == "__pycache__" and path.suffix == ".pyc" and source.as_posix() in files
+
+
+def _validate_dependency_files(site: Path, files: dict) -> None:
+    found = 0
+    # Walk and hash in one pass. Open through the observed directory so path
+    # components do not need to be resolved again for every SDK file.
+    for directory, dirs, filenames, dir_fd in os.fwalk(site, follow_symlinks=False):
+        relative_dir = os.path.relpath(directory, site)
+        for name in [*dirs, *filenames]:
+            mode = os.stat(name, dir_fd=dir_fd, follow_symlinks=False).st_mode
+            if stat.S_ISLNK(mode):
+                raise ValueError("plugin links are forbidden")
+            if not stat.S_ISREG(mode):
+                continue
+            relative_name = name if relative_dir == "." else f"{relative_dir}/{name}"
+            digest = files.get(relative_name)
+            if digest is not None:
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+                with os.fdopen(fd, "rb") as stream:
+                    if hashlib.sha256(stream.read()).hexdigest() != digest:
+                        raise ValueError("plugin file inventory mismatch")
+                found += 1
+                continue
+            if not _listed_source_bytecode(Path(relative_name), files):
+                raise ValueError("unlisted plugin file")
+    if found != len(files):
+        raise ValueError("plugin file inventory mismatch")
 
 
 def validate_feishu_sdk() -> None:
@@ -203,7 +240,7 @@ def read_managed_plugin(repo_root: Path, plugin_id: str) -> dict | None:
         if dependencies:
             if plugin_id != "feishu":
                 raise ValueError("only Feishu has managed dependencies")
-            _validate_inventory(target / "dependencies", dependencies)
+            _validate_inventory(target / "dependencies", dependencies, dependency_tree=True)
         elif (target / "dependencies").exists() or (target / "dependencies").is_symlink():
             raise ValueError("unlisted plugin dependencies")
         return receipt

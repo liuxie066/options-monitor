@@ -30,7 +30,7 @@ from domain.domain.combo_identity import (
     validate_combo_identity,
 )
 
-from domain.domain.decision_state_fingerprint import canonical_sha256
+from domain.domain.decision_state_fingerprint import CURRENT_DECISION_READ_SCHEMA as CURRENT_DECISION_READ_SCHEMA, canonical_sha256
 
 from domain.domain.lifecycle_allocation import (
     allocation_id_for,
@@ -65,8 +65,6 @@ from src.application.ledger.repository import (
 )
 
 CURRENT_DECISION_PROJECTION_SCHEMA = "current_decision_projection.v1"
-
-CURRENT_DECISION_READ_SCHEMA = "current_decision_projection_read.v1"
 
 LIFECYCLE_CASE_DECISION_FACT_SCHEMA = "lifecycle_case_decision_fact.v2"
 

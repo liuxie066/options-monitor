@@ -40,14 +40,22 @@ from .projection import (
 
 
 def resolve_wheel_fill_intent(branch: Mapping[str, Any], fill: Mapping[str, Any],
-    wheel_events: Sequence[Mapping[str, Any]], *, now_ms: int, known_trade_event_ids: set[str]) -> dict[str, Any]:
+    wheel_events: Sequence[Mapping[str, Any]], *, now_ms: int, known_trade_event_ids: set[str],
+    _current_intents: dict[tuple[str, str, str], list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
     """Validate at fill time, consume against today's remainder, without reviving reservations."""
     event = _trade_event_fact(fill)
     instant = int(event["event_time_ms"])
     kwargs = dict(account=branch["account"], wheel_branch_id=branch["wheel_branch_id"], direction=branch["direction"],
                   known_trade_event_ids=known_trade_event_ids)
     historical = {item["intent_id"]: item for item in project_wheel_intents(wheel_events, as_of_ms=instant, **kwargs)}
-    current = project_wheel_intents(wheel_events, as_of_ms=now_ms, **kwargs)
+    if _current_intents is None:
+        current = project_wheel_intents(wheel_events, as_of_ms=now_ms, **kwargs)
+    else:
+        key = (branch["account"], branch["wheel_branch_id"], branch["direction"])
+        if key not in _current_intents:
+            _current_intents[key] = project_wheel_intents(wheel_events, as_of_ms=now_ms, **kwargs)
+        current = _current_intents[key]
     relevant = []
     for intent in current:
         if int(intent.get("created_at_ms") or 0) > instant:

@@ -687,7 +687,24 @@ def test_partial_call_close_releases_only_closed_coverage(reuse: bool, delay_ms:
     assert stock["fees_used"] == (4 if reuse else 3)
 
 
-def test_failed_partial_call_allocation_does_not_publish_earlier_interval() -> None:
+def test_failed_partial_call_allocation_does_not_publish_earlier_interval(monkeypatch) -> None:
+    from domain.domain import assigned_stock
+
+    fee_event_ids = []
+    active_event_reads = []
+    active_trade_events = assigned_stock._active_trade_events
+
+    def record_fee(event, *, component):
+        if component.startswith("covered_call_"):
+            fee_event_ids.append(event["event_id"])
+        return _option_fee_fact(event, component=component)
+
+    def count_active_events(events):
+        active_event_reads.append(len(events))
+        return active_trade_events(events)
+
+    monkeypatch.setattr(assigned_stock, "_option_fee_fact", record_fee)
+    monkeypatch.setattr(assigned_stock, "_active_trade_events", count_active_events)
     call = _event(
         "call-a", option_type="call", side="sell", position_effect="open",
         at="2026-05-05T10:00:00", price=2, strike=110,
@@ -711,6 +728,8 @@ def test_failed_partial_call_allocation_does_not_publish_earlier_interval() -> N
         }],
     )
     assert {row["open_event_id"] for row in report["covered_call_allocations"]} == {"call-b"}
+    assert fee_event_ids == ["call-b"]
+    assert len(active_event_reads) == 1
     assert report["assigned_stock_lots"][0]["covered_call_pnl"] == 50
     assert [row["event_id"] for row in report["assigned_stock_review_rows"] if row["status"] == "covered_call_unallocated"] == ["call-a"]
 

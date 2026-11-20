@@ -56,6 +56,21 @@ def test_delivery_observation_reuses_decoded_payload_hash_but_decodes_again(tmp_
     assert repeated_payloads == []
 
 
+def test_nested_delivery_scope_reuses_validation_and_reobserves_sources(tmp_path):
+    _confirmed_repeated_source(tmp_path)
+    with (
+        patch.object(repo, "_normalize_delivery_state", wraps=repo._normalize_delivery_state) as normalized,
+        patch.object(repo, "_history_raw", wraps=repo._history_raw) as observed,
+        repo.daily_brief_delivery_validation_scope(),
+    ):
+        with repo.daily_brief_delivery_validation_scope():
+            first = _read_state(tmp_path)
+        assert first["available"]
+        assert _read_state(tmp_path) == first
+        assert normalized.call_count == 1
+        assert observed.call_count == 2
+
+
 @pytest.mark.parametrize("changed", [False, True])
 def test_unregistered_source_copy_cannot_borrow_observed_payload_hash(tmp_path, monkeypatch, changed):
     _confirmed_repeated_source(tmp_path)
@@ -74,14 +89,17 @@ def test_unregistered_source_copy_cannot_borrow_observed_payload_hash(tmp_path, 
         assert result["reason"] == "state_invalid"
 
 
-@pytest.mark.parametrize("column,value", [("payload_hash", "tampered"), ("payload_json", "{}")])
+@pytest.mark.parametrize("column,value", [
+    ("payload_hash", "tampered"), ("payload_json", "{}"),
+    ("input_hash", "tampered"), ("input_json", "{}"),
+])
 def test_next_observation_still_rejects_storage_hash_corruption(tmp_path, column, value):
     import sqlite3
 
-    from src.infrastructure.decision_history_sqlite import history_path
+    from src.infrastructure.decision_history_sqlite import history_hash_read_scope, history_path
 
     _confirmed_repeated_source(tmp_path)
-    with repo.daily_brief_delivery_validation_scope():
+    with history_hash_read_scope(), repo.daily_brief_delivery_validation_scope():
         assert _read_state(tmp_path)["available"]
         with sqlite3.connect(history_path(tmp_path)) as connection:
             connection.execute("DROP TRIGGER decisions_no_update")

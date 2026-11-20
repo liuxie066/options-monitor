@@ -48,8 +48,18 @@ def test_unchanged_batch_builds_one_view_and_next_call_refreshes(tmp_path, monke
         snapshots.append(1)
         return original(*a, **kw)
     monkeypatch.setattr(ledger_attribution, "read_trade_attribution_snapshot", counted)
+    fact_projections = []
+    project_facts = ledger_attribution.trade_attribution_facts_from_events
+
+    def counted_facts(events, **kwargs):
+        fact_projections.append(kwargs["account"])
+        return project_facts(events, **kwargs)
+
+    monkeypatch.setattr(mod, "trade_attribution_facts_from_events", counted_facts)
+    monkeypatch.setattr(ledger_attribution, "trade_attribution_facts_from_events", counted_facts)
     first = mod.reconcile_trade_attribution_account(repo, **args)
     assert len(snapshots) == 1
+    assert fact_projections == ["lx"]
     assert first['checked'] >= 2 and first['errors'] == [] and first['next_cursor'] == ''
     assert len(views) == len(observed) == len(evidence) == 1
     expected = {row['execution_key']: mod.attribution_result_payload(row) for row in views[0]['rows']}
@@ -57,6 +67,7 @@ def test_unchanged_batch_builds_one_view_and_next_call_refreshes(tmp_path, monke
     monkeypatch.setattr(mod.time, 'time', lambda: 65)
     mod.reconcile_trade_attribution_account(repo, **args)
     assert len(snapshots) == 2
+    assert fact_projections == ["lx", "lx"]
     assert len(views) == len(observed) == len(evidence) == 2
     assert views[1]['rows'][0]['evaluated_at_ms'] == 65000
 
@@ -91,9 +102,18 @@ def test_concurrent_full_snapshot_change_rebuilds_batch(tmp_path, monkeypatch, c
                         'execution_id': event['raw_payload']['execution_id'], 'multiplier_source': 'payload'})])
         return result
     monkeypatch.setattr('src.application.trades.inbox.cache_trade_attribution_result', mutate)
+    prepared = []
+    build_view = mod.build_trade_attribution_view
+
+    def record_prepared(*args, **kwargs):
+        prepared.append(kwargs.get("_account_facts"))
+        return build_view(*args, **kwargs)
+
+    monkeypatch.setattr(mod, "build_trade_attribution_view", record_prepared)
     result = mod.reconcile_trade_attribution_account(repo, **args)
     assert result['errors'] == []
     assert len(views) == 2 and len(evidence) == 2 and len(observed) == 1
+    assert len(prepared) == 2 and prepared[0] and prepared[1] is None
     if change == 'fee':
         assert [e['event_id'] for e in repo.list_trade_events()] == [e['event_id'] for e in before]
     else:

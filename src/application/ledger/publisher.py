@@ -3,10 +3,11 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 import json
-from typing import Any
+from typing import Any, Iterator
 
 from domain.domain.ledger import (
     ProjectionResult,
+    ProjectionTransition,
     ResumableProjectionResult,
     ResumableProjectionState,
     TradeEvent,
@@ -201,13 +202,32 @@ def _raise_nonfinite(value: str) -> Any:
 
 
 def project_stored_trade_events_to_position_lots(events: list[Any]) -> PublishedPositionLotProjection:
+    projection, _ = _project_stored_trade_events_with_decoded_events(events)
+    return projection
+
+
+def _project_stored_trade_events_with_decoded_events(
+    events: list[Any], *, with_publication_state: bool = True,
+) -> tuple[PublishedPositionLotProjection, list[TradeEvent]]:
     (
         ledger_events,
         import_diagnostics,
     ) = _collect_projection_inputs(events)
+    return _project_decoded_trade_events(
+        ledger_events, import_diagnostics, with_publication_state=with_publication_state,
+    ), ledger_events
+
+
+def _project_decoded_trade_events(
+    ledger_events: list[TradeEvent], import_diagnostics: list[LedgerDiagnostic],
+    *, with_publication_state: bool,
+    opening_lots: dict[int, tuple[TradeEvent, PositionLot]] | None = None,
+) -> PublishedPositionLotProjection:
     domain_projection = project_resumable_trade_events(
         ledger_events,
         entry_mode="full",
+        _opening_lots=opening_lots,
+        _build_resumable_state=with_publication_state,
     )
     ledger_projection = domain_projection.to_projection_result()
     effective_diagnostics = effective_import_diagnostics(
@@ -217,6 +237,16 @@ def project_stored_trade_events_to_position_lots(events: list[Any]) -> Published
     )
     diagnostics = [*effective_diagnostics, *ledger_projection.diagnostics]
     if not diagnostics:
+        if not with_publication_state:
+            # Render every applied transition as the publisher does, including
+            # intermediate values that can fail before the final lot is reached.
+            touched = {
+                record.lot_id: record
+                for _, record in _rendered_lot_transitions(domain_projection)
+            }
+            return PublishedPositionLotProjection(
+                lots=list(touched.values()), diagnostics=[], ledger_projection=ledger_projection,
+            )
         current = _fold_resumable_publication(
             projection=domain_projection,
             publication_state=None,
@@ -307,33 +337,40 @@ def project_stored_trade_events_to_resumable_position_lots(
     )
 
 
+def _rendered_lot_transitions(
+    projection: ResumableProjectionResult,
+) -> Iterator[tuple[ProjectionTransition, PositionLotRecord]]:
+    for transition in projection.transitions:
+        if transition.applied and transition.lot_after is not None:
+            yield transition, _position_lot_to_legacy_record(transition.lot_after)
+
+
 def _fold_resumable_publication(
     *,
     projection: ResumableProjectionResult,
     publication_state: ResumablePublicationState | None,
 ) -> ResumablePublishedPositionLotProjection:
+    # The fold replaces whole entries. The new publication state copies the
+    # surviving nested values once, independently of touched and active lots.
     fields_by_lot_id = (
-        deepcopy(publication_state.fields_by_lot_id)
+        dict(publication_state.fields_by_lot_id)
         if publication_state is not None
         else {}
     )
     auto_close_baselines = (
-        deepcopy(publication_state.auto_close_baseline_by_lot_id)
+        dict(publication_state.auto_close_baseline_by_lot_id)
         if publication_state is not None
         else {}
     )
     touched_by_lot_id: dict[str, PositionLotRecord] = {}
     touched_order: list[str] = []
-    for transition in projection.transitions:
-        if not transition.applied or transition.lot_after is None:
-            continue
-        record = _position_lot_to_legacy_record(transition.lot_after)
+    for transition, record in _rendered_lot_transitions(projection):
         if record.lot_id not in touched_by_lot_id:
             touched_order.append(record.lot_id)
         touched_by_lot_id[record.lot_id] = record
         if transition.lot_before is None:
             auto_close_baselines[record.lot_id] = {
-                key: deepcopy(record.fields[key])
+                key: record.fields[key]
                 for key in _AUTO_CLOSE_FIELD_KEYS
                 if key in record.fields
             }
@@ -341,7 +378,7 @@ def _fold_resumable_publication(
             fields_by_lot_id.pop(record.lot_id, None)
             auto_close_baselines.pop(record.lot_id, None)
         else:
-            fields_by_lot_id[record.lot_id] = deepcopy(record.fields)
+            fields_by_lot_id[record.lot_id] = record.fields
 
     active_lot_ids = {
         item.lot_id

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 import json
 import sys
 from typing import Any
@@ -20,9 +21,52 @@ if __name__ == "__main__" and sys.argv[1:3] == ["run", "trade-intake"]:
     if trade_exit is not None:
         raise SystemExit(trade_exit)
 
-from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response
 from src.application.pipeline_runtime import main as run_scan_pipeline
+from src.application.runtime_paths import repo_base
+from src.interfaces.cli.command_environment import command_environment
+
+
+def _dumps(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+
+
+def _print(payload: dict[str, Any]) -> int:
+    sys.stdout.write(_dumps(payload))
+    return 0 if payload.get("ok", True) else 2
+
+
+def _print_error(err: AgentToolError, args: argparse.Namespace | None = None) -> int:
+    payload = build_response(tool_name="om", ok=False, error=build_error_payload(err))
+    if args is not None and args.command == "position-advice" and args.format == "text":
+        from src.interfaces.cli.position_advice import render_covered_call_roll, render_position_advice, render_short_put_roll
+
+        render = {"roll-down": render_short_put_roll, "roll-up": render_covered_call_roll}.get(args.position_advice_command, render_position_advice)
+        sys.stdout.write(render(payload))
+        return 2
+    return _print(payload)
+
+
+def _dispatch_with_environment(
+    argv: list[str], dispatch: Callable[[], int], *,
+    discover_local: bool, args: argparse.Namespace | None = None,
+) -> int:
+    try:
+        with command_environment(argv, repo_root=repo_base(), discover_local=discover_local):
+            return dispatch()
+    except AgentToolError as err:
+        return _print_error(err, args)
+    except ValueError as exc:
+        return _print_error(AgentToolError(code="CONFIG_ERROR", message=str(exc)), args)
+
+
+# Account workers invoke this command in a fresh interpreter for each account.
+if __name__ == "__main__" and sys.argv[1:2] == ["scan-pipeline"]:
+    raise SystemExit(_dispatch_with_environment(
+        sys.argv[1:], lambda: int(run_scan_pipeline(sys.argv[2:])), discover_local=True,
+    ))
+
+
 from src.application.version_check import check_version_update
 from src.interfaces.cli.account_ops import (
     add_account,
@@ -37,7 +81,6 @@ from src.interfaces.cli.bot_control_ops import (
     handle_bot_turn,
 )
 from src.interfaces.cli.channel_ops import add_channel_commands, handle_channel_command
-from src.interfaces.cli.command_environment import command_environment
 from src.interfaces.cli.feature_ops import add_holdings_commands, run_feature_configure
 from src.interfaces.cli.home import command_guide, interactive_home, render_credential_readiness, render_settings_doctor, render_setup_check
 from src.interfaces.cli.inbound_ops import (
@@ -132,10 +175,6 @@ from src.interfaces.cli.settings_ops import (
 from src.interfaces.cli.setup_ops import add_setup_commands, handle_setup_command, run_setup_check, run_setup_init
 
 
-def _dumps(payload: dict[str, Any]) -> str:
-    return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
-
-
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if argv is not None:
         argv = list(argv)
@@ -199,22 +238,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add_run_commands(sub)
 
     return parser.parse_args(argv)
-
-
-def _print(payload: dict[str, Any]) -> int:
-    sys.stdout.write(_dumps(payload))
-    return 0 if payload.get("ok", True) else 2
-
-
-def _print_error(err: AgentToolError, args: argparse.Namespace | None = None) -> int:
-    payload = build_response(tool_name="om", ok=False, error=build_error_payload(err))
-    if args is not None and args.command == "position-advice" and args.format == "text":
-        from src.interfaces.cli.position_advice import render_covered_call_roll, render_position_advice, render_short_put_roll
-
-        render = {"roll-down": render_short_put_roll, "roll-up": render_covered_call_roll}.get(args.position_advice_command, render_position_advice)
-        sys.stdout.write(render(payload))
-        return 2
-    return _print(payload)
 
 
 def _main(argv: list[str] | None = None, *, parsed_args: argparse.Namespace | None = None) -> int:
@@ -451,17 +474,10 @@ def main(argv: list[str] | None = None, *, discover_local: bool = False) -> int:
         return _main(actual_argv)
     # Validate the advice output contract before runtime discovery can fail.
     args = parse_args(actual_argv) if actual_argv[:1] == ["position-advice"] else None
-    try:
-        with command_environment(
-            list(sys.argv[1:] if argv is None else argv), repo_root=repo_base(),
-            discover_local=argv is None or discover_local,
-        ):
-            return _main(argv, parsed_args=args)
-    except AgentToolError as err:
-        return _print_error(err, args)
-    except ValueError as exc:
-        err = AgentToolError(code="CONFIG_ERROR", message=str(exc))
-        return _print_error(err, args)
+    return _dispatch_with_environment(
+        actual_argv, lambda: _main(argv, parsed_args=args),
+        discover_local=argv is None or discover_local, args=args,
+    )
 
 
 if __name__ == "__main__":

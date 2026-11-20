@@ -22,9 +22,11 @@ from src.application.summary_formatting import apply_summary_defaults, format_su
 def build_symbols_summary(summary_rows: list[dict], report_dir: Path, *, is_scheduled: bool = False):
     df = apply_summary_defaults(pd.DataFrame(summary_rows))
     csv_path = report_dir / 'symbols_summary.csv'
-    txt_path = report_dir / 'symbols_summary.txt'
     df.to_csv(csv_path, index=False)
+    if is_scheduled:
+        return
 
+    txt_path = report_dir / 'symbols_summary.txt'
     lines = ['# Symbols Summary', '']
     if df.empty:
         lines.append('无结果。')
@@ -33,12 +35,9 @@ def build_symbols_summary(summary_rows: list[dict], report_dir: Path, *, is_sche
         for r in ordered.to_dict("records"):
             lines.append(format_summary_row(r))
 
-    if not is_scheduled:
-        txt_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
-        print(f"[DONE] symbols summary text -> {txt_path}")
-
-    if not is_scheduled:
-        print(f"[DONE] symbols summary -> {csv_path}")
+    txt_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    print(f"[DONE] symbols summary text -> {txt_path}")
+    print(f"[DONE] symbols summary -> {csv_path}")
 
 def build_symbols_digest(symbols: list[str], report_dir: Path):
     lines = ['# Symbols Strategy Digest', '']

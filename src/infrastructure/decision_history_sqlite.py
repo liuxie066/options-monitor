@@ -37,6 +37,7 @@ def _json_hash(encoded: str) -> str:
 _CANONICAL_HISTORY_HASHES: ContextVar[set[str] | None] = ContextVar(
     "canonical_history_hashes", default=None,
 )
+_UNDECODED = object()
 
 
 @contextmanager
@@ -49,16 +50,14 @@ def history_hash_read_scope() -> Iterator[None]:
         _CANONICAL_HISTORY_HASHES.reset(token)
 
 
-def _decoded_content_hash(encoded: str, value: Any) -> str:
+def _decoded_content_hash(encoded: str, value: Any = _UNDECODED) -> str:
     known = _CANONICAL_HISTORY_HASHES.get()
-    if known is None or not isinstance(encoded, str):
-        return content_hash(value)
-    raw_hash = _json_hash(encoded)
-    if raw_hash in known:
+    raw_hash = _json_hash(encoded) if known is not None and isinstance(encoded, str) else None
+    if raw_hash is not None and raw_hash in known:
         return raw_hash
-    canonical_hash = content_hash(value)
-    if raw_hash == canonical_hash:
-        known.add(raw_hash)
+    canonical_hash = content_hash(json.loads(encoded) if value is _UNDECODED else value)
+    if known is not None and raw_hash == canonical_hash:
+        known.add(canonical_hash)
     return canonical_hash
 
 
@@ -123,7 +122,7 @@ class DecisionHistoryStore:
                 raise DecisionHistoryError("history_database_error") from exc
 
     @staticmethod
-    def decode(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    def decode(row: sqlite3.Row | None, *, _payload_only: bool = False) -> dict[str, Any] | None:
         if row is None:
             return None
         try:
@@ -134,12 +133,14 @@ class DecisionHistoryStore:
             payload_hash = _decoded_content_hash(payload_json, result["payload"])
             if payload_hash != result["payload_hash"]:
                 raise DecisionHistoryError("history_content_corrupt")
-            # Callers can edit input and payload independently. Identical stored
-            # JSON needs two objects, but only one canonical digest.
-            result["input"] = json.loads(input_json)
-            input_hash = payload_hash if input_json == payload_json else _decoded_content_hash(input_json, result["input"])
+            # Full reads return independently mutable input and payload. For a
+            # payload-only read, the input hash still needs fresh verification.
+            source = _UNDECODED if _payload_only else json.loads(input_json)
+            input_hash = payload_hash if input_json == payload_json else _decoded_content_hash(input_json, source)
             if input_hash != result["input_hash"]:
                 raise DecisionHistoryError("history_content_corrupt")
+            if not _payload_only:
+                result["input"] = source
             result["scope"] = json.loads(result.pop("scope_json"))
             if content_hash(result["scope"]) != result["scope_hash"]:
                 raise DecisionHistoryError("history_scope_corrupt")
@@ -154,7 +155,8 @@ class DecisionHistoryStore:
 
     def get(self, *, account: str, market: str, market_date: str | None = None,
             revision: int | None = None, run_id: str | None = None,
-            successful: bool = False, conn: sqlite3.Connection | None = None) -> dict[str, Any] | None:
+            successful: bool = False, conn: sqlite3.Connection | None = None,
+            _payload_only: bool = False) -> dict[str, Any] | None:
         conditions, values = ["account=?", "market=?"], [account, market]
         for key, val in (("market_date", market_date), ("revision", revision), ("run_id", run_id)):
             if val is not None:
@@ -163,8 +165,9 @@ class DecisionHistoryStore:
         if successful:
             conditions.append("successful=1")
         with (self.connect() if conn is None else nullcontext(conn)) as connection:
-            return self.decode(connection.execute("SELECT * FROM decisions WHERE " + " AND ".join(conditions) +
-                                                  " ORDER BY market_date DESC,revision DESC LIMIT 1", values).fetchone())
+            row = connection.execute("SELECT * FROM decisions WHERE " + " AND ".join(conditions) +
+                                     " ORDER BY market_date DESC,revision DESC LIMIT 1", values).fetchone()
+            return self.decode(row, _payload_only=_payload_only)
 
     def revisions(self, *, account: str, market: str, market_date: str,
                   conn: sqlite3.Connection | None = None) -> list[int]:

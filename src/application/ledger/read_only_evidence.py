@@ -3,9 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from contextlib import closing, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterator
 
 from src.application.ledger._lifecycle_evidence_filters import _append_lifecycle_evidence_filters
 from src.application.ledger.event_codec import (
@@ -99,6 +99,27 @@ class _ReadOnlyTradeReconciliationEvidenceRepository:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA query_only=ON")
         return conn
+
+    @contextmanager
+    def observe_data_version(self) -> Iterator[Callable[[], int]]:
+        """Observe commits without a transaction spanning reconciliation reads."""
+        identity = self.path.stat()
+
+        def check_identity() -> None:
+            current = self.path.stat()
+            if (current.st_dev, current.st_ino) != (identity.st_dev, identity.st_ino):
+                raise ValueError("trade reconciliation ledger identity changed")
+
+        with closing(self._connect()) as conn:
+            def version() -> int:
+                check_identity()
+                row = conn.execute("PRAGMA data_version").fetchone()
+                check_identity()
+                if row is None or type(row[0]) is not int or row[0] < 0:
+                    raise ValueError("trade reconciliation ledger data_version is unavailable")
+                return row[0]
+
+            yield version
 
     def get_trade_lifecycle_attempt_audit_by_invocation(
         self,

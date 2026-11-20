@@ -154,6 +154,25 @@ def test_metadata_readers_reject_duplicate_lots_across_accounts():
             trade_events=rows, projected_position_lots=[])
 
 
+def test_strategy_replay_keeps_opening_ids_by_row(monkeypatch):
+    from domain.domain.wheel import projection
+
+    opening = _event("open", "open", 1000, lot_id="first",
+                     raw_payload={"strategy": "wheel", "strategy_group_id": "group"})
+    rows = [opening.to_dict(), replace(opening, lot_id="second").to_dict(),
+            {**replace(opening, lot_id="legacy").to_dict(), "event_type": " OPEN "}]
+    resolve = projection.lot_id_for_open_event
+    resolved = []
+
+    def count(row):
+        resolved.append(row["lot_id"])
+        return resolve(row)
+
+    monkeypatch.setattr(projection, "lot_id_for_open_event", count)
+    assert set(lot_strategy_metadata_from_trade_events(rows)) == {"first", "second", "legacy"}
+    assert resolved == ["first", "second", "legacy"]
+
+
 def test_history_does_not_invent_lot_ids_from_arbitrary_references():
     assert _event_record_refs({"event_id": "adjust", "event_type": "adjust",
                               "raw_payload": {"record_id": "historical"}}) == {"adjust", "historical"}

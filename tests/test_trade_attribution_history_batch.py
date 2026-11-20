@@ -266,6 +266,7 @@ def test_batch_missing_history_does_not_lease_absence(tmp_path):
 
 
 def test_wheel_projection_reuses_only_identical_historical_instants(tmp_path, monkeypatch):
+    from domain.domain.wheel import intents as wheel_intents
     from src.application import daily_decision_brief_service as service
     from src.application.ledger import trade_attribution as ledger_attribution
     from src.application.ledger.repository import SQLiteOptionPositionsRepository
@@ -282,18 +283,28 @@ def test_wheel_projection_reuses_only_identical_historical_instants(tmp_path, mo
         config=config, runtime_root=tmp_path)
     assert result["status"] == "applied", result
     calls = []
-    original = ledger_attribution.build_wheel_read_model_from_rows
+    current_intent_calls = []
+    now_ms = int(NOW.timestamp() * 1000)
+    original = ledger_attribution._historical_attribution_branches
+    project_intents = wheel_intents.project_wheel_intents
 
     def counted(*args, **kwargs):
         calls.append(kwargs["as_of_ms"])
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(ledger_attribution, "build_wheel_read_model_from_rows", counted)
+    def counted_intents(*args, **kwargs):
+        if kwargs["as_of_ms"] == now_ms:
+            current_intent_calls.append((kwargs["account"], kwargs["wheel_branch_id"], kwargs["direction"]))
+        return project_intents(*args, **kwargs)
+
+    monkeypatch.setattr(ledger_attribution, "_historical_attribution_branches", counted)
+    monkeypatch.setattr(wheel_intents, "project_wheel_intents", counted_intents)
     pending, error = service._pending_attribution_for_brief(
-        base=tmp_path, config=config, account="lx", market="HK", now_ms=int(NOW.timestamp() * 1000))
+        base=tmp_path, config=config, account="lx", market="HK", now_ms=now_ms)
     assert error is None and len(pending) == 5
     assert len(set(calls)) == 3
     assert len(calls) == 3
+    assert current_intent_calls and len(set(current_intent_calls)) == len(current_intent_calls)
 
 
 def test_batch_keeps_delivery_envelope_digest_validation(history):

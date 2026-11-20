@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from functools import cached_property, partial
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
@@ -12,7 +13,6 @@ from src.application.ledger.source_consumption import build_source_consumption_c
 
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
 from src.application.ledger.projection_verify import load_projection_verify_state
-from src.application.ledger.bootstrap import load_option_positions_repo
 from src.application.ledger.void_repair import (
     lifecycle_effective_void_target_event_ids,
 )
@@ -56,6 +56,8 @@ def open_position_ledger(
     config_path: str | Path | None = None,
     runtime_root: str | Path | None = None,
 ) -> Any:
+    from src.application.ledger.bootstrap import load_option_positions_repo
+
     return load_option_positions_repo(
         data_config,
         config_path=config_path,
@@ -756,7 +758,36 @@ def _same_decimal(left: Any, right: Any) -> bool:
         return False
 
 
-def proven_lifecycle_terminal_events(case: dict[str, Any], *, facts: dict[str, Any]) -> list[dict[str, Any]]:
+class _LifecycleTerminalEventIndex:
+    def __init__(self, facts: dict[str, Any]) -> None:
+        self.facts = facts
+
+    @cached_property
+    def voided(self) -> set[str]:
+        return set(self.facts.get("effective_void_event_ids") or [])
+
+    @cached_property
+    def events(self) -> dict[str, dict[str, Any]] | None:
+        rows = [row for row in self.facts.get("trade_events") or []
+                if row.get("event_type") != "void" and row.get("event_id") not in self.voided]
+        events = {row["event_id"]: row for row in rows}
+        return events if len(events) == len(rows) else None
+
+    @cached_property
+    def evidence_ids(self) -> set[str]:
+        return {row["evidence_id"] for row in self.facts["account_lifecycle_evidence"]}
+
+
+def lifecycle_terminal_event_prover(
+    facts: dict[str, Any],
+) -> Callable[[dict[str, Any]], list[dict[str, Any]]]:
+    """Reuse terminal event lookups for cases from the same account snapshot."""
+    return partial(proven_lifecycle_terminal_events, facts=facts, _index=_LifecycleTerminalEventIndex(facts))
+
+
+def proven_lifecycle_terminal_events(
+    case: dict[str, Any], *, facts: dict[str, Any], _index: _LifecycleTerminalEventIndex | None = None,
+) -> list[dict[str, Any]]:
     """Prove complete anchors and active terminal allocations in one coherent snapshot."""
     manifest = case.get("target_contracts_by_lot")
     if not isinstance(manifest, dict) or not manifest or any(not _positive_contract_count(value) for value in manifest.values()):
@@ -772,20 +803,20 @@ def proven_lifecycle_terminal_events(case: dict[str, Any], *, facts: dict[str, A
     if anchored != manifest:
         return []
     allocations = [row for row in facts.get("account_lifecycle_allocations") or [] if isinstance(row, dict) and row.get("case_id") == case["case_id"]]
-    voided = set(facts.get("effective_void_event_ids") or [])
+    index = _index if _index is not None else _LifecycleTerminalEventIndex(facts)
+    voided = index.voided
     try:
         resolution = resolve_allocations(manifest, allocations, void_event_ids=voided)
     except (TypeError, ValueError):
         return []
     if resolution.status != "ok" or resolution.remaining_contracts:
         return []
-    rows = [row for row in facts.get("trade_events") or []
-            if row.get("event_type") != "void" and row.get("event_id") not in voided]
-    events = {row["event_id"]: row for row in rows}
-    if len(events) != len(rows):
+    events = index.events
+    if events is None:
         return []
-    evidence_ids = {row["evidence_id"] for row in facts["account_lifecycle_evidence"]}
+    evidence_ids = index.evidence_ids
     proven = []
+    seen_event_ids: set[str] = set()
     evidence_groups: dict[str, list[dict[str, Any]]] = {}
     for allocation in allocations:
         event_id = allocation.get("canonical_terminal_event_id")
@@ -824,8 +855,9 @@ def proven_lifecycle_terminal_events(case: dict[str, Any], *, facts: dict[str, A
         ):
             if not value or str(value) != str(case.get(field)):
                 return []
-        if event_id in {row["event_id"] for row in proven}:
+        if event_id in seen_event_ids:
             return []
+        seen_event_ids.add(event_id)
         proven.append(event)
         evidence_groups.setdefault(raw["evidence_id"], []).append(event)
     for group in evidence_groups.values():

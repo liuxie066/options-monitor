@@ -166,6 +166,9 @@ _DELIVERY_VALIDATION: ContextVar[_DeliveryValidation | None] = ContextVar("daily
 @contextmanager
 def daily_brief_delivery_validation_scope() -> Iterator[None]:
     """One notification flow; no normalized delivery state survives this scope."""
+    if _DELIVERY_VALIDATION.get() is not None:
+        yield
+        return
     validation = _DeliveryValidation()
     token = _DELIVERY_VALIDATION.set(validation)
     try:
@@ -222,7 +225,7 @@ class _BriefHistoryObservation(DailyBriefReadScope):
         if key not in self._payloads:
             row = self._store.get(account=self._identity[1], market=self._identity[2],
                                   market_date=market_date, revision=revision, successful=successful,
-                                  conn=self.connection())
+                                  conn=self.connection(), _payload_only=True)
             self._payloads[key] = row["payload"] if row else None
             if row is not None:
                 # decode already verified this hash; the private raw payload stays read-only.
@@ -457,7 +460,7 @@ def _history_raw(*, base: Path, account: str, market: str, market_date: str | No
         if observation is not None and observation.matches(base=base, account=account, market=market):
             return observation.payload(market_date=market_date, revision=revision, successful=successful)
         row = DecisionHistoryStore(history_path(base)).get(account=account, market=market, market_date=market_date,
-                                                          revision=revision, successful=successful)
+                                                          revision=revision, successful=successful, _payload_only=True)
     except (DecisionHistoryError, OSError) as exc:
         raise DailyDecisionBriefStateError(str(exc)) from exc
     return row["payload"] if row else _MISSING
@@ -1622,7 +1625,9 @@ def read_run_daily_decision_brief(
     try:
         if not history_path(base).exists():
             return {**unavailable, "reason": "not_found"}
-        row = DecisionHistoryStore(history_path(base)).get(account=account, market=market, run_id=run_id)
+        row = DecisionHistoryStore(history_path(base)).get(
+            account=account, market=market, run_id=run_id, _payload_only=True,
+        )
         if row is None:
             return {**unavailable, "reason": "not_found"}
         brief = _normalize_persisted_brief(row["payload"], path=history_path(base), account=account, market=market)
@@ -1654,7 +1659,7 @@ def _read_latest_attempt(*, base: Path, account: str, market: str) -> dict[str, 
     try:
         if not history_path(base).exists():
             return {**unavailable, "reason": "not_found"}
-        row = DecisionHistoryStore(history_path(base)).get(account=account, market=market)
+        row = DecisionHistoryStore(history_path(base)).get(account=account, market=market, _payload_only=True)
         if row is None:
             return {**unavailable, "reason": "not_found"}
         brief = _normalize_persisted_brief(row["payload"], path=history_path(base), account=account, market=market)
@@ -1866,6 +1871,7 @@ def read_combo_candidate_exposures(
             market_trading_date=date_norm,
             revision=int(revision),
             source_digests=compatible_digests,
+            read_only=True,
         )
         if not result.get("available"):
             invalid_revisions.append(int(revision))
@@ -1919,6 +1925,7 @@ def _read_brief_result(
     market_trading_date: str | None = None,
     revision: int | None = None,
     source_digests: list[str] | None = None,
+    read_only: bool = False,
 ) -> dict[str, Any]:
     digests: list[str] = []
     try:
@@ -1939,8 +1946,8 @@ def _read_brief_result(
                 raw, path=path, account=account, market=market, source_digests=digests,
             )
         else:
-            # A public reader may mutate its result; never lend out the cache value.
-            brief = deepcopy(validated[0])
+            # Only the private exposure reader inspects cached evidence directly.
+            brief = validated[0] if read_only else deepcopy(validated[0])
             digests.extend(validated[1])
             if brief["account"] != account or brief["market"] != market:
                 raise DailyDecisionBriefStateError(f"daily brief state identity mismatch: {path}")
@@ -2320,13 +2327,14 @@ def _normalize_delivery_state(
             via = str(raw_alerted.get("via") or "").strip().lower()
             if not delivery_key or via not in {"fixed_report", "fixed_recovery_report", "candidate_alert", "legacy_delivery"}:
                 raise DailyDecisionBriefStateError(f"daily brief alerted candidate metadata is invalid: {path}: {identity}")
-            source_brief = _validate_successful_revision_source(
+            source_brief, _ = _read_validated_successful_revision_source(
                 base=base,
                 account=account,
                 market=market,
                 market_trading_date=market_date,
                 revision=alerted_revision,
                 source_digest=alerted_digest,
+                read_only=True,
                 successful_sources=successful_sources,
             )
             if identity not in _candidate_identity_set(source_brief):

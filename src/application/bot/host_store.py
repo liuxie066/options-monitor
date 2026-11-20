@@ -559,6 +559,15 @@ class BotHostStore:
                 """,
             ).fetchone() is not None
 
+    def has_reply_recovery_work(self) -> bool:
+        """Check for recovery or cleanup without claiming a reply."""
+        if self._has_reply_work():
+            return True
+        from src.application.bot.migration import assert_bot_ready
+
+        assert_bot_ready(self.path, connect=self._connect)
+        return False
+
     def claim_reply(
         self,
         *,
@@ -569,10 +578,7 @@ class BotHostStore:
     ) -> dict[str, Any] | None:
         # Polls skip the write path when there is no recovery or legacy payload cleanup.
         # Check all channels because lease and expiry maintenance below is shared.
-        if not delivery_key and not self._has_reply_work():
-            from src.application.bot.migration import assert_bot_ready
-
-            assert_bot_ready(self.path, connect=self._connect)
+        if not delivery_key and not self.has_reply_recovery_work():
             return None
         self._ensure_schema()
         now = before or utc_now_iso()

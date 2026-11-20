@@ -173,14 +173,16 @@ def test_full_branch_exclusion_requires_unambiguous_owner_evidence(tmp_path, mon
     repo, config, branches, execution, _ = _occupied_scope(tmp_path, monkeypatch)
     branch_id = branches[0]
     current_owner = ledger_attribution.build_wheel_read_model_with_capacity_from_rows
-    historical_owner = ledger_attribution.build_wheel_read_model_from_rows
+    historical_owner = ledger_attribution._historical_attribution_branches
     intent_owner = ledger_attribution.resolve_wheel_fill_intent
 
     def change(model, *, historical):
         model = deepcopy(model)
         if historical != uncertainty.startswith("historical_"):
             return model
-        branch = next(row for row in model["wheel_branches"] if row["wheel_branch_id"] == branch_id)
+        branch = model[branch_id] if historical else next(
+            row for row in model["wheel_branches"] if row["wheel_branch_id"] == branch_id
+        )
         coverage = branch["coverage"]
         if uncertainty.endswith("untrusted"):
             branch["integrity_status"] = "conflict"
@@ -220,7 +222,7 @@ def test_full_branch_exclusion_requires_unambiguous_owner_evidence(tmp_path, mon
         return intent_owner(branch, fill, *args, **kwargs)
 
     monkeypatch.setattr(ledger_attribution, "build_wheel_read_model_with_capacity_from_rows", current)
-    monkeypatch.setattr(ledger_attribution, "build_wheel_read_model_from_rows", historical)
+    monkeypatch.setattr(ledger_attribution, "_historical_attribution_branches", historical)
     monkeypatch.setattr(ledger_attribution, "resolve_wheel_fill_intent", intent)
     target = next(row for row in _view(repo, config, observation=_observation(repo))["rows"]
                   if row["execution_key"] == execution)

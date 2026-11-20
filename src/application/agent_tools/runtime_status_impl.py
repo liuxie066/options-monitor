@@ -32,7 +32,11 @@ from src.application.trades.state import normalize_trade_intake_state_payload
 from src.application.trades.listener_status import (
     attribution_observations, attribution_observation_health, DEFAULT_LISTENER_HEARTBEAT_SECONDS,
 )
-from src.application.trades.state_reconcile import preview_trade_intake_reconciliation_from_sqlite
+from src.application.trades.state_reconcile import (
+    TradeIntakePreviewObservation,
+    preview_trade_intake_reconciliation_from_sqlite,
+    trade_intake_preview_observation,
+)
 from src.application.payload_helpers import as_dict as _dict
 from src.application.payload_helpers import first_text as _first_text
 from src.application.payload_helpers import nested as _nested
@@ -270,6 +274,7 @@ def _trade_intake_reconciliation_summary(
     state_path: Path,
     ledger_store: dict[str, Any],
     audit_path: Path | None = None,
+    observation: TradeIntakePreviewObservation | None = None,
 ) -> dict[str, Any]:
     sqlite_path_raw = ledger_store.get("sqlite_path")
     if sqlite_path_raw in (None, ""):
@@ -289,6 +294,8 @@ def _trade_intake_reconciliation_summary(
         }
         if audit_path is not None:
             kwargs["audit_path"] = audit_path
+        if observation is not None:
+            kwargs["_observation"] = observation
         preview = preview_trade_intake_reconciliation_from_sqlite(**kwargs)
     except Exception as exc:
         return {
@@ -335,9 +342,10 @@ def _trade_intake_reconciliation_summary(
 
 def _trade_intake_audit_reconciliation_summary(
     *, state_path: Path, audit_path: Path, ledger_store: dict[str, Any],
+    observation: TradeIntakePreviewObservation | None = None,
 ) -> dict[str, Any]:
     summary = _trade_intake_reconciliation_summary(
-        state_path=state_path, audit_path=audit_path, ledger_store=ledger_store,
+        state_path=state_path, audit_path=audit_path, ledger_store=ledger_store, observation=observation,
     )
     return {
         "available": summary["reconciliation_preview_available"],
@@ -345,6 +353,23 @@ def _trade_intake_audit_reconciliation_summary(
         "pending_after_reconcile_count": summary.get("pending_after_reconcile_count"),
         "delegated_lifecycle_pending_deal_ids": summary["delegated_lifecycle_pending_deal_ids"],
     }
+
+
+def _trade_intake_reconciliation_summaries(
+    *, state_path: Path, audit_path: Path, ledger_store: dict[str, Any],
+) -> dict[str, Any]:
+    sqlite_path = ledger_store.get("sqlite_path")
+    observation = (
+        trade_intake_preview_observation(Path(str(sqlite_path)))
+        if sqlite_path not in (None, "") else None
+    )
+    ordinary = _trade_intake_reconciliation_summary(
+        state_path=state_path, ledger_store=ledger_store, observation=observation,
+    )
+    ordinary["audit_reconciliation"] = _trade_intake_audit_reconciliation_summary(
+        state_path=state_path, audit_path=audit_path, ledger_store=ledger_store, observation=observation,
+    )
+    return ordinary
 
 
 def _aggregate_trade_intake_summaries(summaries: list[dict[str, Any]]) -> dict[str, Any]:
@@ -2432,15 +2457,11 @@ def private_runtime_status_tool(
                     {"enabled": bool(source.get("enabled")), "state": state_info},
                 ]))
                 source_summary.update(
-                    _trade_intake_reconciliation_summary(
+                    _trade_intake_reconciliation_summaries(
                         state_path=source_state_path,
+                        audit_path=source_audit_path,
                         ledger_store=ledger_store,
                     )
-                )
-                source_summary["audit_reconciliation"] = _trade_intake_audit_reconciliation_summary(
-                    state_path=source_state_path,
-                    audit_path=source_audit_path,
-                    ledger_store=ledger_store,
                 )
                 source_infos.append(
                     {
@@ -2503,22 +2524,16 @@ def private_runtime_status_tool(
                 if payload.get("trade_intake_state_path")
                 else default_intake_state_path
             )
-            trade_intake_summary.update(
-                _trade_intake_reconciliation_summary(
-                    state_path=resolved_legacy_state_path,
-                    ledger_store=ledger_store,
-                )
-            )
             resolved_legacy_audit_path = (
                 _path_from_config(payload.get("trade_intake_audit_path"), base=base)
                 if payload.get("trade_intake_audit_path")
                 else default_intake_audit_path
             )
-            trade_intake_summary["audit_reconciliation"] = _trade_intake_audit_reconciliation_summary(
+            trade_intake_summary.update(_trade_intake_reconciliation_summaries(
                 state_path=resolved_legacy_state_path,
                 audit_path=resolved_legacy_audit_path,
                 ledger_store=ledger_store,
-            )
+            ))
         trade_intake_summary.update(_trade_intake_state_availability(
             source_infos or [{"enabled": bool(intake_cfg["enabled"]), "state": trade_intake_state}]
         ))

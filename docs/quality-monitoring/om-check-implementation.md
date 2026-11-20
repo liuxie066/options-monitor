@@ -199,8 +199,7 @@ quality refresh
 
 - 不在 `_completed_lifecycle_cases_by_deal()` 一次性加载整表后分组：只能修复一个
   调用方，保留只读 repository 的低效过滤合同。
-- 不在 quality service 跨 market/account 缓存 reconciliation：改动范围更大，
-  需要额外定义快照一致性和失效规则；只有 SQL 下推验证后仍超过目标才重新评估。
+- 初始 SQL 优化保留逐市场读取，账本证据的共用与失效规则见下文。
 - 不增加 assistant audit `(created_at, id)` 索引：它是独立次级热点，需要 schema
   变更，不属于本次最小修复。
 
@@ -222,6 +221,18 @@ quality refresh
 `case_id/account/symbol` 列存在，并对可解码的 dict payload 计数列值与
 `raw_json` 规范化值不一致的行。缺列或漂移计数非零时停止部署并保留旧版本；
 本次不加运行时 fallback，也不自动迁移数据。
+
+### 同一次质量刷新的账本证据
+
+一次 quality refresh 读取 US 和 HK 运行状态时，相同账本可共用完整的
+trade-intake 对账证据。每份状态仍读取相应的状态文件和审计记录，并独立生成
+普通及带审计的预览。审计读取错误只影响带审计的预览。
+
+共用范围止于该次刷新的运行状态读取阶段。只读连接在取证前读取 SQLite
+`data_version`，账本有新提交时重新取证。账本文件身份变化或版本检查失败时，
+当次预览走原有账本读取路径。读取不完整的证据继续按原有规则处理，不进入共用范围。
+独立账本隔离和提交后重读由
+[`test_quality_status_scope_reuses_unchanged_ledger_and_reloads_after_commit`](../../tests/quality/test_om_quality_checks.py) 覆盖。
 
 本地门禁已接入 `option_positions_read`、option performance、持仓物化/报告和 close-advice 读取/生成边界。消费者名称与 payload 中的 `blocked_consumers` 使用同一稳定标识。普通候选扫描不依赖持仓质量，不受无关异常影响。producer 与 gate 使用本地 V1 状态文件。
 

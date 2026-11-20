@@ -64,3 +64,25 @@ def test_build_symbols_digest_deduplicates_symbols_with_combo_yield_section(tmp_
     assert "enhance alert" in text
     assert "### Rebound Combo" not in text
     assert "combo alert" not in text
+
+
+def test_scheduled_symbols_summary_keeps_csv_without_rendering_text(tmp_path, monkeypatch, capsys):
+    from src.application import report_builders
+
+    rows = [{"symbol": "0700.HK", "strategy": "sell_put"}]
+    report_builders.build_symbols_summary(rows, tmp_path)
+    expected_csv = (tmp_path / "symbols_summary.csv").read_bytes()
+    capsys.readouterr()
+
+    scheduled = tmp_path / "scheduled"
+    scheduled.mkdir()
+
+    def fail_if_rendered(_row):
+        raise AssertionError("scheduled summaries must not render text")
+
+    monkeypatch.setattr(report_builders, "format_summary_row", fail_if_rendered)
+    report_builders.build_symbols_summary(rows, scheduled, is_scheduled=True)
+
+    assert (scheduled / "symbols_summary.csv").read_bytes() == expected_csv
+    assert not (scheduled / "symbols_summary.txt").exists()
+    assert capsys.readouterr().out == ""

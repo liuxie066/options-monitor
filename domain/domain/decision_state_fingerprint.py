@@ -10,6 +10,7 @@ from typing import Any
 
 DECISION_STATE_SNAPSHOT_SCHEMA = "decision_state_snapshot.v2"
 DECISION_STATE_FINGERPRINT_SCHEMA = "decision_state_fingerprint.v2"
+CURRENT_DECISION_READ_SCHEMA = "current_decision_projection_read.v1"
 
 # These fields are operational metadata. Unknown fields are deliberately retained.
 DECISION_FINGERPRINT_EXCLUDED_FIELDS = frozenset(
@@ -113,15 +114,24 @@ def canonicalize_decision_value(
     if value is None or isinstance(value, bool):
         return value
     if isinstance(value, str):
-        if _is_decimal_field(_field_name, _parent_field):
-            try:
-                return _decimal_string(value, field_path=str(_field_name or ""))
-            except DecisionStateNormalizationError:
-                pass
-        return value
-    if _numbers is not None and type(value) in (int, float):
+        if not _is_decimal_field(_field_name, _parent_field):
+            return value
+        cache_text = _numbers is not None and type(value) is str
+        if cache_text:
+            normalized = _numbers.get(value)
+            if normalized is not None:
+                return normalized
+        try:
+            normalized = _decimal_string(value, field_path=str(_field_name or ""))
+        except DecisionStateNormalizationError:
+            normalized = value
+        if cache_text:
+            _numbers[value] = normalized
+        return normalized
+    kind = type(value)
+    if _numbers is not None and (kind is int or kind is float):
         # Repeated quotes and quantities share a spelling within this traversal.
-        key = (type(value), value)
+        key = (kind, value)
         normalized = _numbers.get(key)
         if normalized is None:
             normalized = _decimal_string(value, field_path=_field_name or "")
@@ -129,6 +139,17 @@ def canonicalize_decision_value(
         return normalized
     if isinstance(value, (int, float, Decimal)):
         return _decimal_string(value, field_path=str(_field_name or ""))
+    if kind is dict and all(type(key) is str for key in value):
+        return {
+            key: canonicalize_decision_value(
+                value[key],
+                _field_name=key,
+                _parent_field=_field_name,
+                _numbers=_numbers,
+            )
+            for key in sorted(value)
+            if not _excluded_key(key)
+        }
     if isinstance(value, dict):
         return {
             str(key): canonicalize_decision_value(

@@ -307,13 +307,20 @@ def _sell_put_extras(df: pd.DataFrame, top: pd.Series) -> dict[str, Any]:
     }
 
 
-def summarize_sell_put(df: pd.DataFrame, symbol: str, *, symbol_cfg: dict | None = None) -> dict[str, Any]:
+def summarize_sell_put(
+    df: pd.DataFrame,
+    symbol: str,
+    *,
+    symbol_cfg: dict | None = None,
+    candidate_records: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     _ = symbol_cfg or {}
     row = _empty_summary_row(symbol, 'sell_put', extra_fields=SELL_PUT_EMPTY_FIELDS)
     if df.empty:
         return row
 
-    ranked = rank_candidates(df.to_dict("records"), mode="put")
+    records = df.to_dict("records") if candidate_records is None else candidate_records
+    ranked = rank_candidates(records, mode="put")
     top = pd.Series(ranked[0]) if ranked else None
     if top is None:
         row['candidate_count'] = len(df)
