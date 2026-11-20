@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Improvements
+- 决策历史遇到 SQLite 异常时，运行日志记录完整 traceback、数据库路径、读写模式及 SQLite 错误码，便于定位失败原因。
+
 ## 4.6.49 - 2026-11-20
 
 ### Bug Fixes
