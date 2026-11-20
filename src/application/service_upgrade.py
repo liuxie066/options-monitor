@@ -1022,7 +1022,8 @@ def _post_upgrade_service_health(
     if feishu_service in services:
         command = _feishu_ws_check_command(profile=profile, repo_root=repo_root)
         env = _child_env_from_profile(profile)
-        result = _run_command(command, cwd=repo_root, run_cmd=run_cmd, env=env, timeout=60)
+        # The health CLI verifies the managed SDK inventory before checking its APIs.
+        result = _run_command(command, cwd=repo_root, run_cmd=run_cmd, env=env, timeout=180)
         result["operation"] = "post_upgrade_service_health"
         result["check"] = "feishu-ws-check"
         result["service"] = feishu_service
