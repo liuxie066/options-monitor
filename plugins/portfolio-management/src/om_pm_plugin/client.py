@@ -15,7 +15,6 @@ from src.application.portfolio_management_contract import (
     VALUATION_MAX_RESPONSE_BYTES,
     _VIEW_PATHS,
     CAPITAL_FACTS_PATH,
-    MMF_FUNDING_PATH,
     VALUATION_EVIDENCE_PATH,
     HOLDINGS_REFRESH_PATH,
     PortfolioManagementConfigError,
@@ -62,11 +61,6 @@ class PortfolioManagementClient:
         _validate_view_account_scope(response, query or {})
         return response
 
-    def read_mmf_funding(self, *, account: str) -> dict[str, Any]:
-        return self._request(
-            "GET", MMF_FUNDING_PATH, query={"account": account}, timeout=3.0,
-        )
-
     def read_capital_facts(
         self,
         *,
@@ -77,7 +71,6 @@ class PortfolioManagementClient:
         return self._request(
             "GET",
             CAPITAL_FACTS_PATH,
-    MMF_FUNDING_PATH,
             query={"account": account, "period": period, "as_of_month": as_of_month},
             timeout=30.0,
         )

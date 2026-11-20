@@ -292,10 +292,10 @@ def load_account_portfolio_context(
         raise
     except Exception:
         cached = None
-    from src.application.portfolio_management import portfolio_management_enabled
+    from src.application.futu_mmf_oss import mmf_oss_configured
 
     needs_current_mmf_evidence = (
-        source_plan.primary_source == "futu" and portfolio_management_enabled(config)
+        source_plan.primary_source == "futu" and mmf_oss_configured()
     )
     if isinstance(cached, dict) and not needs_current_mmf_evidence:
         cached_snapshot = cached.get("position_snapshot_input")

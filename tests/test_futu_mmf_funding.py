@@ -34,3 +34,34 @@ def test_mmf_funding_applies_same_snapshot_native_balances_once():
     assert context["cash_by_currency"] == {"CNY": 1032301.98, "HKD": 0, "USD": 0}
     assert context["cash_capacity_by_currency"]["HKD"]["amount"] == 0
     assert context["cash_components_by_currency"]["HKD"]["hk_cash"] == -84134.88
+
+
+def test_oss_reader_checks_account_and_recomputes_adjustments(monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    from src.application import futu_mmf_oss
+
+    payload = {
+        "schema": "futu.mmf-funding.v1", "account": "sy", "status": "verified",
+        "adjustments": {"HKD": "50"},
+        "transfers": [{
+            "receipt_id": "receipt-1", "direction": "redemption", "currency": "HKD",
+            "amount": "100", "source_debit": "75", "target_credit": "25",
+        }],
+    }
+    calls = []
+
+    def cat(args, **kwargs):
+        calls.append(args)
+        return SimpleNamespace(stdout=json.dumps(payload).encode(), returncode=0)
+
+    monkeypatch.setenv("FUTU_MMF_FUNDING_OSS_PREFIX", "oss://test-bucket/mmf")
+    monkeypatch.setattr(futu_mmf_oss.subprocess, "run", cat)
+    assert futu_mmf_oss.read_mmf_oss("sy") == payload
+    assert calls == [["ossutil", "cat", "oss://test-bucket/mmf/sy.json", "--count", "262145"]]
+    with pytest.raises(ValueError, match="Invalid OSS"):
+        futu_mmf_oss.read_mmf_oss("lx")
+    payload["adjustments"] = {"HKD": "75"}
+    with pytest.raises(ValueError, match="totals"):
+        futu_mmf_oss.read_mmf_oss("sy")
