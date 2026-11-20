@@ -14,3 +14,9 @@ The configured identity remains `market_data.provider: opend`; historical
 remain readable without the plugin. Current market operations require it
 before contacting OpenD. The plugin grants no broker account access and
 does not enable, install or select any broker plugin.
+
+## OpenD weekly maintenance
+
+The plugin also owns the OpenD Linux x86_64 package check, staged upgrade and
+rollback. See [OpenD weekly upgrades](../../docs/DEPLOY_LINUX_MAC.md#opend-weekly-upgrades)
+for the supported systemd layout, preview command, opt-in timer and receipts.

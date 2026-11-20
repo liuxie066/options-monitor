@@ -424,6 +424,8 @@ def service_lifecycle(
     accounts: list[str] | None = None,
     markets: list[str] | None = None,
     include_opend: bool = False,
+    opend_upgrade_units: list[str] | None = None,
+    opend_upgrade_send_receipt: bool | None = None,
     include_feishu_ws: bool = False,
     include_wechat_clawbot: bool = False,
     group_query_bot_instances: list[dict[str, Any]] | None = None,
@@ -490,6 +492,7 @@ def service_lifecycle(
     if action == "install":
         doc = load_yaml_config_file(source)
         selected_markets = markets or configured_markets(doc)
+        opend_upgrade = (existing or {}).get("opend_upgrade") or {}
         bundle = render_service_bundle(
             target=provider, repo_root=repo, runtime_root=runtime, config_yaml=source,
             config_paths={market: runtime / f"config.{market}.json" for market in selected_markets},
@@ -497,6 +500,8 @@ def service_lifecycle(
             env_file=selected_env,
             deploy_user=user.pw_name if provider == "systemd" else None, deploy_home=user.pw_dir,
             use_default_deploy_user=False, include_opend=include_opend,
+            opend_upgrade_units=opend_upgrade_units if opend_upgrade_units is not None else opend_upgrade.get("units"),
+            opend_upgrade_send_receipt=opend_upgrade_send_receipt if opend_upgrade_send_receipt is not None else bool(opend_upgrade.get("send_receipt")),
             include_feishu_ws=include_feishu_ws, feishu_ws_config_key=channel_market,
             include_wechat_clawbot=include_wechat_clawbot, wechat_clawbot_config_key=channel_market,
             include_secret_credentials=provider == "systemd", feature_aware_credentials=True,
