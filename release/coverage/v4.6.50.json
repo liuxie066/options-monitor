@@ -1,0 +1,66 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.50",
+  "base": {
+    "tag": "v4.6.49",
+    "commit": "d419c74522c6b3ababfe1d0ef77c7bf7b9e94180"
+  },
+  "reviewed_head": "de9bbed91dd466cffb395e2d44745dafc5fadfd1",
+  "commits": [
+    {
+      "sha": "1a75f62e166b2666fe4d06b3e4a1456bfa587b59",
+      "subject": "Log decision history SQLite tracebacks"
+    },
+    {
+      "sha": "0efeab4dae07685ae549be049ff94fd4188d83e3",
+      "subject": "Merge pull request #1233 from liuxie066/diagnostics/decision-history-sqlite"
+    },
+    {
+      "sha": "de9bbed91dd466cffb395e2d44745dafc5fadfd1",
+      "subject": "Add root-operated OM upgrade entry"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "决策历史遇到 SQLite 异常时，运行日志记录完整 traceback、数据库路径、读写模式及 SQLite 错误码，便于定位失败原因。",
+      "commits": [
+        "1a75f62e166b2666fe4d06b3e4a1456bfa587b59"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Linux/systemd 新增 root 运维升级入口，沿用部署用户准备应用，由 root 按核准清单代办 systemd 操作，并保护外部管理的 OpenD。",
+      "commits": [
+        "de9bbed91dd466cffb395e2d44745dafc5fadfd1"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "0efeab4dae07685ae549be049ff94fd4188d83e3",
+      "reason": "Merge commit integrates changes already described by the associated release note."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "0efeab4dae07685ae549be049ff94fd4188d83e3",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1233"
+      ]
+    },
+    {
+      "commit": "1a75f62e166b2666fe4d06b3e4a1456bfa587b59",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1233"
+      ]
+    },
+    {
+      "commit": "de9bbed91dd466cffb395e2d44745dafc5fadfd1",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1234",
+        "docs/RELEASE_PROCESS.md"
+      ]
+    }
+  ]
+}
