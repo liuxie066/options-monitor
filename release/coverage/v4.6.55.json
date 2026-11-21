@@ -1,0 +1,48 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.55",
+  "base": {
+    "tag": "v4.6.54",
+    "commit": "24c40ea6a8aa66aa98b2f454282eb77d6eecbfd4"
+  },
+  "reviewed_head": "998e0aacbfd5d9e862e1835dbed908d8006c9d38",
+  "commits": [
+    {
+      "sha": "47602818fccb81aadf22778870eefda8eef78f23",
+      "subject": "perf(trades): skip single-use delivery validation cache"
+    },
+    {
+      "sha": "998e0aacbfd5d9e862e1835dbed908d8006c9d38",
+      "subject": "Merge pull request #1245 from liuxie066/perf/trade-intake-combo-history-hash"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "成交接入的组合对账省去单次交付状态读取中的额外哈希和复制，继续完整核对交付凭据和决策历史。",
+      "commits": [
+        "47602818fccb81aadf22778870eefda8eef78f23"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "998e0aacbfd5d9e862e1835dbed908d8006c9d38",
+      "reason": "合并 PR #1245，变更已由实现提交对应的发布说明覆盖。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "47602818fccb81aadf22778870eefda8eef78f23",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1245"
+      ]
+    },
+    {
+      "commit": "998e0aacbfd5d9e862e1835dbed908d8006c9d38",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1245"
+      ]
+    }
+  ]
+}
