@@ -743,7 +743,15 @@ def test_render_systemd_bundle_can_include_quality_monitoring(tmp_path: Path) ->
 
     assert str(repo / "om") + " quality refresh --config-key us --config-key hk --no-deep" in refresh
     assert "TimeoutStartSec=600" in refresh
-    assert "OnUnitActiveSec=15min" in refresh_timer
+    status_timer = files["systemd/options-monitor-runtime-status.timer"]["content"]
+    assert "OnCalendar=*-*-* *:00,15,30,45:00 UTC" in refresh_timer
+    assert "OnCalendar=*-*-* *:05,20,35,50:00 UTC" in status_timer
+    for timer in (refresh_timer, status_timer):
+        assert "AccuracySec=1s" in timer
+        assert "RandomizedDelaySec=0" in timer
+        assert "Persistent=false" in timer
+        assert "OnBootSec=" not in timer
+        assert "OnUnitActiveSec=" not in timer
     assert str(repo / "om") + " quality recheck-due --config-key us --config-key hk" in recheck
     assert "After=network-online.target options-monitor-opend.service" in recheck
     assert "TimeoutStartSec=300" in recheck

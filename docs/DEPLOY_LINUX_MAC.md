@@ -281,6 +281,9 @@ sudo systemctl enable --now options-monitor-trade-intake.service
 sudo systemctl enable --now options-monitor-feishu-ws.service
 ```
 
+Linux 定时器每 15 分钟执行一次。启用质量监控时，常规质量刷新在每小时的第 00、15、30、45 分钟运行，运行状态检查在第 05、20、35、50 分钟运行，均使用 UTC。启动或重新启用 timer 后，首次运行等到下一个预定时刻。停机期间错过的时刻不补跑。
+
+
 `service render` 的 `commands.enable` 只为已有 `[Install]` 的选定 service 生成启用建议；drift 的缺失长期 service 人工建议也检查预期 unit 内容。`options-monitor-trade-intake-heartbeat.service` 由对应 timer 触发，不单独 `enable`；凭据初始化 oneshot 自带 `[Install]`，仍可启用。
 
 渲染的 `options-monitor-trade-intake.service` 通过 `OnFailure=options-monitor-trade-intake-alert.service` 处理终止态；告警 unit 是按需触发的 oneshot，不单独 `enable`。它运行 `./om run service-failure-alert`，从生成的 runtime config 选择现有通知路由并记录发送结果。安装新模板及其凭据 drop-in 后仍需按受控部署流程执行 `daemon-reload`；仅更新仓库源码不会改变已安装 unit。
