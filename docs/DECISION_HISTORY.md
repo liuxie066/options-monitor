@@ -10,7 +10,7 @@
 
 交易事实仍归现有 `option_positions.sqlite3` 账本。历史快照不复制交易事件；刷新查询可反映账本纠正，原建议保持不变。
 
-组合归属与摄取后的组合对账通过 `read_combo_candidate_exposures_batch`，在一次账户/市场的只读操作内收集所需日期的证据。该批次仍验证整份 delivery 状态的全部来源引用，不只校验请求日期；同批复用历史事务与已读事实，下一次调用重新观察变化。读取结束后释放 observation，再沿原账本接口持久化推断；不跨对账轮次缓存结果，不改变确认、完整性和失败语义。
+组合归属与摄取后的组合对账通过 `read_combo_candidate_exposures_batch`，按账户和市场收集所需日期的证据。每批先读取一次 delivery 状态，再从同一个 SQLite 只读快照取出这些日期及 delivery 状态所涉日期的原始历史行。事务关闭后，批次复用已取出的数据，解码历史、验证整份 delivery 状态的来源引用并推导敞口。下一批重新读取。账本持久化仍在 observation 退出之后，沿用原有的确认、完整性和失败语义。
 
 同一 observation 中，delivery 校验成功的标准化 Brief 与兼容摘要可供后续 exposure 读取复用；复用绑定账户、市场、runtime、日期、revision 和已校验源内容，仍返回独立副本。observation 仅保留缓存键，条目被淘汰时回到原标准化路径；键在消费后或 observation 退出时释放，不延长被淘汰 Brief 的生命期、不扩大进程缓存容量，也不替代下一批的新鲜读取或错误校验。
 

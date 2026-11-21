@@ -9,7 +9,7 @@ from contextlib import closing, contextmanager, nullcontext
 from contextvars import ContextVar
 from pathlib import Path
 from threading import RLock
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any, Callable, Iterable, Iterator, Mapping
 
 from src.infrastructure.private_storage import connect_private_sqlite
 
@@ -186,6 +186,18 @@ class DecisionHistoryStore:
             return [int(row[0]) for row in connection.execute(
                 "SELECT revision FROM decisions WHERE account=? AND market=? AND market_date=? ORDER BY revision",
                 (account, market, market_date))]
+
+    def snapshot_rows(self, *, account: str, market: str,
+                      market_dates: Iterable[str]) -> dict[str, dict[int, sqlite3.Row]]:
+        """Copy raw rows from one read transaction for validation after it closes."""
+        with self.connect() as conn:
+            return {
+                day: {row["revision"]: row for row in conn.execute(
+                    "SELECT * FROM decisions WHERE account=? AND market=? AND market_date=? ORDER BY revision",
+                    (account, market, day),
+                )}
+                for day in market_dates
+            }
 
     def append(self, source: Mapping[str, Any], *, successful: bool,
                build: Callable[[int, dict[str, Any] | None], dict[str, Any]],
