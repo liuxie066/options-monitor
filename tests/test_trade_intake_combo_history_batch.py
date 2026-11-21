@@ -1,5 +1,5 @@
 """Real intake reconciliation must reuse the public history batch boundary."""
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 import json
 import shutil
@@ -16,10 +16,12 @@ from src.application.trades import combo_reconciliation as application
 from src.infrastructure.decision_history_sqlite import DecisionHistoryStore
 
 
-def test_real_intake_reconciliation_reads_delivery_once_per_market(tmp_path, monkeypatch):
+@pytest.mark.parametrize("shared_validation", [False, True])
+def test_real_intake_reconciliation_reads_delivery_once_per_market(tmp_path, monkeypatch, shared_validation):
     ledger, dates, now_ms = seed_intake_combo_history(tmp_path)
-    reads, connections = [], []
+    reads, connections, validations = [], [], []
     original_read, original_connect = Path.read_text, DecisionHistoryStore.connect
+    original_normalize = history._DeliveryValidation.normalize
 
     def counted_read(path, *args, **kwargs):
         if path.name.endswith(".delivery.json"):
@@ -32,16 +34,25 @@ def test_real_intake_reconciliation_reads_delivery_once_per_market(tmp_path, mon
             connections.append(store.path)
             yield conn
 
+    def counted_normalize(validation, *args, **kwargs):
+        validations.append(validation)
+        return original_normalize(validation, *args, **kwargs)
+
     monkeypatch.setattr(Path, "read_text", counted_read)
     monkeypatch.setattr(DecisionHistoryStore, "connect", counted_connect)
-    result = application.reconcile_account_post_trade_combos(
-        repo=ledger, runtime_root=tmp_path, account="lx",
-        runtime_environment="opend:127.0.0.1:11111", mode="observe",
-        effective_now_ms=now_ms)
+    monkeypatch.setattr(history._DeliveryValidation, "normalize", counted_normalize)
+    scope = history.daily_brief_delivery_validation_scope() if shared_validation else nullcontext()
+    with scope:
+        ambient = history._DELIVERY_VALIDATION.get()
+        result = application.reconcile_account_post_trade_combos(
+            repo=ledger, runtime_root=tmp_path, account="lx",
+            runtime_environment="opend:127.0.0.1:11111", mode="observe",
+            effective_now_ms=now_ms)
     assert [r["market_date"] for r in result["evidence_reads"]] == dates
     assert all(r["complete"] and r["exposure_count"] == 1 for r in result["evidence_reads"])
     assert len(reads) == 1
     assert len(connections) == 1
+    assert validations == ([ambient] if shared_validation else [])
 
 
 def test_market_batches_preserve_date_order_and_per_date_completeness(tmp_path, monkeypatch):

@@ -302,7 +302,12 @@ class _BriefHistoryObservation(DailyBriefReadScope):
         if not self.matches(base=base, account=_normalize_account(account), market=_normalize_market(market)):
             raise ValueError("daily brief read scope identity mismatch")
         if self._delivery is None:
-            self._delivery = super().delivery_state(base=base, account=account, market=market)
+            # This batch already memoizes the whole result, so its own per-day
+            # validation cache would only hash and copy entries without reusing them.
+            base_path, account_norm, market_norm = self._identity
+            self._delivery = read_daily_decision_brief_delivery_state(
+                base=base_path, account=account_norm, market=market_norm,
+            )
         # This private scope never escapes the batch. The exposure reader only
         # reads its state and constructs separate output objects for every date.
         return self._delivery
