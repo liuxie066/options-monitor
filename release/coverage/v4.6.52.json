@@ -1,0 +1,128 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.52",
+  "base": {
+    "tag": "v4.6.51",
+    "commit": "e04c9e1dcc67e176174779ca1d54ffbc1991f939"
+  },
+  "reviewed_head": "ae532ff6c055edd9d8fc04af4e9c3a7335f79f9b",
+  "commits": [
+    {
+      "sha": "4078e24c1560d06ee6029e12fbb0caa59855f9f0",
+      "subject": "perf(runtime): reduce tick and background service CPU overhead"
+    },
+    {
+      "sha": "5d48435a5062bca37fe449b89726817cd143ef84",
+      "subject": "chore(branch): sync performance branch with main"
+    },
+    {
+      "sha": "d4b40a02ac4d17aeddbd78a150916471347683ad",
+      "subject": "fix(config): retain the public YAML dumper"
+    },
+    {
+      "sha": "1e1dda11852d48d2864eaaa9e0ab6a1f6c35f039",
+      "subject": "test(ledger): drop assertion for deferred writer imports"
+    },
+    {
+      "sha": "56de19e084d58a5835bb530f7d63d5b4740ea660",
+      "subject": "fix(ci): resolve report logging and deadline check failures"
+    },
+    {
+      "sha": "ae78cb8c60477051d8f551f34543204781b0e9c6",
+      "subject": "test(archive): publish child PID atomically"
+    },
+    {
+      "sha": "ae532ff6c055edd9d8fc04af4e9c3a7335f79f9b",
+      "subject": "Merge pull request #1239 from liuxie066/cindy/zealous-einstein"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "监控 tick 复用已核验的行情和持仓输入，减少历史成交归因与 Wheel 投影的重复计算，保留既有决策、报表和账本输出。",
+      "commits": [
+        "4078e24c1560d06ee6029e12fbb0caa59855f9f0"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "减少飞书空轮询、质量刷新和成交接入归因恢复中的重复校验与读取，降低后台服务 CPU 开销。",
+      "commits": [
+        "4078e24c1560d06ee6029e12fbb0caa59855f9f0"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "手动生成标的汇总时，完成日志只显示报表文件名，避免输出本地完整路径。",
+      "commits": [
+        "56de19e084d58a5835bb530f7d63d5b4740ea660"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "5d48435a5062bca37fe449b89726817cd143ef84",
+      "reason": "Main synchronization only. The base changes were already in v4.6.51."
+    },
+    {
+      "commit": "d4b40a02ac4d17aeddbd78a150916471347683ad",
+      "reason": "Restores the v4.6.51 YAML dumper export and removes the deferred import experiment."
+    },
+    {
+      "commit": "1e1dda11852d48d2864eaaa9e0ab6a1f6c35f039",
+      "reason": "Removes a test for the discarded deferred ledger import experiment."
+    },
+    {
+      "commit": "ae78cb8c60477051d8f551f34543204781b0e9c6",
+      "reason": "Makes the archive test fixture publish the child PID atomically. Application code is unchanged."
+    },
+    {
+      "commit": "ae532ff6c055edd9d8fc04af4e9c3a7335f79f9b",
+      "reason": "Merges PR #1239 into main. The functional changes are covered by the notes for its individual commits."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "4078e24c1560d06ee6029e12fbb0caa59855f9f0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1239"
+      ]
+    },
+    {
+      "commit": "5d48435a5062bca37fe449b89726817cd143ef84",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1239"
+      ]
+    },
+    {
+      "commit": "d4b40a02ac4d17aeddbd78a150916471347683ad",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1239"
+      ]
+    },
+    {
+      "commit": "1e1dda11852d48d2864eaaa9e0ab6a1f6c35f039",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1239"
+      ]
+    },
+    {
+      "commit": "56de19e084d58a5835bb530f7d63d5b4740ea660",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1239"
+      ]
+    },
+    {
+      "commit": "ae78cb8c60477051d8f551f34543204781b0e9c6",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1239"
+      ]
+    },
+    {
+      "commit": "ae532ff6c055edd9d8fc04af4e9c3a7335f79f9b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1239"
+      ]
+    }
+  ]
+}
