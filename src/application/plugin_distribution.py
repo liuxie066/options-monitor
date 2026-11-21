@@ -81,15 +81,33 @@ def _published_asset(release: dict, name: str) -> tuple[str, str, int]:
     return expected_url, digest[7:], item["size"]
 
 
-def _catalog(root: Path, temporary: Path) -> tuple[dict, dict]:
+def _stage_asset(release: dict, name: str, temporary: Path, asset_dir: Path | None) -> Path:
+    url, digest, size = _published_asset(release, name)
+    destination = temporary / name
+    if asset_dir is None:
+        path = runtime_bundle.download_verified(url, destination, digest)
+        if path.stat().st_size != size:
+            raise ValueError(f"official plugin asset size mismatch: {name}")
+        return path
+
+    source = asset_dir / name
+    if not source.is_file():
+        raise ValueError(f"local official plugin asset missing: {name}")
+    with source.open("rb") as stream:
+        content = stream.read(size + 1)
+    if len(content) != size or hashlib.sha256(content).hexdigest() != digest:
+        raise ValueError(f"local official plugin asset size or SHA256 mismatch: {name}")
+    # Validate and install the same private copy even if the source directory changes.
+    destination.write_bytes(content)
+    return destination
+
+
+def _catalog(root: Path, temporary: Path, asset_dir: Path | None) -> tuple[dict, dict]:
     from src.application.plugin_release import validate_catalog
 
     version = _version(root)
     release = runtime_bundle.resolve_release("v" + version)
-    url, digest, size = _published_asset(release, "om-plugins.json")
-    path = runtime_bundle.download_verified(url, temporary / "om-plugins.json", digest)
-    if path.stat().st_size != size:
-        raise ValueError("plugin catalog size mismatch")
+    path = _stage_asset(release, "om-plugins.json", temporary, asset_dir)
     # An older release orchestrates the upgrade and installs its managed
     # plugins from the target release's catalog, which may list official
     # plugins that release does not know yet. Validate the known entries and
@@ -212,7 +230,7 @@ def _validate_import(root: Path, staged: Path, plugin_id: str, *, python_executa
 
 
 def install_plugin(plugin_id: str, *, repo_root: Path | None = None, confirm: bool = False,
-                   python_executable: Path | None = None) -> dict:
+                   python_executable: Path | None = None, asset_dir: Path | None = None) -> dict:
     from src.application.plugin_release import validate_wheel
 
     if plugin_id not in PLUGINS:
@@ -232,7 +250,7 @@ def install_plugin(plugin_id: str, *, repo_root: Path | None = None, confirm: bo
         raise ValueError("plugin is installed in Python environment; manage it with that environment's pip before using om plugins")
     with tempfile.TemporaryDirectory(prefix="om-plugin-download-") as temporary:
         work = Path(temporary)
-        catalog, release = _catalog(root, work)
+        catalog, release = _catalog(root, work, asset_dir)
         entry = next(item for item in catalog["plugins"] if item["id"] == plugin_id)
         preview = {"ok": True, "status": "preview", "changed": False, "plugin": plugin_id,
                    "version": entry["version"], "om_version": version, "release_tag": catalog["tag"],
@@ -246,10 +264,10 @@ def install_plugin(plugin_id: str, *, repo_root: Path | None = None, confirm: bo
             preview["note"] += "；须预先安装 requirements/longbridge.txt 的 SDK，不修改运行包内置环境"
         if not confirm:
             return preview
-        url, digest, size = _published_asset(release, entry["asset"])
+        _, digest, size = _published_asset(release, entry["asset"])
         if digest != entry["sha256"] or size != entry["size"]:
             raise ValueError("plugin catalog and published asset differ")
-        wheel = runtime_bundle.download_verified(url, work / entry["asset"], digest)
+        wheel = _stage_asset(release, entry["asset"], work, asset_dir)
         validate_wheel(wheel, entry)
         store = plugin_store(root)
         ensure_private_directory(store.parent)

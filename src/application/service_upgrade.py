@@ -2760,6 +2760,7 @@ def _managed_plugin_selection(release_dir: Path) -> list[str]:
 
 def _preserve_managed_plugins(
     *, target_dir: Path, selected: list[str], run_cmd: Callable[..., Any], operations: list[dict[str, Any]],
+    asset_dir: Path | None = None,
 ) -> None:
     # A failed earlier attempt must not resurrect a subsequently removed plugin.
     unexpected = set(_managed_plugin_selection(target_dir)) - set(selected)
@@ -2769,9 +2770,10 @@ def _preserve_managed_plugins(
             + "; remove them explicitly from the target release before retrying",
             status="managed_plugin_selection_mismatch",
         )
+    options = {"asset_dir": asset_dir} if asset_dir is not None else {}
     for plugin_id in selected:
         result = plugin_distribution.install_plugin(
-            plugin_id, repo_root=target_dir, confirm=True, python_executable=_release_python(target_dir),
+            plugin_id, repo_root=target_dir, confirm=True, python_executable=_release_python(target_dir), **options,
         )
         operations.append({"operation": "preserve_managed_plugin", **result})
     _validate_target_managed_plugins(
@@ -3741,6 +3743,7 @@ def service_upgrade(
     preserve_activation_state: bool = False,
     cleanup_after_upgrade: bool = False,
     cleanup_keep_releases: int = 2,
+    plugin_asset_dir: str | Path | None = None,
     run_cmd: Callable[..., Any] = subprocess.run,
     now_fn: Callable[[], datetime] | None = None,
 ) -> dict[str, Any]:
@@ -3877,6 +3880,7 @@ def service_upgrade(
 
         target_dir = releases / target
         previous_dir = repo
+        asset_dir = Path(plugin_asset_dir).expanduser().resolve() if plugin_asset_dir is not None else None
         pre_upgrade_profile = _load_service_profile(runtime)
         preserved_activation_states: dict[str, dict[str, str]] = {}
         warnings = [] if repo_root_is_symlink else ["confirmed upgrade requires repo_root to be a current symlink"]
@@ -3888,7 +3892,11 @@ def service_upgrade(
             else f"reuse existing release dir {target_dir}",
             f"verify bundled interpreter and dependencies at {target_dir}" if bundled else
             f"prepare release runtime at {target_dir / '.venv'} (pip: prepare wheels, install offline, run pip check)",
-            "preserve validated managed plugin selection using exact target release wheels and verify target loading",
+            (
+                f"preserve validated managed plugins using official assets from {asset_dir} and verify target loading"
+                if asset_dir is not None
+                else "preserve validated managed plugin selection using exact target release wheels and verify target loading"
+            ),
             f"validate {target_dir}",
             "verify the target contains the supported Python Bot runtime",
             f"switch {repo_link} -> {target_dir}",
@@ -4076,6 +4084,7 @@ def service_upgrade(
             )
             _preserve_managed_plugins(
                 target_dir=target_dir, selected=managed_plugins, run_cmd=run_cmd, operations=operations,
+                asset_dir=asset_dir,
             )
             write_upgrade_status(
                 runtime_root=runtime,

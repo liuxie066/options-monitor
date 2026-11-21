@@ -129,7 +129,10 @@ def read_plan(path, account):
     metadata = safe_root_path(path, stat.S_ISREG)
     require(not metadata.st_mode & 0o077 and metadata.st_size < LIMIT, "plan must be private to root")
     plan = json.loads(path.read_bytes())
-    require(set(plan) == {"from", "to", "profile_sha256", "files"}, "invalid plan fields")
+    require(set(plan) - {"plugin_asset_dir"} == {"from", "to", "profile_sha256", "files"}, "invalid plan fields")
+    if "plugin_asset_dir" in plan:
+        folder = plan["plugin_asset_dir"]
+        require(isinstance(folder, str) and Path(folder).is_absolute(), "plugin_asset_dir must be an absolute path")
     actual, target = release_path(plan["from"]), release_path(plan["to"])
     require(actual == LIVE.resolve() and tuple(map(int, plan["from"].split("."))) >= (4, 6, 49)
             and tuple(map(int, plan["to"].split("."))) > tuple(map(int, plan["from"].split("."))),
@@ -160,8 +163,11 @@ def read_plan(path, account):
     return actual, target, plan, set(restart) | timers
 
 def upgrade_command(target, plan):
-    return [str(target / "om"), "update", "apply", "--repo-root", str(LIVE), "--runtime-root", str(RUNTIME),
+    command = [str(target / "om"), "update", "apply", "--repo-root", str(LIVE), "--runtime-root", str(RUNTIME),
             "--target-version", plan["to"], "--preserve-activation-state"]
+    if "plugin_asset_dir" in plan:
+        command.extend(["--plugin-asset-dir", plan["plugin_asset_dir"]])
+    return command
 
 def check_upgrade(target, plan, account):
     preview = subprocess.run(restricted(upgrade_command(target, plan)), cwd=target, **child_options(account),
@@ -311,8 +317,11 @@ def main():
             scope.callback(os.close, guard_fd)
         actual, target, plan, restarts = read_plan(Path(os.path.abspath(args.plan)), account)
         check_upgrade(target, plan, account)
-        print(json.dumps({"status": "confirmed" if args.confirm else "preview", "from": actual.name,
-                          "to": target.name, "files": sorted(plan["files"]), "restarts": sorted(restarts)}), flush=True)
+        summary = {"status": "confirmed" if args.confirm else "preview", "from": actual.name,
+                   "to": target.name, "files": sorted(plan["files"]), "restarts": sorted(restarts)}
+        if "plugin_asset_dir" in plan:
+            summary["plugin_asset_dir"] = plan["plugin_asset_dir"]
+        print(json.dumps(summary), flush=True)
         return apply(target, plan, restarts, account, guard_fd) if args.confirm else 0
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 import fcntl
+import json
 import os
 import struct
 from types import SimpleNamespace
@@ -7,6 +8,32 @@ import pytest
 
 from scripts import om_root_upgrade as entry
 
+
+@pytest.mark.parametrize("asset_dir", [None, "/staging/release assets", "relative/assets"])
+def test_root_plan_binds_optional_local_plugin_assets(tmp_path, monkeypatch, asset_dir):
+    live = tmp_path / "current"
+    previous = tmp_path / "4.6.54"
+    live.symlink_to(previous, target_is_directory=True)
+    monkeypatch.setattr(entry, "LIVE", live)
+    monkeypatch.setattr(entry, "release_path", lambda version: tmp_path / version)
+    monkeypatch.setattr(entry, "safe_root_path", lambda *_: SimpleNamespace(st_mode=0o600, st_size=200))
+    monkeypatch.setattr(entry, "deployment_profile", lambda: ({"restart": {"services": []}}, "digest"))
+    monkeypatch.setattr(entry, "read_preview", lambda *_: (set(), set()))
+    plan = {"from": "4.6.54", "to": "4.6.55", "profile_sha256": "digest", "files": {}}
+    if asset_dir is not None:
+        plan["plugin_asset_dir"] = asset_dir
+    path = tmp_path / "plan.json"
+    path.write_text(json.dumps(plan))
+    if asset_dir == "relative/assets":
+        with pytest.raises(ValueError, match="must be an absolute path"):
+            entry.read_plan(path, None)
+        return
+    _, target, readback, _ = entry.read_plan(path, None)
+    command = entry.upgrade_command(target, readback)
+    if asset_dir is None:
+        assert "--plugin-asset-dir" not in command
+    else:
+        assert command[-2:] == ["--plugin-asset-dir", asset_dir]
 
 def test_native_upgrade_guard_carries_through_inherited_descriptor(monkeypatch, tmp_path):
     monkeypatch.setattr(entry, "RUNTIME", tmp_path)
