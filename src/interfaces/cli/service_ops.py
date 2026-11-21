@@ -305,6 +305,9 @@ def add_service_update_commands(subparsers: Any) -> None:
     update_apply.add_argument("--releases-root", default=None)
     update_apply.add_argument("--cache-root", default=None)
     update_apply.add_argument("--target-version", default=None)
+    update_apply.add_argument(
+        "--plugin-asset-dir", default=None, help="read official managed plugin catalog and wheels from a local directory",
+    )
     update_apply.add_argument("--remote-name", default="origin")
     update_apply.add_argument("--auto", action="store_true")
     update_apply.add_argument("--allow-major", action="store_true")
@@ -672,6 +675,7 @@ def handle_service_update_command(
             releases_root=args.releases_root,
             cache_root=args.cache_root,
             target_version=args.target_version,
+            plugin_asset_dir=args.plugin_asset_dir,
             remote_name=args.remote_name,
             confirm=confirmed,
             auto=bool(args.auto),

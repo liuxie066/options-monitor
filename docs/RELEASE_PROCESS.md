@@ -563,6 +563,8 @@ confirmed 升级/回滚先取得该 guard，再绑定 current、版本、profile
 `files` 的键是相对于 `/etc/systemd/system` 的改写路径，每项含现有文件的 `before` 和
 已审阅目标内容的 `after` SHA-256。先准备并核验已发布的目标源码和解释器，升级入口复用
 `liuxie` 的升级器，仅在本次执行期间代理清单内的修改和 systemd 重启。入口排除两套外部 OpenD。
+使用本地插件包时，在根入口的计划中添加可选的 `"plugin_asset_dir": "/absolute/path/to/assets"`。
+目录须可由部署用户读取。预览和确认使用计划中的同一路径，目标版本及已安装的根入口均须支持此字段。
 如果预览要求新增、退役、启用服务或变更特殊文件权限，入口会在切换前拒绝升级。
 旧版飞书凭据物化单元会触发额外启动，仅使用没有该单元改写的升级计划。
 确认时入口在重新预检期间持有项目原有的升级锁。已在暂存期间持锁的 root 启动器也可通过
@@ -693,6 +695,20 @@ true 也不补装。首次安装可用 `scripts/install.sh --with-position-advic
 升级先校验旧代码实例的托管 receipt，再从目标 Release 安装精确配套 wheel，使用目标解释器验证，
 成功后才允许切换 `current`、配置和服务。选择与功能开关独立，主动卸载保持卸载；坏 receipt、
 缺目标资产或导入失败会中止，旧安装不被删除。外部插件目录不写入运行包 inventory 或依赖缓存。飞书复用目标环境中可用的 SDK；源码目标缺 SDK 时，确认安装按目标 release 约束将依赖暂存至插件专属目录，校验实际 SDK API、依赖与文件摘要后才激活。运行包缺 SDK 时拒绝，不修改其内置依赖。
+
+当 Release 下载地址不可用时，可将目标版本的官方 `om-plugins.json` 和尚未在目标目录安装的托管 wheel
+按发布文件名放入同一目录。可通过 GitHub 资产 API 获取这些文件。使用支持该选项的控制器预览：
+
+```bash
+./om update apply --repo-root <current-symlink> --runtime-root <runtime-root> \
+  --target-version <version> --plugin-asset-dir /absolute/path/to/assets
+```
+
+核对预览中的目标版本和目录，再用相同参数加 `--confirm`。确认时会从 GitHub API 读取目标 Release
+的已发布资产信息，验证本地清单和 wheel 的大小与 SHA-256，再进行原有 wheel 检查和导入校验。
+指定目录后，从目录取所需插件资产。已在目标目录通过 receipt 校验的插件会复用。缺件、摘要不符
+或导入失败均在切换前停止。目标源码或运行包的获取方式、其他依赖准备及发布元数据查询仍沿用原流程。
+
 回滚保留回滚目标原有的安装选择，不下载、安装或迁移插件。确认回滚时，在暂存配置、切换
 `current` 和操作服务之前，以目标解释器校验目标已有托管插件的 receipt 和实际加载；
 坏 receipt 或导入失败会中止，即使选择不重启服务也不能跳过。预览只校验本地 receipt，不加载插件。
