@@ -1,0 +1,48 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.53",
+  "base": {
+    "tag": "v4.6.52",
+    "commit": "b93e092acfaccaeb43bba57dffa3b87935d1669c"
+  },
+  "reviewed_head": "4d2334990075aad1c5ba8dd130791aa9fa562e21",
+  "commits": [
+    {
+      "sha": "26a71f0124eff70752c6fad52f9e1b7867cc45c7",
+      "subject": "Release decision history read lock before attribution validation"
+    },
+    {
+      "sha": "4d2334990075aad1c5ba8dd130791aa9fa562e21",
+      "subject": "Merge pull request #1241 from liuxie066/fix/decision-history-snapshot-v4653"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "缩短成交归因读取决策历史的事务，避免解码和校验阻塞监控轮次提交。",
+      "commits": [
+        "26a71f0124eff70752c6fad52f9e1b7867cc45c7"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "4d2334990075aad1c5ba8dd130791aa9fa562e21",
+      "reason": "Merge commit integrates the reviewed change without additional code."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "26a71f0124eff70752c6fad52f9e1b7867cc45c7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1241"
+      ]
+    },
+    {
+      "commit": "4d2334990075aad1c5ba8dd130791aa9fa562e21",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1241"
+      ]
+    }
+  ]
+}
