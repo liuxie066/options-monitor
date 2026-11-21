@@ -1,0 +1,48 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.54",
+  "base": {
+    "tag": "v4.6.53",
+    "commit": "5deb31cbddd603502dd060bba349fe0b08c2d67b"
+  },
+  "reviewed_head": "f1673d168444d1067e5d4162c6e3e2b5f33c184c",
+  "commits": [
+    {
+      "sha": "98c6d5d91476e41050d4ff2a44e194bbc7d81e34",
+      "subject": "Stagger Linux maintenance timers"
+    },
+    {
+      "sha": "f1673d168444d1067e5d4162c6e3e2b5f33c184c",
+      "subject": "Merge pull request #1243 from liuxie066/fix/stagger-maintenance-timers"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Linux 每 15 分钟运行的质量刷新和状态检查错开 5 分钟，减少休市时的 CPU 叠加峰值。",
+      "commits": [
+        "98c6d5d91476e41050d4ff2a44e194bbc7d81e34"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "f1673d168444d1067e5d4162c6e3e2b5f33c184c",
+      "reason": "合并 PR #1243，变更已由实现提交对应的发布说明覆盖。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "98c6d5d91476e41050d4ff2a44e194bbc7d81e34",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1243"
+      ]
+    },
+    {
+      "commit": "f1673d168444d1067e5d4162c6e3e2b5f33c184c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1243"
+      ]
+    }
+  ]
+}
