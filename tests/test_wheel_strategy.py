@@ -413,7 +413,10 @@ def test_read_model_reprojects_position_lots_from_corrected_as_of_trade_subset(
     ]
     captured = []
 
-    def _capture(_wheel_events, trade_events, position_lots, _stock, _instant):
+    def _capture(_wheel_events, trade_events, position_lots, _stock, _instant, *,
+                 _include_projection_hash=True, _normalization_memo=None):
+        assert _include_projection_hash
+        assert _normalization_memo is None
         captured.append(
             (
                 [item["event_id"] for item in trade_events],
@@ -735,7 +738,7 @@ def test_wheel_call_currency_reason_combines_with_existing_unavailable_facts():
     assert "projected_lifecycle_net_pnl_if_called" not in result
 
 
-def test_void_removes_intent_and_linkage_rejection_from_standalone_projections() -> None:
+def test_void_removes_intent_and_linkage_rejection_from_standalone_projections(monkeypatch) -> None:
     intent = build_wheel_event(
         event_id="intent-created-1",
         account="lx",
@@ -780,44 +783,75 @@ def test_void_removes_intent_and_linkage_rejection_from_standalone_projections()
         lot_id="stock-1",
         as_of_ms=3_000,
     ) == []
-    candidates = project_wheel_call_linkage_candidates(
-        [
-            {
-                "account": "lx",
-                "symbol": "NVDA",
-                "stock_lot_id": "stock-1",
-                "lifecycle_status": "active",
-                "integrity_status": "trusted",
-                "active_call_lot_ids": [],
-                "shares_remaining": 100,
-                "batch_generation_hash": "generation-1",
-            }
-        ],
-        [
-            {
-                "record_id": "call-lot-1",
-                "fields": {
-                    "lot_id": "call-lot-1",
-                    "open_event_id": "call-open-1",
-                    "contract_key": {
-                        "broker": "富途",
-                        "account": "lx",
-                        "underlying_symbol": "NVDA",
-                        "option_type": "call",
-                        "strike": "110",
-                        "expiration_ymd": "2026-08-21",
-                        "asset_type": "option",
-                    },
-                    "position_side": "short",
-                    "status": "open",
-                    "contracts_open": 1,
-                    "multiplier": 100,
+    batches = [
+        {
+            "account": "lx",
+            "symbol": "NVDA",
+            "stock_lot_id": "stock-1",
+            "lifecycle_status": "active",
+            "integrity_status": "trusted",
+            "active_call_lot_ids": [],
+            "shares_remaining": 100,
+            "batch_generation_hash": "generation-1",
+        }
+    ]
+    lots = [
+        {
+            "record_id": "call-lot-1",
+            "fields": {
+                "lot_id": "call-lot-1",
+                "open_event_id": "call-open-1",
+                "contract_key": {
+                    "broker": "富途",
+                    "account": "lx",
+                    "underlying_symbol": "NVDA",
+                    "option_type": "call",
+                    "strike": "110",
+                    "expiration_ymd": "2026-08-21",
+                    "asset_type": "option",
                 },
-            }
-        ],
-        [rejection, void_rejection],
-    )
+                "position_side": "short",
+                "status": "open",
+                "contracts_open": 1,
+                "multiplier": 100,
+            },
+        }
+    ]
+    candidates = project_wheel_call_linkage_candidates(batches, lots, [rejection, void_rejection])
     assert len(candidates) == 1
+    revised = project_wheel_call_linkage_candidates(
+        [{**batches[0], "batch_generation_hash": "generation-2"}], lots, [rejection, void_rejection],
+    )
+    assert revised[0]["linkage_candidate_id"] == candidates[0]["linkage_candidate_id"]
+    assert revised[0]["input_snapshot_hash"] != candidates[0]["input_snapshot_hash"]
+    assert project_wheel_call_linkage_candidates(batches, lots, [rejection]) == []
+
+    from domain.domain.wheel import projection
+
+    normalize = projection.normalize_persisted_wheel_event
+    seen = []
+
+    def observe(event):
+        seen.append(event["event_id"])
+        return normalize(event)
+
+    monkeypatch.setattr(projection, "normalize_persisted_wheel_event", observe)
+    branches = [*batches, {
+        **batches[0], "direction": "put", "stock_lot_id": None,
+        "wheel_branch_id": "put-1", "remaining_contracts": 1, "multiplier": 100,
+    }]
+    put_fields = {**lots[0]["fields"], "open_event_id": "put-open-1"}
+    put_fields["contract_key"] = {**put_fields["contract_key"], "option_type": "put"}
+    option_lots = [*lots, {"record_id": "put-lot-1", "fields": put_fields}]
+    combined = projection.project_wheel_linkage_candidates(branches, option_lots, [rejection, void_rejection])
+    assert [candidate["direction"] for candidate in combined] == ["call", "put"]
+    assert combined[0]["input_snapshot_hash"] == candidates[0]["input_snapshot_hash"]
+    assert seen == [rejection["event_id"], void_rejection["event_id"]]
+    unresolved = set()
+    assert projection.project_wheel_linkage_candidates(
+        branches, option_lots, [rejection], _unresolved_branch_ids=unresolved,
+    ) == []
+    assert unresolved == {"put-1"}
 
 
 def test_wheel_put_candidate_enforces_principal_spot_and_abs_delta() -> None:

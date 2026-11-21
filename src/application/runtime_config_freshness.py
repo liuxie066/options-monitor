@@ -14,12 +14,6 @@ from src.application.config_defaults import DEFAULT_CONFIG_REF, default_config_s
 from src.application.config_primitives import file_sha256 as _file_sha256
 from src.application.config_primitives import path_for_metadata as _path_for_metadata
 from src.application.config_primitives import GENERATED_KEY, GENERATED_SCHEMA_VERSION
-from src.application.config_yaml import (
-    YAML_MARKET_USER_FINGERPRINT_KIND,
-    load_yaml_config_file,
-    market_user_config_fingerprint,
-    yaml_to_market_user_config,
-)
 
 
 RUNTIME_MARKETS = {"us", "hk"}
@@ -33,6 +27,8 @@ def configured_runtime_markets(runtime_root: Path) -> list[str]:
     """Authoring declares the expected snapshots; missing snapshots are not disabled markets."""
     source = runtime_root / "config.yaml"
     if source.exists() or source.is_symlink():
+        from src.application.config_yaml import load_yaml_config_file
+
         try:
             document = load_yaml_config_file(source)
         except (OSError, UnicodeError) as exc:
@@ -399,6 +395,13 @@ def build_inline_generated_metadata(
 def _check_yaml_effective_source(
     item: dict[str, Any], *, repo_root: Path, market: str,
 ) -> dict[str, Any] | None:
+    from src.application.config_yaml import (
+        YAML_MARKET_USER_FINGERPRINT_KIND,
+        load_yaml_config_file,
+        market_user_config_fingerprint,
+        yaml_to_market_user_config,
+    )
+
     effective = item.get("effective")
     raw_path = item.get("path")
     error = {"role": "market_user", "path": raw_path if isinstance(raw_path, str) else None}

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.application.agent_tools.diagnostics import _private_runtime_status_tool
+from src.application.trades.state_reconcile import trade_intake_preview_read_scope
 
 
 def read_runtime_status(_tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -23,4 +24,4 @@ def read_runtime_status(_tool_name: str, payload: dict[str, Any]) -> dict[str, A
     }
 
 
-__all__ = ["read_runtime_status"]
+__all__ = ["read_runtime_status", "trade_intake_preview_read_scope"]

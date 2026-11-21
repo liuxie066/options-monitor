@@ -64,7 +64,7 @@ from src.application.quality.paths import (
     default_quality_integrity_artifact_path,
 )
 from src.application.quality.runtime_checks import build_runtime_checks, runtime_verdict
-from src.application.quality.runtime_status_facade import read_runtime_status
+from src.application.quality.runtime_status_facade import read_runtime_status, trade_intake_preview_read_scope
 from src.application.runtime_config_freshness import infer_runtime_config_market
 from src.infrastructure.quality.artifact_repository import QualityArtifactRepository
 from src.infrastructure.quality.control_state_repository import QualityControlStateRepository
@@ -388,24 +388,25 @@ class OMQualityService:
         previous_positions = self._position_dataset_index(previous_payload)
         runtime_statuses: list[dict[str, Any]] = []
         runtime_errors: list[dict[str, str]] = []
-        for key, _path, _cfg, _market in configs:
-            response = self.runtime_status_fn(
-                "runtime_status",
-                {
-                    "config_key": key,
-                    "include_service_status": True,
-                },
-            )
-            data = response.get("data") if isinstance(response, dict) and isinstance(response.get("data"), dict) else None
-            if data is None:
-                runtime_errors.append(
+        with trade_intake_preview_read_scope():
+            for key, _path, _cfg, _market in configs:
+                response = self.runtime_status_fn(
+                    "runtime_status",
                     {
                         "config_key": key,
-                        "reason": str((response or {}).get("error") or "runtime_status unavailable"),
-                    }
+                        "include_service_status": True,
+                    },
                 )
-                continue
-            runtime_statuses.append(data)
+                data = response.get("data") if isinstance(response, dict) and isinstance(response.get("data"), dict) else None
+                if data is None:
+                    runtime_errors.append(
+                        {
+                            "config_key": key,
+                            "reason": str((response or {}).get("error") or "runtime_status unavailable"),
+                        }
+                    )
+                    continue
+                runtime_statuses.append(data)
 
         runtime_checks = build_runtime_checks(
             runtime_statuses=runtime_statuses,

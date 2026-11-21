@@ -90,6 +90,7 @@ def enrich_and_filter_sell_put_underwriting(
     out = df_labeled.copy()
     if strategy is not None:
         out["strategy_core"] = pd.Series([None] * len(out), index=out.index, dtype=object)
+    set_cell = out.at.__setitem__
     keep_mask: list[bool] = []
     decision_records: list[dict[str, Any]] = []
 
@@ -100,7 +101,7 @@ def enrich_and_filter_sell_put_underwriting(
         )
         if strategy is not None:
             row_payload = attach_strategy_identity(row_payload, strategy)
-            out.at[idx, "strategy_core"] = row_payload["strategy_core"]
+            set_cell((idx, "strategy_core"), row_payload["strategy_core"])
         for key in (
             "net_income_cny",
             "option_contract_point_value_cny",
@@ -123,16 +124,16 @@ def enrich_and_filter_sell_put_underwriting(
             "portfolio_risk_warnings",
         ):
             if key in row_payload:
-                out.at[idx, key] = row_payload.get(key)
+                set_cell((idx, key), row_payload[key])
         for key, value in row_payload.items():
             if key.startswith("policy_") or key == "effective_min_strike":
-                out.at[idx, key] = value
+                set_cell((idx, key), value)
         if not cfg.enabled:
             keep_mask.append(True)
             continue
         decision = evaluate_candidate_decision(row_payload, strategy=strategy)
         for key, value in decision.get("fields", {}).items():
-            out.at[idx, key] = value
+            set_cell((idx, key), value)
         opening_decision = dict(decision.get("opening_decision") or {})
         normalized_input = dict(
             opening_decision.get("normalized_input") or row_payload

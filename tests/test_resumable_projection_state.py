@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import random
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 import pytest
 
@@ -21,6 +21,7 @@ from domain.domain.strategy_membership import resolve_strategy_metadata
 from domain.domain.trade_contract_identity import derive_trade_side
 from src.application.ledger.publisher import (
     ResumablePublicationState,
+    _project_stored_trade_events_with_decoded_events,
     project_stored_trade_events_to_position_lots,
     project_stored_trade_events_to_resumable_position_lots,
 )
@@ -656,6 +657,12 @@ def test_stateful_publisher_matches_full_fields_at_every_prefix() -> None:
     assert _records_by_id(full.touched_lots) == _records_by_id(oracle.lots)
 
     for prefix_length in range(len(events) + 1):
+        read_only, _ = _project_stored_trade_events_with_decoded_events(
+            events[:prefix_length], with_publication_state=False,
+        )
+        published = project_stored_trade_events_to_position_lots(events[:prefix_length])
+        assert read_only.to_dict() == published.to_dict()
+        assert read_only.resumable_publication_state is None
         prefix = project_stored_trade_events_to_resumable_position_lots(
             events[:prefix_length],
             entry_mode="full",
@@ -1015,6 +1022,54 @@ def test_publication_state_is_canonical_and_does_not_alias_results() -> None:
     projection.active_lots[0].fields["contract_key"]["nested"] = {"value": 2}
     assert published_fields["contract_key"]["broker"] != "mutated"
     assert "nested" not in published_fields["contract_key"]
+    projection.touched_lots[0].fields["contract_key"]["broker"] = "also-mutated"
+    assert published_fields["contract_key"]["broker"] != "also-mutated"
+
+    tail = project_stored_trade_events_to_resumable_position_lots(
+        [],
+        domain_state=projection.domain_state,
+        publication_state=projection.publication_state,
+        entry_mode="tail",
+    )
+    assert tail.publication_state is not None
+    assert tail.publication_state.to_json_bytes() == projection.publication_state.to_json_bytes()
+    tail.publication_state.fields_by_lot_id["lot-a"]["contract_key"]["broker"] = "tail-mutated"
+    assert published_fields["contract_key"]["broker"] != "tail-mutated"
+
+
+@pytest.mark.parametrize("checkpoint_valid", [True, False])
+def test_read_projection_does_not_build_checkpoint_and_keeps_finalized_lots(monkeypatch, checkpoint_valid):
+    from domain.domain.ledger import projection
+
+    events = _sequence()
+    if not checkpoint_valid:
+        def reject_checkpoint(_accumulator):
+            raise ValueError("checkpoint does not represent this state")
+
+        monkeypatch.setattr(projection, "_resumable_state_from_accumulator", reject_checkpoint)
+    expected = project_stored_trade_events_to_position_lots(events)
+    assert (expected.resumable_state is not None) is checkpoint_valid
+    assert any(lot.fields["status"] == "close" for lot in expected.lots)
+
+    def fail_checkpoint(_accumulator):
+        pytest.fail("read-only projection must not build resumable state")
+
+    monkeypatch.setattr(projection, "_resumable_state_from_accumulator", fail_checkpoint)
+    actual, _ = _project_stored_trade_events_with_decoded_events(events, with_publication_state=False)
+    assert actual.resumable_state is None
+    assert actual.to_dict() == expected.to_dict()
+
+
+@pytest.mark.parametrize("with_publication_state", [True, False])
+def test_read_projection_still_renders_intermediate_lot_values(with_publication_state):
+    events = [
+        _event("open", "open", 1, key=_key(), lot_id="lot-a", price=1e25),
+        _event("restate", "adjust", 2, key=_key(), target_lot_id="lot-a", patch={"premium": 3}),
+    ]
+    with pytest.raises(InvalidOperation):
+        _project_stored_trade_events_with_decoded_events(
+            events, with_publication_state=with_publication_state,
+        )
 
 
 @pytest.mark.parametrize("event_type", ["void", "repair"])

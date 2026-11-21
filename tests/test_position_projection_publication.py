@@ -21,6 +21,7 @@ from src.application.ledger.position_records import PositionLotRecord
 from src.application.ledger.projector_implementation import (
     EXPECTED_PROJECTOR_IMPLEMENTATION_FINGERPRINT,
     ProjectorImplementationUnavailable,
+    _verify_projector_sources,
     compute_projector_implementation_fingerprint,
     loaded_projector_implementation_fingerprint,
     resolve_projector_source_root,
@@ -638,6 +639,46 @@ def test_projector_fingerprint_frames_paths_and_raw_bytes(tmp_path: Path) -> Non
     assert compute_projector_implementation_fingerprint(tmp_path) != (EXPECTED_PROJECTOR_IMPLEMENTATION_FINGERPRINT)
     with pytest.raises(ProjectorImplementationUnavailable, match="differs"):
         verify_expected_projector_implementation(tmp_path)
+
+
+def test_projector_validation_checks_new_import_paths_and_nested_calls(tmp_path: Path, monkeypatch) -> None:
+    from src.application.ledger import projector_implementation
+
+    root = resolve_projector_source_root()
+    for source in projector_implementation_manifest()["files"]:
+        target = tmp_path / source
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(root / source, target)
+
+    shadow = tmp_path / "domain/domain/ledger/events/TradeEvent.py"
+    shadow.parent.mkdir()
+    shadow.touch()
+    assert compute_projector_implementation_fingerprint(tmp_path) == EXPECTED_PROJECTOR_IMPLEMENTATION_FINGERPRINT
+    with pytest.raises(ProjectorImplementationUnavailable, match="import graph differs"):
+        _verify_projector_sources(tmp_path, exhaustive=False)
+    shadow.unlink()
+
+    publisher = tmp_path / "src/application/ledger/publisher.py"
+    original = publisher.read_bytes()
+    publisher.write_bytes(original + b'\nif False:\n    {**{}, "value": __import__("target")}\n')
+    with pytest.raises(ProjectorImplementationUnavailable, match="dynamic import is not allowed"):
+        _verify_projector_sources(tmp_path, exhaustive=False)
+
+    publisher.write_bytes(original + b"""
+if False:
+    pass
+else:
+    match 0:
+        case 1:
+            try:
+                pass
+            except* ValueError:
+                from domain.domain.symbol_identity import canonical_symbol
+""")
+    monkeypatch.setattr(projector_implementation, "EXPECTED_PROJECTOR_IMPLEMENTATION_FINGERPRINT",
+                        compute_projector_implementation_fingerprint(tmp_path))
+    with pytest.raises(ProjectorImplementationUnavailable, match="import graph differs"):
+        _verify_projector_sources(tmp_path, exhaustive=False)
 
 
 def test_full_writer_sources_use_shared_publication_and_no_full_delete() -> None:

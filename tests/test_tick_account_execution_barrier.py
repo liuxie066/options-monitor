@@ -402,8 +402,8 @@ def test_real_option_preparation_replays_fx_and_reports_tick_audit(monkeypatch, 
         for account, manifest in batches[0].manifests.items()
     }
     assert PerformanceEvidenceSQLiteRepository(paths["sy"]).read_all().fx_rates == ()
-    monkeypatch.setattr(prepared, "open_position_ledger_from_data_config", forbidden)
-    monkeypatch.setattr(prepared, "read_decision_state_rows_many", forbidden)
+    monkeypatch.setattr(prepared.ledger_api, "open_position_ledger_from_data_config", forbidden)
+    monkeypatch.setattr(prepared.ledger_api, "read_decision_state_rows_many", forbidden)
     second = mod.run_tick_account_execution(request)
     assert second.ran_pipeline_accounts == ["lx", "sy"]
     assert len(batches) == 2 and batches[1].unavailable_by_account == {}

@@ -4,10 +4,14 @@ from domain.domain.trade_execution import execution_event_action
 
 import json
 import shutil
+import sqlite3
+from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from domain.domain.trade_account_identity import ACCOUNT_ID_KEYS, norm_account_identity
 from domain.domain.trade_execution import (
@@ -23,7 +27,7 @@ from src.application.ledger.api import (
     execution_identity_from_input,
     assigned_stock_event_log,
     lifecycle_account_coherent_facts,
-    proven_lifecycle_terminal_events as _proven_lifecycle_terminal_events,
+    lifecycle_terminal_event_prover,
     stock_claim_matches_lifecycle_terminal_events as _stock_claim_matches_terminal,
     open_trade_reconciliation_evidence_repo,
 )
@@ -53,14 +57,89 @@ PENDING_LIFECYCLE_STATUSES = {
 }
 
 
+@dataclass(frozen=True)
+class _ReconciliationLedgerEvidence:
+    ledger_by_deal: dict[str, list[dict[str, Any]]]
+    assigned_stock_by_deal: dict[str, list[dict[str, Any]]]
+    lifecycle_by_deal: dict[str, list[dict[str, Any]]]
+    delegated_lifecycle_by_deal: dict[str, list[dict[str, Any]]]
+    complete: bool
+
+
+class TradeIntakePreviewObservation:
+    """Ledger evidence for one preview pair or one quality status read scope."""
+
+    def __init__(self, sqlite_path: Path, *, stack: ExitStack | None = None) -> None:
+        self.sqlite_path = sqlite_path
+        self._stack = stack
+        self._read_version: Callable[[], int] | None = None
+        self._version: int | None = None
+        self._ledger_evidence: _ReconciliationLedgerEvidence | None = None
+
+    def read_ledger_evidence(self, repo: Any) -> _ReconciliationLedgerEvidence:
+        version = None
+        if self._stack is not None:
+            try:
+                if self._read_version is None:
+                    self._read_version = self._stack.enter_context(repo.observe_data_version())
+                version = self._read_version()
+            except (OSError, ValueError, sqlite3.Error):
+                # A version or identity failure disables reuse, leaving the
+                # normal preview read responsible for reporting unavailability.
+                self._ledger_evidence = None
+                return _read_reconciliation_ledger_evidence(repo)
+        if self._ledger_evidence is not None and self._version == version:
+            return self._ledger_evidence
+        evidence = _read_reconciliation_ledger_evidence(repo)
+        if evidence.complete:
+            self._ledger_evidence = evidence
+            # Remember the generation before the read so a commit while
+            # collecting evidence forces the next caller to read again.
+            self._version = version
+        return evidence
+
+
+_PREVIEW_READ_SCOPE: ContextVar[tuple[ExitStack, dict[Path, TradeIntakePreviewObservation]] | None] = ContextVar(
+    "trade_intake_preview_read_scope", default=None,
+)
+
+
+@contextmanager
+def trade_intake_preview_read_scope() -> Iterator[None]:
+    """Share committed ledger reads for the runtime status phase of one refresh."""
+    with ExitStack() as stack:
+        token = _PREVIEW_READ_SCOPE.set((stack, {}))
+        try:
+            yield
+        finally:
+            _PREVIEW_READ_SCOPE.reset(token)
+
+
+def trade_intake_preview_observation(sqlite_path: Path) -> TradeIntakePreviewObservation:
+    scope = _PREVIEW_READ_SCOPE.get()
+    if scope is None:
+        return TradeIntakePreviewObservation(sqlite_path)
+    try:
+        path = sqlite_path.expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        return TradeIntakePreviewObservation(sqlite_path)
+    stack, observations = scope
+    if path not in observations:
+        observations[path] = TradeIntakePreviewObservation(path, stack=stack)
+    return observations[path]
+
+
 def preview_trade_intake_reconciliation_from_sqlite(
     *,
     state_path: str | Path,
     sqlite_path: str | Path,
     audit_path: str | Path | None = None,
+    _observation: TradeIntakePreviewObservation | None = None,
 ) -> dict[str, Any]:
     """Summarize stale intake state against the canonical ledger without opening a write-capable repo."""
     ledger_path = Path(sqlite_path)
+    if _observation is not None and _observation.sqlite_path.expanduser().resolve() != ledger_path.resolve():
+        raise ValueError("trade intake preview observation ledger mismatch")
     if not ledger_path.exists() or not ledger_path.is_file():
         return {
             "available": False,
@@ -76,6 +155,7 @@ def preview_trade_intake_reconciliation_from_sqlite(
         repo=open_trade_reconciliation_evidence_repo(ledger_path),
         audit_path=audit_path,
         apply_changes=False,
+        _read_ledger_evidence=_observation.read_ledger_evidence if _observation is not None else None,
     )
     actions = [item for item in result.get("actions") or [] if isinstance(item, dict)]
     terminal_count = sum(
@@ -218,6 +298,32 @@ def _pending_bucket_count(counts: dict[str, Any]) -> int:
     )
 
 
+def _read_reconciliation_ledger_evidence(repo: Any) -> _ReconciliationLedgerEvidence:
+    ledger_by_deal = _ledger_events_by_deal(repo)
+    assigned_stock = assigned_stock_event_log(repo)
+    assigned_stock_by_deal = _assigned_stock_events_by_deal(assigned_stock.events)
+    lifecycle_facts: dict[str, dict[str, Any]] = {}
+    complete = not assigned_stock.diagnostics
+
+    def read_lifecycle_facts(account: str) -> dict[str, Any]:
+        nonlocal complete
+        if account not in lifecycle_facts:
+            try:
+                lifecycle_facts[account] = lifecycle_account_coherent_facts(repo, account=account)
+            except Exception:
+                # Terminal lookup tolerates a failed account read. Retry for
+                # delegation as before, and keep this preview's result local.
+                complete = False
+                raise
+        return lifecycle_facts[account]
+
+    lifecycle_by_deal = _completed_lifecycle_cases_by_deal(repo, read_lifecycle_facts)
+    delegated_lifecycle_by_deal = _delegated_lifecycle_cases_by_deal(repo, read_lifecycle_facts)
+    return _ReconciliationLedgerEvidence(
+        ledger_by_deal, assigned_stock_by_deal, lifecycle_by_deal, delegated_lifecycle_by_deal, complete,
+    )
+
+
 def reconcile_trade_intake_state(
     *,
     state_path: str | Path,
@@ -228,7 +334,10 @@ def reconcile_trade_intake_state(
     load_state_fn: Callable[[str | Path], dict[str, Any]] = load_trade_intake_state,
     update_state_fn: Callable[..., Any] = compare_and_update_trade_intake_state_entries,
     before_state_update: Callable[..., Any] | None = None,
+    _read_ledger_evidence: Callable[[Any], _ReconciliationLedgerEvidence] | None = None,
 ) -> dict[str, Any]:
+    if _read_ledger_evidence is not None and (apply_changes or before_state_update is not None):
+        raise ValueError("shared trade intake evidence is only for read-only preview")
     state_file = Path(state_path)
     audit_file = Path(audit_path) if audit_path else None
     state = load_state_fn(state_file)
@@ -236,10 +345,11 @@ def reconcile_trade_intake_state(
     candidates = _pending_deal_ids(state, requested=requested)
     if candidates:
         audit_by_deal = _audit_events_by_deal(audit_file)
-        ledger_by_deal = _ledger_events_by_deal(repo)
-        assigned_stock_by_deal = _assigned_stock_events_by_deal(repo)
-        lifecycle_by_deal = _completed_lifecycle_cases_by_deal(repo)
-        delegated_lifecycle_by_deal = _delegated_lifecycle_cases_by_deal(repo)
+        ledger = (_read_ledger_evidence or _read_reconciliation_ledger_evidence)(repo)
+        ledger_by_deal = ledger.ledger_by_deal
+        assigned_stock_by_deal = ledger.assigned_stock_by_deal
+        lifecycle_by_deal = ledger.lifecycle_by_deal
+        delegated_lifecycle_by_deal = ledger.delegated_lifecycle_by_deal
 
     actions: list[dict[str, Any]] = []
     new_state = {
@@ -537,9 +647,11 @@ def _deal_ids_from_ledger_event(event: dict[str, Any]) -> list[str]:
     return sorted(structured_deal_keys_from_ledger_event(event))
 
 
-def _assigned_stock_events_by_deal(repo: Any) -> dict[str, list[dict[str, Any]]]:
+def _assigned_stock_events_by_deal(
+    events: tuple[dict[str, Any], ...],
+) -> dict[str, list[dict[str, Any]]]:
     out: dict[str, list[dict[str, Any]]] = {}
-    for event in assigned_stock_event_log(repo).events:
+    for event in events:
         for deal_id in _deal_ids_from_assigned_stock_event(event):
             out.setdefault(deal_id, []).append(dict(event))
     return out
@@ -552,7 +664,9 @@ def _deal_ids_from_assigned_stock_event(event: dict[str, Any]) -> list[str]:
     return sorted(structured_deal_keys_from_assigned_stock_event(event))
 
 
-def _completed_lifecycle_cases_by_deal(repo: Any) -> dict[str, list[dict[str, Any]]]:
+def _completed_lifecycle_cases_by_deal(
+    repo: Any, read_lifecycle_facts: Callable[[str], dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
     """Index only coherent anchors with fully allocated, active terminal effects."""
     list_cases = getattr(repo, "list_trade_lifecycle_cases", None)
     if not callable(list_cases):
@@ -561,18 +675,19 @@ def _completed_lifecycle_cases_by_deal(repo: Any) -> dict[str, list[dict[str, An
     out: dict[str, list[dict[str, Any]]] = {}
     for account in sorted(accounts - {""}):
         try:
-            facts = lifecycle_account_coherent_facts(repo, account=account)
+            facts = read_lifecycle_facts(account)
         except Exception:
             # Unavailable evidence never authorizes clearing a pending entry.
             continue
         cases = {row["case_id"]: row for row in facts["account_lifecycle_cases"]}
         evidence = {row["evidence_id"]: row for row in facts["account_lifecycle_evidence"]}
         claims = _dict_rows(facts.get("account_lifecycle_source_consumptions"))
+        prove_terminal = lifecycle_terminal_event_prover(facts)
         for resolution in facts["account_lifecycle_resolution"].get("case_resolutions", []):
             case = cases.get(resolution.get("case_id"))
             if not case or resolution.get("status") not in {"direct", "bridged"}:
                 continue
-            terminal = _proven_lifecycle_terminal_events(case, facts=facts)
+            terminal = prove_terminal(case)
             if not terminal:
                 continue
             terminal_types = sorted({row["event_type"] for row in terminal})
@@ -694,7 +809,9 @@ def _lifecycle_source_matches_state(entry: dict[str, Any], *, deal_id: str, stat
     return True
 
 
-def _delegated_lifecycle_cases_by_deal(repo: Any) -> dict[str, list[dict[str, Any]]]:
+def _delegated_lifecycle_cases_by_deal(
+    repo: Any, read_lifecycle_facts: Callable[[str], dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
     """Return pending lifecycle owners accepted by the canonical overlay."""
     list_cases = getattr(repo, "list_trade_lifecycle_cases", None)
     if not callable(list_cases):
@@ -718,7 +835,7 @@ def _delegated_lifecycle_cases_by_deal(repo: Any) -> dict[str, list[dict[str, An
         return {}
     out: dict[str, list[dict[str, Any]]] = {}
     for account in accounts:
-        facts = lifecycle_account_coherent_facts(repo, account=account)
+        facts = read_lifecycle_facts(account)
         cases_by_id = {
             str(item.get("case_id") or "").strip(): dict(item)
             for item in facts.get("account_lifecycle_cases") or []

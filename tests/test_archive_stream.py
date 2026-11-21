@@ -119,7 +119,10 @@ if pid:
     time.sleep(.2)
     sys.exit(0)
 signal.signal(signal.SIGTERM,signal.SIG_IGN)
-open(sys.argv[1],'w').write(str(os.getpid()))
+marker = sys.argv[1]
+with open(marker + '.tmp', 'w') as stream:
+    stream.write(str(os.getpid()))
+os.replace(marker + '.tmp', marker)
 time.sleep(10)
 """
     proc = subprocess.Popen([sys.executable, "-c", script, str(marker)], start_new_session=True)
@@ -141,7 +144,7 @@ time.sleep(10)
             assert not any(row["group"] == proc.pid for row in process_table().values())
     finally:
         try:
-            os.kill(child, signal.SIGKILL)
+            os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
 

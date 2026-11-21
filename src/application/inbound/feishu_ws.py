@@ -580,6 +580,7 @@ class _FeishuWsWorker:
                         settings=self._settings,
                         reply_fn=self._reply_fn,
                         stop_requested=self._stop_requested,
+                        _background_poll=True,
                     )
                 except Exception as exc:
                     LOG.warning("failed to recover Feishu reply error_type=%s", type(exc).__name__)
@@ -976,7 +977,15 @@ def _maybe_reply(
 
 def _retry_pending_feishu_reply(
     *, settings: FeishuWsSettings, reply_fn: ReplyFn, stop_requested: threading.Event | None = None,
+    _background_poll: bool = False,
 ) -> dict[str, Any]:
+    store = None
+    if (_background_poll and settings.reply_enabled and settings.app_id and settings.app_secret
+            and (stop_requested is None or not stop_requested.is_set())):
+        store = BotHostStore(InboundAuditStore(settings.audit_db).path)
+        # A timer poll with an empty outbox has no work requiring transport authorization.
+        if not store.has_reply_recovery_work():
+            return {"attempted": False, "reason": "outbox_empty"}
     try:
         require_inbound_channel("feishu", settings.bot_config_path)
     except AgentToolError as exc:
@@ -987,7 +996,8 @@ def _retry_pending_feishu_reply(
         return {"attempted": False, "reason": "missing_app_credentials"}
     if stop_requested is not None and stop_requested.is_set():
         return {"attempted": False, "reason": "stopped"}
-    store = BotHostStore(InboundAuditStore(settings.audit_db).path)
+    if store is None:
+        store = BotHostStore(InboundAuditStore(settings.audit_db).path)
     authorize = _feishu_reply_authorizer(settings)
     record = store.claim_reply(channel="feishu", authorize=reply_authorization_predicate(authorize))
     if record is None:

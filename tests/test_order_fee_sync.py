@@ -214,6 +214,7 @@ def _assignment_event() -> TradeEvent:
 def test_fee_sync_dry_run_is_read_only_and_apply_persists_actual_fee(
     tmp_path: Path,
     fee_amount: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo = _repo_with_bare_option_event(tmp_path)
     provider = _Provider(fee_amount=fee_amount)
@@ -233,11 +234,21 @@ def test_fee_sync_dry_run_is_read_only_and_apply_persists_actual_fee(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='broker_fee_enrichment_audit'"
         ).fetchone() is None
 
+    read_events = repo.list_trade_events
+    transactional_reads = []
+
+    def observe_read(*, conn=None):
+        if conn is not None and conn.in_transaction:
+            transactional_reads.append(conn)
+        return read_events(conn=conn)
+
+    monkeypatch.setattr(repo, "list_trade_events", observe_read)
     applied = sync_order_fees(repo, apply=True, **kwargs)
 
     event = TradeEvent.from_dict(repo.list_trade_events()[0])
     fee = fee_fact_for_event(event)
     assert applied["migration"]["status_counts"] == {"committed": 1}
+    assert not transactional_reads
     assert fee.basis.value == "actual"
     assert str(fee.amount) == fee_amount
     assert event.fees == Decimal(fee_amount)

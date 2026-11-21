@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -205,6 +206,33 @@ def _event_stock_settlement(event: dict[str, Any]) -> dict[str, Any]:
     return persisted_stock_settlement(raw)
 
 
+def _settlement_time(stock: Mapping[str, Any], event_at: int) -> int | None:
+    raw_time = stock.get("event_time_ms")
+    if raw_time is None:
+        raw_time = stock.get("trade_time_ms")
+    return _positive_integer(event_at if raw_time is None else raw_time)
+
+
+class _AssignedStockInventoryMemo:
+    """Reuse a historical inventory for identical settlement inputs in one ledger read."""
+
+    def __init__(self) -> None:
+        self.trade_facts: dict[int, tuple[dict[str, Any], str, int | None]] = {}
+        self.key: tuple[Any, ...] | None = None
+        self.inventory: dict[str, Any] | None = None
+
+    def terminal_facts(self, event: dict[str, Any]) -> tuple[str, int | None]:
+        key = id(event)
+        if key not in self.trade_facts:
+            kind = _event_close_type(event)
+            at_ms = None
+            if kind in {"assignment", "exercise"}:
+                at_ms = _settlement_time(_event_stock_settlement(event), int(_event_ts(event) or 0))
+            self.trade_facts[key] = (event, kind, at_ms)
+        _, kind, at_ms = self.trade_facts[key]
+        return kind, at_ms
+
+
 def _voided_event_ids(events: list[dict[str, Any]]) -> set[str]:
     out: set[str] = set()
     for event in events:
@@ -234,6 +262,7 @@ def _valid_void_target_event_id(event: dict[str, Any]) -> str | None:
     return target
 
 def _active_trade_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    # Lifecycle readers leave event rows intact, including shared historical rows.
     voided = _voided_event_ids(events)
     out: list[dict[str, Any]] = []
     for event in events:
@@ -242,7 +271,7 @@ def _active_trade_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         if event_id and event_id in voided:
             continue
-        out.append(dict(event))
+        out.append(event)
     return sorted(out, key=lambda x: (int(_event_ts(x) or 0), str(x.get("event_id") or "")))
 
 def _passes_report_filter(event: dict[str, Any], account_norm: str | None, broker_norm: str | None) -> bool:
@@ -582,18 +611,13 @@ def _minimum_available_shares(
 def _attribute_covered_calls(
     lots_by_id: dict[str, dict[str, Any]],
     *,
-    trade_events: list[dict[str, Any]],
+    event_by_id: dict[str, dict[str, Any]],
     option_open_lots: list[dict[str, Any]],
     assignment_option_rows: list[dict[str, Any]],
     as_of_ms: int,
     review_rows: list[dict[str, Any]],
     allocation_rows: list[dict[str, Any]],
 ) -> None:
-    event_by_id = {
-        str(event.get("event_id") or "").strip(): event
-        for event in trade_events
-        if str(event.get("event_id") or "").strip()
-    }
     realized_by_open: dict[str, list[dict[str, Any]]] = {}
     for row in assignment_option_rows:
         open_id = str(row.get("open_event_id") or "").strip()
@@ -629,20 +653,6 @@ def _attribute_covered_calls(
         open_unrealized = safe_float(call.get("unrealized_pnl_gross")) if remaining > 0 else 0.0
         economics_complete = remaining == 0 or open_unrealized is not None
         gross_pnl = _round_money(realized_gross + float(open_unrealized or 0.0))
-        fee_facts = [_option_fee_fact(open_event, component="covered_call_open_option_fee")]
-        for row in realized_rows:
-            close_event = event_by_id.get(str(row.get("event_id") or ""))
-            if close_event is None:
-                fee_facts.append({"component": "covered_call_close_option_fee", "basis": "missing", "amount": 0.0})
-                continue
-            event_contracts = max(1, int(abs(float(close_event.get("contracts") or 0))))
-            fee_facts.append(
-                _scale_fee_fact(
-                    _option_fee_fact(close_event, component="covered_call_close_option_fee"),
-                    int(row.get("contracts_closed") or 0) / event_contracts,
-                )
-            )
-
         key = (str(call.get("account") or ""), str(call.get("broker") or ""), str(call.get("symbol") or ""))
         explicit_id = _explicit_lot_id(open_event)
         candidates = [
@@ -756,6 +766,21 @@ def _attribute_covered_calls(
                 )
             )
             continue
+
+        # Only calls with a proven reservation contribute fee evidence.
+        fee_facts = [_option_fee_fact(open_event, component="covered_call_open_option_fee")]
+        for row in realized_rows:
+            close_event = event_by_id.get(str(row.get("event_id") or ""))
+            if close_event is None:
+                fee_facts.append({"component": "covered_call_close_option_fee", "basis": "missing", "amount": 0.0})
+                continue
+            event_contracts = max(1, int(abs(float(close_event.get("contracts") or 0))))
+            fee_facts.append(
+                _scale_fee_fact(
+                    _option_fee_fact(close_event, component="covered_call_close_option_fee"),
+                    int(row.get("contracts_closed") or 0) / event_contracts,
+                )
+            )
 
         reservations[lot_id] = staged_reservations[lot_id]
         lot["_covered_call_pnl"] = _round_money(float(lot.get("_covered_call_pnl") or 0.0) + gross_pnl)
@@ -1099,12 +1124,52 @@ def project_assigned_stock_lifecycle(
     broker_norm: str | None,
     month: str | None,
     as_of_ms: int | None = None,
+    _settlement_option_fees: dict[tuple[int, str], dict[str, Any]] | None = None,
+    _inventory_only: bool = False,
+    _inventory_memo: _AssignedStockInventoryMemo | None = None,
 ) -> dict[str, Any]:
+    active_trade_events = _active_trade_events(trade_events)
     event_by_id = {
         str(event.get("event_id") or "").strip(): event
-        for event in _active_trade_events(trade_events)
+        for event in active_trade_events
         if str(event.get("event_id") or "").strip()
     }
+
+    inventory_key = None
+    if _inventory_memo is not None and _inventory_only and as_of_ms is not None:
+        terminal_events = []
+        settlement_facts = []
+        for event in active_trade_events:
+            if not _passes_report_filter(event, account_norm, broker_norm):
+                continue
+            kind, settlement_at = _inventory_memo.terminal_facts(event)
+            if kind in {"assignment", "exercise"}:
+                terminal_events.append((event, kind))
+                settlement_facts.append((id(event), settlement_at is not None and settlement_at <= as_of_ms))
+        inventory_key = (
+            account_norm, broker_norm, settlement_facts,
+            tuple(id(event_by_id.get(str(row.get("open_event_id") or "").strip())) for row in assignment_option_rows),
+            assignment_option_rows, option_open_lots, assigned_stock_events,
+        )
+        if inventory_key == _inventory_memo.key and _inventory_memo.inventory is not None:
+            return deepcopy(_inventory_memo.inventory)
+    else:
+        terminal_events = (
+            (event, _event_close_type(event))
+            for event in active_trade_events
+            if _passes_report_filter(event, account_norm, broker_norm)
+        )
+
+    def settlement_option_fee(event: dict[str, Any], component: str) -> dict[str, Any]:
+        if _settlement_option_fees is None:
+            return _option_fee_fact(event, component=component)
+        # Historical callers retain these unchanged event rows for the view.
+        # Each assignment still scales a fresh copy for its own quantity.
+        key = (id(event), component)
+        if key not in _settlement_option_fees:
+            _settlement_option_fees[key] = _option_fee_fact(event, component=component)
+        return _settlement_option_fees[key]
+
     option_rows_by_event: dict[str, list[dict[str, Any]]] = {}
     for row in assignment_option_rows:
         if str(row.get("close_type") or "").strip().lower() not in {
@@ -1125,10 +1190,7 @@ def project_assigned_stock_lifecycle(
     review_rows: list[dict[str, Any]] = []
     warnings: list[str] = []
     settlement_sales: list[dict[str, Any]] = []
-    for event in _active_trade_events(trade_events):
-        if not _passes_report_filter(event, account_norm, broker_norm):
-            continue
-        lifecycle_close_type = _event_close_type(event)
+    for event, lifecycle_close_type in terminal_events:
         if lifecycle_close_type not in {"assignment", "exercise"}:
             continue
         event_id = str(event.get("event_id") or "").strip()
@@ -1185,14 +1247,7 @@ def project_assigned_stock_lifecycle(
             else None
         )
         raw_stock_fee = stock.get("fees")
-        raw_settlement_at = (
-            stock.get("event_time_ms")
-            if stock.get("event_time_ms") is not None
-            else stock.get("trade_time_ms")
-            if stock.get("trade_time_ms") is not None
-            else event_at
-        )
-        settlement_at = _positive_integer(raw_settlement_at)
+        settlement_at = _settlement_time(stock, event_at)
         if (
             not stock
             or stock_side != expected_stock_side
@@ -1401,7 +1456,7 @@ def project_assigned_stock_lifecycle(
             open_contracts = max(1, int(abs(float(source_open_event.get("contracts") or 0))))
             fee_facts.append(
                 _scale_fee_fact(
-                    _option_fee_fact(source_open_event, component=open_fee_component),
+                    settlement_option_fee(source_open_event, open_fee_component),
                     assigned_contracts / open_contracts,
                 )
             )
@@ -1410,7 +1465,7 @@ def project_assigned_stock_lifecycle(
         close_contracts = max(1, int(abs(float(event.get("contracts") or 0))))
         fee_facts.append(
             _scale_fee_fact(
-                _option_fee_fact(event, component=close_fee_component),
+                settlement_option_fee(event, close_fee_component),
                 assigned_contracts / close_contracts,
             )
         )
@@ -1689,11 +1744,26 @@ def project_assigned_stock_lifecycle(
                 sale_row[key] = lot.get(key)
         lot["_sale_rows"].append(sale_row)
 
+    if _inventory_only:
+        # Wheel history reads stock inventory and binding reviews. Covered Call
+        # allocation and valuation only add performance fields and reviews.
+        inventory = {
+            "_all_assigned_stock_lots": [
+                {key: value for key, value in lot.items() if not key.startswith("_")}
+                for lot in sorted(lots_by_id.values(), key=_assigned_stock_row_sort_key)
+            ],
+            "assigned_stock_review_rows": sorted(review_rows, key=_assigned_stock_row_sort_key),
+        }
+        if inventory_key is not None and _inventory_memo is not None:
+            _inventory_memo.key = inventory_key
+            _inventory_memo.inventory = deepcopy(inventory)
+        return inventory
+
     effective_as_of_ms = int(as_of_ms) if as_of_ms is not None else int(datetime.now(timezone.utc).timestamp() * 1000)
     covered_call_allocation_rows: list[dict[str, Any]] = []
     _attribute_covered_calls(
         lots_by_id,
-        trade_events=_active_trade_events(trade_events),
+        event_by_id=event_by_id,
         option_open_lots=option_open_lots,
         assignment_option_rows=assignment_option_rows,
         as_of_ms=effective_as_of_ms,

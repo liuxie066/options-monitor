@@ -1199,6 +1199,55 @@ def evaluate_covered_call_stock_coverage(
         "currency": selected_currency, "basis": "qualified_broker_stock_and_canonical_open_calls"}
 
 
+def _reconcile_booked_positions(
+    facts, snapshot, ref, market, pooled_cash, call_symbol, check_account_capacity, reasons,
+):
+    from collections import defaultdict
+    from decimal import Decimal
+
+    def key(contract: Mapping[str, Any], side: str, multiplier: Any, currency: Any) -> tuple[Any, ...]:
+        return (contract.get("underlying_symbol") or contract.get("symbol"), contract.get("option_type"),
+                Decimal(str(contract.get("strike"))), contract.get("expiration_ymd"), side,
+                Decimal(str(multiplier)), currency)
+
+    actual, recorded = defaultdict(int), defaultdict(int)
+    shares, call_claims, put_claims = defaultdict(Decimal), defaultdict(int), defaultdict(Decimal)
+    for row in snapshot.get("rows") or []:
+        instrument = row["instrument_ref"]
+        if not check_account_capacity and instrument["asset_type"] == "stock":
+            continue
+        if not pooled_cash and (str(instrument.get("market") or "").lower() != market
+                or instrument.get("symbol") != call_symbol):
+            continue
+        quantity = Decimal(str(row["quantity"]))
+        if (not quantity.is_finite() or quantity < 0
+                or instrument["asset_type"] == "option" and quantity != quantity.to_integral_value()):
+            raise ValueError("capacity_quantity_invalid")
+        if instrument["asset_type"] == "option":
+            actual[key(instrument, row["position_side"], instrument["multiplier"], instrument["currency"])] += int(quantity)
+        elif row["position_side"] == "long":
+            # Total observed inventory is the basis for existing obligations;
+            # can_sell_qty is not reduced by those obligations a second time.
+            shares[instrument["symbol"]] += quantity
+    for item in facts:
+        if item["contracts_open"] <= 0 or (not pooled_cash and item["contract_key"]["underlying_symbol"] != call_symbol):
+            continue
+        if item.get("broker_account_ref") != ref:
+            reasons.add("ledger_capacity_account_unproven")
+            continue
+        contract = item["contract_key"]
+        recorded[key(contract, item["position_side"], item["multiplier"], item["currency"])] += item["contracts_open"]
+        if item["position_side"] == "short":
+            quantity = contract_share_quantity(item["contracts_open"], item["multiplier"])
+            if contract["option_type"] == "call":
+                call_claims[contract["underlying_symbol"]] += quantity
+            else:
+                put_claims[item["currency"]] += Decimal(str(contract["strike"])) * quantity
+    if dict(actual) != dict(recorded):
+        reasons.add("broker_ledger_positions_mismatch")
+    return shares, call_claims, put_claims
+
+
 def evaluate_booked_option_capacity(
     *, fact: Mapping[str, Any], facts: Sequence[Mapping[str, Any]],
     snapshot: Mapping[str, Any], wheel_read_model: Mapping[str, Any],
@@ -1206,6 +1255,7 @@ def evaluate_booked_option_capacity(
     convert_currency: Callable[[float, str, str], float | None], fx_status: str | None,
     consumed_reservation: Mapping[str, Any] | None = None,
     check_account_capacity: bool = True,
+    _booked_positions: dict | None = None,
 ) -> dict[str, Any]:
     """Reconcile booked obligations and assess capacity from qualified evidence.
 
@@ -1215,7 +1265,6 @@ def evaluate_booked_option_capacity(
     evidence is not a proven shortage. ``cash_usable=None`` retains an invalid
     cash qualification until cash is actually needed, after reconciliation.
     """
-    from collections import defaultdict
     from decimal import Decimal
     from domain.domain.symbol_identity import symbol_market
     from domain.domain.wheel.intents import attribution_reservation_claims
@@ -1226,48 +1275,23 @@ def evaluate_booked_option_capacity(
     pooled_cash = fact["contract_key"]["option_type"] == "put"
     call_symbol = fact["contract_key"]["underlying_symbol"] if not pooled_cash else None
 
-    def key(contract: Mapping[str, Any], side: str, multiplier: Any, currency: Any) -> tuple[Any, ...]:
-        return (contract.get("underlying_symbol") or contract.get("symbol"), contract.get("option_type"),
-                Decimal(str(contract.get("strike"))), contract.get("expiration_ymd"), side,
-                Decimal(str(multiplier)), currency)
-
     evidence_complete = False
     try:
-        actual, recorded = defaultdict(int), defaultdict(int)
-        shares, call_claims, put_claims = defaultdict(Decimal), defaultdict(int), defaultdict(Decimal)
-        for row in snapshot.get("rows") or []:
-            instrument = row["instrument_ref"]
-            if not check_account_capacity and instrument["asset_type"] == "stock":
-                continue
-            if not pooled_cash and (str(instrument.get("market") or "").lower() != market
-                    or instrument.get("symbol") != call_symbol):
-                continue
-            quantity = Decimal(str(row["quantity"]))
-            if (not quantity.is_finite() or quantity < 0
-                    or instrument["asset_type"] == "option" and quantity != quantity.to_integral_value()):
-                raise ValueError("capacity_quantity_invalid")
-            if instrument["asset_type"] == "option":
-                actual[key(instrument, row["position_side"], instrument["multiplier"], instrument["currency"])] += int(quantity)
-            elif row["position_side"] == "long":
-                # Total observed inventory is the basis for existing obligations;
-                # can_sell_qty is not reduced by those obligations a second time.
-                shares[instrument["symbol"]] += quantity
-        for item in facts:
-            if item["contracts_open"] <= 0 or (not pooled_cash and item["contract_key"]["underlying_symbol"] != call_symbol):
-                continue
-            if item.get("broker_account_ref") != ref:
-                reasons.add("ledger_capacity_account_unproven")
-                continue
-            contract = item["contract_key"]
-            recorded[key(contract, item["position_side"], item["multiplier"], item["currency"])] += item["contracts_open"]
-            if item["position_side"] == "short":
-                quantity = contract_share_quantity(item["contracts_open"], item["multiplier"])
-                if contract["option_type"] == "call":
-                    call_claims[contract["underlying_symbol"]] += quantity
-                else:
-                    put_claims[item["currency"]] += Decimal(str(contract["strike"])) * quantity
-        if dict(actual) != dict(recorded):
-            reasons.add("broker_ledger_positions_mismatch")
+        # The view owns one facts list and one broker snapshot. A standalone
+        # evaluation, including write revalidation, reconciles them afresh.
+        cache_key = None
+        if _booked_positions is not None and all(type(value) in (str, type(None)) for value in ref.values()):
+            cache_key = (check_account_capacity, pooled_cash, call_symbol, frozenset(ref.items()))
+        booked = _booked_positions.get(cache_key) if cache_key is not None else None
+        if booked is None:
+            shares, call_claims, put_claims = _reconcile_booked_positions(
+                facts, snapshot, ref, market, pooled_cash, call_symbol, check_account_capacity, reasons,
+            )
+            if cache_key is not None:
+                _booked_positions[cache_key] = (shares, call_claims, put_claims, tuple(reasons))
+        else:
+            shares, call_claims, put_claims, booked_errors = booked
+            reasons.update(booked_errors)
         if reasons or not check_account_capacity:
             # Combo membership records existing fills, not permission to open more risk.
             return {"status": "available" if not reasons else "unavailable", "reason_codes": sorted(reasons),
@@ -1275,6 +1299,9 @@ def evaluate_booked_option_capacity(
         reserved_calls, reserved_puts = attribution_reservation_claims(
             fact=fact, wheel_read_model=wheel_read_model, consumed_reservation=consumed_reservation,
         )
+        if cache_key is not None:
+            call_claims = call_claims.copy()
+            put_claims = put_claims.copy()
         for symbol, quantity in reserved_calls.items():
             call_claims[symbol] += quantity
         for currency, amount in reserved_puts.items():
@@ -1282,7 +1309,7 @@ def evaluate_booked_option_capacity(
         if fact["contract_key"]["option_type"] == "call":
             symbol = fact["contract_key"]["underlying_symbol"]
             evidence_complete = True
-            if call_claims[symbol] > shares[symbol]:
+            if call_claims[symbol] > shares.get(symbol, 0):
                 reasons.add("account_stock_capacity_exceeded")
         else:
             if cash_usable is None:

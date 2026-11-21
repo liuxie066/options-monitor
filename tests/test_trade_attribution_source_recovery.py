@@ -165,6 +165,38 @@ def test_source_coordinator_binds_each_market_to_its_own_generated_config(tmp_pa
     assert set(cursors) == {"lx:us", "lx:hk"}
 
 
+@pytest.mark.parametrize("new_commit", [False, True])
+def test_source_market_reuses_discovery_observation_only_if_unchanged(tmp_path, monkeypatch, new_commit):
+    from src.application.ledger import trade_attribution as ledger_attribution
+
+    repo, config, runtime_root = _ledger_fixture(tmp_path, monkeypatch)
+    _stub_provider_boundaries(monkeypatch)
+    _write_runtime_config(tmp_path, runtime_root, market="hk", document=_source_document())
+    original = ledger_attribution.read_trade_attribution_snapshot
+    calls = []
+
+    def observed(*args, **kwargs):
+        calls.append(kwargs["market"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(ledger_attribution, "read_trade_attribution_snapshot", observed)
+    if new_commit:
+        discover = attribution_mod._attribution_recoverable_markets
+
+        def commit_after_discovery(facts):
+            markets = discover(facts)
+            with repo._writer_connection(begin_immediate=True) as conn:
+                conn.execute("CREATE TABLE test_concurrent_refresh (marker INTEGER)")
+            return markets
+
+        monkeypatch.setattr(attribution_mod, "_attribution_recoverable_markets", commit_after_discovery)
+
+    recovery = _run_coordinator(repo, config, runtime_root, combo_mode="off", cursors={})
+    assert recovery["lx"]["us"]["checked"] > 0
+    assert recovery["lx"]["hk"]["checked"] > 0
+    assert calls == (["us", "us", "hk"] if new_commit else ["us", "hk"])
+
+
 @pytest.mark.parametrize("failure,fragment", [
     ("missing", "runtime config not found"),
     ("stale", "runtime config is stale"),

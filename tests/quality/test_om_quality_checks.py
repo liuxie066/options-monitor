@@ -1722,6 +1722,8 @@ def _trade_intake_datasets(
 def test_trade_intake_audit_reconciliation_prevents_unrepairable_terminal_fail(
     tmp_path: Path,
 ) -> None:
+    from src.application.agent_tools.runtime_status_impl import _trade_intake_reconciliation_summaries
+
     state_path = tmp_path / "state.json"
     state = {
         "processed_deal_ids": {},
@@ -1760,6 +1762,19 @@ def test_trade_intake_audit_reconciliation_prevents_unrepairable_terminal_fail(
     )
     assert no_audit["pending_after_reconcile_count"] == 1
     assert with_audit["pending_after_reconcile_count"] == 0
+    args = {
+        "state_path": state_path,
+        "audit_path": audit_path,
+        "ledger_store": {"sqlite_path": str(ledger_path)},
+    }
+    paired = _trade_intake_reconciliation_summaries(**args)
+    assert paired["pending_after_reconcile_count"] == 1
+    assert paired["audit_reconciliation"]["pending_after_reconcile_count"] == 0
+    audit_path.write_bytes(b"\xff")
+    invalid_audit = _trade_intake_reconciliation_summaries(**args)
+    assert invalid_audit["pending_after_reconcile_count"] == 1
+    assert invalid_audit["audit_reconciliation"]["available"] is False
+    assert "UnicodeDecodeError" in invalid_audit["audit_reconciliation"]["reason"]
 
     datasets = _trade_intake_datasets(
         tmp_path=tmp_path,
@@ -1861,22 +1876,28 @@ def test_trade_intake_uses_embedded_state_for_pending_age(tmp_path: Path) -> Non
     ("other_physical", "INTAKE_PENDING_OVERDUE"),
 ])
 def test_trade_intake_pending_quality_uses_verified_execution_identity(
-    tmp_path: Path, scenario: str, reason: str,
+    tmp_path: Path, scenario: str, reason: str, monkeypatch,
 ) -> None:
     from tests.test_trades_state_reconcile import _pending_lifecycle_identity_fixture
-    from src.application.agent_tools.runtime_status_impl import (
-        _trade_intake_audit_reconciliation_summary,
-        _trade_intake_reconciliation_summary,
-    )
+    from src.application.agent_tools.runtime_status_impl import _trade_intake_reconciliation_summaries
+    from src.application.trades import state_reconcile
 
     state_path, ledger_path = _pending_lifecycle_identity_fixture(tmp_path, scenario)
     before = {path: path.read_bytes() for path in (state_path, ledger_path)}
     store = {"sqlite_path": str(ledger_path)}
-    summary = _trade_intake_reconciliation_summary(state_path=state_path, ledger_store=store)
-    summary.update(pending_count=1, failed_count=0, unresolved_count=1)
-    summary["audit_reconciliation"] = _trade_intake_audit_reconciliation_summary(
+    reads = []
+    original = state_reconcile.lifecycle_account_coherent_facts
+
+    def counted(repo, *, account):
+        reads.append(account)
+        return original(repo, account=account)
+
+    monkeypatch.setattr(state_reconcile, "lifecycle_account_coherent_facts", counted)
+    summary = _trade_intake_reconciliation_summaries(
         state_path=state_path, audit_path=tmp_path / "absent-audit.jsonl", ledger_store=store,
     )
+    assert reads == ["lx"]
+    summary.update(pending_count=1, failed_count=0, unresolved_count=1)
     datasets = build_trade_intake_datasets(
         runtime_statuses=[{"trade_intake": {"enabled": True, "sources": [{
             "id": "fixture", "account": "lx", "enabled": True,
@@ -1891,6 +1912,48 @@ def test_trade_intake_pending_quality_uses_verified_execution_identity(
     assert pending["reason_code"] == reason
     assert pending["status"] == ("pass" if reason == "INTAKE_PENDING_CLEAR" else "fail")
     assert {path: path.read_bytes() for path in before} == before
+
+
+def test_quality_status_scope_reuses_unchanged_ledger_and_reloads_after_commit(tmp_path, monkeypatch):
+    from src.application.agent_tools.runtime_status_impl import _trade_intake_reconciliation_summaries
+    from src.application.quality.runtime_status_facade import trade_intake_preview_read_scope
+    from src.application.trades import state_reconcile
+    from tests.test_trades_state_reconcile import _pending_lifecycle_identity_fixture
+
+    state_path, ledger_path = _pending_lifecycle_identity_fixture(tmp_path, "canonical")
+    other_root = tmp_path / "other"
+    other_root.mkdir()
+    other_state, other_ledger = _pending_lifecycle_identity_fixture(other_root, "other_physical")
+    reads = []
+    original = state_reconcile.lifecycle_account_coherent_facts
+
+    def counted(repo, *, account):
+        reads.append(repo.db_path)
+        return original(repo, account=account)
+
+    monkeypatch.setattr(state_reconcile, "lifecycle_account_coherent_facts", counted)
+
+    def summary(state, ledger):
+        return _trade_intake_reconciliation_summaries(
+            state_path=state, audit_path=state.parent / "absent-audit.jsonl",
+            ledger_store={"sqlite_path": str(ledger)},
+        )
+
+    with trade_intake_preview_read_scope():
+        us = summary(state_path, ledger_path)
+        assert summary(state_path, ledger_path) == us
+        assert reads == [ledger_path.resolve()]
+        hk_other = summary(other_state, other_ledger)
+        assert hk_other["delegated_lifecycle_pending_count"] == 0
+        assert reads == [ledger_path.resolve(), other_ledger.resolve()]
+        with sqlite3.connect(ledger_path) as conn:
+            conn.execute("CREATE TABLE test_quality_scope_commit(value INTEGER)")
+        assert summary(state_path, ledger_path) == us
+        assert reads[-1] == ledger_path.resolve() and len(reads) == 3
+
+    with trade_intake_preview_read_scope():
+        assert summary(state_path, ledger_path) == us
+    assert reads[-2:] == [ledger_path.resolve(), ledger_path.resolve()]
 
 
 def test_trade_intake_does_not_trust_state_only_lifecycle_delegation(

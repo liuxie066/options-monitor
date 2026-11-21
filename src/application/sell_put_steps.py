@@ -141,15 +141,19 @@ def run_sell_put_scan_and_summarize(
             resolved_strategy=strategy,
         )
 
+    candidate_records = None
     if final_candidates_sink_fn is not None:
+        candidate_records = df_sp_lab.to_dict("records")
         final_candidates_sink_fn(
             "put",
-            [dict(item) for item in df_sp_lab.to_dict("records")],
+            [dict(item) for item in candidate_records],
         )
     if candidate_decisions_sink_fn is not None:
         candidate_decisions_sink_fn("put", candidate_decisions)
 
-    summary = summarize_sell_put(df_sp_lab, symbol, symbol_cfg=symbol_cfg)
+    summary = summarize_sell_put(
+        df_sp_lab, symbol, symbol_cfg=symbol_cfg, candidate_records=candidate_records,
+    )
     evidence = evidence_summary_from_decisions(
         decisions=candidate_decisions,
         accepted_count=len(df_sp_lab),

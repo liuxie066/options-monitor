@@ -8,7 +8,7 @@ from src.application.ledger.api import (
     compare_projection_lots,
     execution_identity_from_input,
     lifecycle_account_coherent_facts,
-    proven_lifecycle_terminal_events,
+    lifecycle_terminal_event_prover,
     stock_claim_matches_lifecycle_terminal_events,
     project_trade_event_log,
     trade_event_log,
@@ -87,8 +87,9 @@ def _proven_lifecycle_stock_event_ids(repo: Any, events: list[dict[str, Any]]) -
         try:
             snapshot_groups = _stock_source_groups(active_ledger_events(facts["trade_events"]))
             claims = facts.get("account_lifecycle_source_consumptions") or []
+            prove_terminal = lifecycle_terminal_event_prover(facts)
             for case in facts.get("account_lifecycle_cases") or []:
-                terminal = proven_lifecycle_terminal_events(case, facts=facts)
+                terminal = prove_terminal(case)
                 if not terminal:
                     continue
                 for claim in claims:

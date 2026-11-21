@@ -6,6 +6,7 @@ import json
 import sqlite3
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -251,6 +252,8 @@ def test_readonly_sqlite_preview_reports_terminal_evidence_without_writing_state
 def test_readonly_sqlite_preview_delegates_canonical_lifecycle_pending(
     tmp_path: Path,
 ) -> None:
+    from src.application.trades import state_reconcile
+
     state_path = tmp_path / "state.json"
     source_key = "futu:lx:1001:deal-option-waiting"
     _write_state(
@@ -393,10 +396,15 @@ def test_readonly_sqlite_preview_delegates_canonical_lifecycle_pending(
                 ),
             )
 
-    out = preview_trade_intake_reconciliation_from_sqlite(
-        state_path=state_path,
-        sqlite_path=ledger_path,
-    )
+    with patch.object(
+        state_reconcile, "lifecycle_account_coherent_facts",
+        wraps=state_reconcile.lifecycle_account_coherent_facts,
+    ) as read_facts:
+        out = preview_trade_intake_reconciliation_from_sqlite(
+            state_path=state_path,
+            sqlite_path=ledger_path,
+        )
+        assert [call.kwargs["account"] for call in read_facts.call_args_list] == ["lx"]
 
     assert out["available"] is True
     assert out["delegated_lifecycle_pending_count"] == 1
@@ -1577,6 +1585,41 @@ def _completed_canonical_repo(*, bridge=False, terminal_type="expire_close"):
             "referenced_legacy_case_id": "legacy", "referenced_legacy_evidence_id": "anchor", "allocating": False})
     return FakeRepo([event], lifecycle_cases=cases, lifecycle_evidence=evidences,
         lifecycle_allocations=[allocation], lifecycle_source_consumptions=[claim], position_lots=[_position_lot("lot-1")])
+
+
+@pytest.mark.parametrize("duplicate", ["none", "active", "voided"])
+def test_terminal_prover_indexes_active_events_once(duplicate):
+    from src.application.ledger.api import (
+        lifecycle_account_coherent_facts, lifecycle_terminal_event_prover,
+        proven_lifecycle_terminal_events,
+    )
+
+    class ObservedEvents(list):
+        reads = 0
+
+        def __iter__(self):
+            self.reads += 1
+            return super().__iter__()
+
+    repo = _completed_canonical_repo(bridge=True)
+    facts = lifecycle_account_coherent_facts(repo, account="lx")
+    case = facts["account_lifecycle_cases"][0]
+    rows = list(facts["trade_events"])
+    if duplicate != "none":
+        unrelated = {"event_id": "unrelated", "event_type": "open"}
+        rows.extend([unrelated, dict(unrelated)])
+        if duplicate == "voided":
+            facts["effective_void_event_ids"] = {"unrelated"}
+    facts["trade_events"] = rows
+    expected = proven_lifecycle_terminal_events(case, facts=facts)
+    assert expected == ([] if duplicate == "active" else list(repo.events))
+
+    observed = ObservedEvents(rows)
+    prove = lifecycle_terminal_event_prover({**facts, "trade_events": observed})
+    assert prove({**case, "target_contracts_by_lot": {"lot-1": 2}}) == []
+    assert observed.reads == 0
+    assert prove(case) == prove(case) == expected
+    assert observed.reads == 1
 
 
 @pytest.mark.parametrize("bridge", [False, True])

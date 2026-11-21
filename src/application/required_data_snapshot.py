@@ -1277,13 +1277,25 @@ def _ready_manifest_entry(
         raise RequiredDataSnapshotError(
             f"{symbol} resolver contract evidence mismatch"
         )
+    coverage = evidence.get("required_data_coverage")
     if read_source == "canonical_blob":
-        projection_scope._validate(
-            validated["payload_sha256"],
-            raw_payload=raw_payload,
-            required_data_csv_bytes=csv_bytes,
-            expected_fetch_contract=contract,
-        )
+        payload_hash = validated["payload_sha256"]
+        if (
+            evidence.get("read_source") == "canonical_blob"
+            and evidence.get("scan_blob_ref") == scan_blob_ref
+            and evidence.get("payload_sha256") == payload_hash
+            and "required_data_coverage" in evidence
+        ):
+            # The resolver already projected these bytes. The fresh receipt and
+            # blob reads above bind the same bytes and fetch contract.
+            projection_scope._coverage[payload_hash] = deepcopy(coverage)
+        else:
+            coverage = projection_scope._validate(
+                payload_hash,
+                raw_payload=raw_payload,
+                required_data_csv_bytes=csv_bytes,
+                expected_fetch_contract=contract,
+            )
     else:
         _validate_canonical_bundle_candidate(
             root=root,
@@ -1327,7 +1339,6 @@ def _ready_manifest_entry(
         entry["scan_blob_ref"] = scan_blob_ref
     if reason_code:
         entry["reason_code"] = reason_code
-    coverage = evidence.get("required_data_coverage")
     if isinstance(coverage, Mapping) and coverage.get("status") == "partial":
         entry["required_data_coverage"] = dict(coverage)
     return entry

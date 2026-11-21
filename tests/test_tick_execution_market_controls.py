@@ -108,7 +108,7 @@ def test_spot_owner_preserves_earlier_deadline_across_endpoints(
     assert len(calls) == len(retries) == 2
     assert all(item["deadline"] == expected_stop and item["cancelled"] is cancelled for item in calls)
     assert all(item["deadline"] == expected_stop and item["cancelled"] is cancelled for item in retries)
-    assert all(item["max_wait_sec"] <= min(deadline_offset, stop_offset) for item in calls)
+    assert all(item["max_wait_sec"] == expected_stop - started for item in calls)
     assert gateway_calls == [
         ("snapshot", {"deadline": expected_stop, "cancelled": cancelled}),
         ("state", {"deadline": expected_stop, "cancelled": cancelled}),

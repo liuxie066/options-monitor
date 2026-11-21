@@ -245,13 +245,18 @@ def lot_id_for_open_event(event: TradeEvent | Mapping[str, Any]) -> str:
     Mappings carry the same canonical fields as TradeEvent.to_dict(); legacy
     aliases are consistency evidence, never an alternative identity source.
     """
-    row = ({"event_id": event.event_id, "lot_id": event.lot_id,
-            "raw_payload": event.raw_payload} if isinstance(event, TradeEvent) else event)
-    event_id = _clean_optional_id(row.get("event_id"))
+    if isinstance(event, TradeEvent):
+        event_id, lot_id, payload = event.event_id, event.lot_id, event.raw_payload
+    else:
+        event_id = _clean_optional_id(event.get("event_id"))
+        if not event_id:
+            raise ValueError("event_id_required")
+        lot_id = _clean_optional_id(event.get("lot_id"))
+        payload = event.get("raw_payload")
     if not event_id:
         raise ValueError("event_id_required")
-    lot_id = _clean_optional_id(row.get("lot_id")) or f"lot_{event_id}"
-    payload = row.get("raw_payload") or {}
+    lot_id = lot_id or f"lot_{event_id}"
+    payload = payload or {}
     if not isinstance(payload, Mapping):
         raise ValueError("lot_identity_payload_invalid")
     for field in ("record_id", "lot_record_id", "lot_id"):
