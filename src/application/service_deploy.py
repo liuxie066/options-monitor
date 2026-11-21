@@ -1690,7 +1690,14 @@ def render_service_bundle(
         )
         add(
             f"systemd/{status_timer}",
-            _systemd_timer(description="Options Monitor runtime status timer", unit_name=status_service, interval="15min"),
+            _systemd_timer(
+                description="Options Monitor runtime status timer",
+                unit_name=status_service,
+                calendar="*-*-* *:05,20,35,50:00 UTC",
+                accuracy_sec="1s",
+                randomized_delay_sec=0,
+                persistent=False,
+            ),
             install_path=f"/etc/systemd/system/{status_timer}",
             kind="systemd_timer",
             service_name=status_timer,
@@ -1730,7 +1737,10 @@ def render_service_bundle(
                 _systemd_timer(
                     description="Options Monitor regular quality artifact refresh timer",
                     unit_name=quality_refresh_service,
-                    interval=QUALITY_REFRESH_INTERVAL_SYSTEMD,
+                    calendar="*-*-* *:00,15,30,45:00 UTC",
+                    accuracy_sec="1s",
+                    randomized_delay_sec=0,
+                    persistent=False,
                 ),
                 install_path=f"/etc/systemd/system/{quality_refresh_timer}",
                 kind="systemd_timer",
