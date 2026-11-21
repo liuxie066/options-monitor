@@ -204,6 +204,10 @@ class _BriefHistoryObservation(DailyBriefReadScope):
         self._store = DecisionHistoryStore(history_path(self._identity[0]))
         self._stack = stack
         self._connection = None
+        self._snapshot = None
+        self._snapshot_error: Exception | None = None
+        self._delivery_raw: Any = _MISSING
+        self._delivery_read_error: Exception | None = None
         self._payloads: dict[tuple, Any] = {}
         self._payload_hashes: dict[int, tuple[Any, str]] = {}
         # Only keys: do not keep evicted cache values alive through this observation.
@@ -220,12 +224,49 @@ class _BriefHistoryObservation(DailyBriefReadScope):
             self._connection = self._stack.enter_context(self._store.connect())
         return self._connection
 
+    def capture(self, market_dates: Iterable[str]) -> None:
+        base, account, market = self._identity
+        path = _delivery_path(base, account, market)
+        dates = set(market_dates)
+        try:
+            self._delivery_raw = _read_json_strict(path)
+        except (DailyDecisionBriefStateError, UnicodeError) as exc:
+            # Surface file errors only if the batch reaches delivery validation.
+            self._delivery_read_error = exc
+        if isinstance(self._delivery_raw, Mapping):
+            raw_days = self._delivery_raw.get("days")
+            if isinstance(raw_days, Mapping):
+                for day in raw_days:
+                    try:
+                        dates.add(_normalize_market_date(day))
+                    except ValueError:
+                        pass  # The delivery validator reports malformed dates.
+        try:
+            self._snapshot = self._store.snapshot_rows(account=account, market=market, market_dates=sorted(dates))
+        except (DecisionHistoryError, OSError) as exc:
+            self._snapshot_error = exc
+
+    def delivery_raw(self, path: Path) -> Any:
+        if self._snapshot is None:
+            return _read_json_strict(path)
+        if self._delivery_read_error is not None:
+            raise self._delivery_read_error
+        return self._delivery_raw
+
     def payload(self, *, market_date: str | None, revision: int | None, successful: bool) -> Any:
         key = (market_date, revision, successful)
         if key not in self._payloads:
-            row = self._store.get(account=self._identity[1], market=self._identity[2],
-                                  market_date=market_date, revision=revision, successful=successful,
-                                  conn=self.connection(), _payload_only=True)
+            if self._snapshot_error is not None:
+                raise self._snapshot_error
+            if self._snapshot is None:
+                row = self._store.get(account=self._identity[1], market=self._identity[2],
+                                      market_date=market_date, revision=revision, successful=successful,
+                                      conn=self.connection(), _payload_only=True)
+            else:
+                if market_date is None or revision is None:
+                    raise DecisionHistoryError("history_snapshot_requires_revision")
+                raw = self._snapshot.get(market_date, {}).get(revision)
+                row = self._store.decode(raw, _payload_only=True) if raw is not None and (not successful or raw["successful"]) else None
             self._payloads[key] = row["payload"] if row else None
             if row is not None:
                 # decode already verified this hash; the private raw payload stays read-only.
@@ -236,6 +277,10 @@ class _BriefHistoryObservation(DailyBriefReadScope):
         return raw if raw is not None else _MISSING
 
     def revisions(self, market_date: str) -> list[int]:
+        if self._snapshot_error is not None:
+            raise self._snapshot_error
+        if self._snapshot is not None:
+            return list(self._snapshot.get(market_date, {}))
         if market_date not in self._revisions:
             self._revisions[market_date] = self._store.revisions(
                 account=self._identity[1], market=self._identity[2], market_date=market_date,
@@ -276,15 +321,18 @@ def _observed_source_content_hash(raw: Any) -> str:
 
 
 @contextmanager
-def _brief_history_observation(*, base: Path, account: str, market: str) -> Iterator[_BriefHistoryObservation]:
+def _brief_history_observation(*, base: Path, account: str, market: str,
+                               market_dates: Iterable[str] | None = None) -> Iterator[_BriefHistoryObservation]:
     current = _BRIEF_HISTORY_OBSERVATION.get()
-    if current is not None and current.matches(base=base, account=account, market=market):
+    if market_dates is None and current is not None and current.matches(base=base, account=account, market=market):
         yield current
         return
     with ExitStack() as stack:
         observation = _BriefHistoryObservation(base=base, account=account, market=market, stack=stack)
         token = _BRIEF_HISTORY_OBSERVATION.set(observation)
         try:
+            if market_dates is not None:
+                observation.capture(market_dates)
             yield observation
         finally:
             observation._validated_sources.clear()
@@ -1040,7 +1088,12 @@ def read_daily_decision_brief_delivery_state(
         from src.application.receipt_query import read_receipt_json
         raw = read_receipt_json(path)
     else:
-        raw = _read_json_strict(path)
+        observation = _BRIEF_HISTORY_OBSERVATION.get()
+        raw = (
+            observation.delivery_raw(path)
+            if observation is not None and observation.matches(base=base_path, account=account_norm, market=market_norm)
+            else _read_json_strict(path)
+        )
     if raw is _MISSING:
         return {"available": False, "reason": "not_found", "state": None, "path": path}
     try:
@@ -1778,14 +1831,16 @@ def read_combo_candidate_exposures_batch(
 ) -> dict[str, dict[str, Any]]:
     """Observe one account/market's requested dates in one read-only operation.
 
-    Delivery bytes and referenced sources are validated once against one history
-    transaction. Only requested revisions and delivery references are decoded.
+    Raw history for requested dates and dates referenced by delivery state is
+    copied from one snapshot. Decode and validation run after the transaction closes.
     Already validated source normalization is reused with independent result copies.
     No observation survives this call; independent readers always observe anew.
     """
     identity = dict(base=Path(base).resolve(), account=_normalize_account(account), market=_normalize_market(market))
     dates = list(dict.fromkeys(_normalize_market_date(day) for day in market_trading_dates))
-    with _brief_history_observation(**identity) as observation:
+    if not dates:
+        return {}
+    with _brief_history_observation(**identity, market_dates=dates) as observation:
         return {day: read_combo_candidate_exposures(
             **identity, market_trading_date=day, read_scope=observation) for day in dates}
 
