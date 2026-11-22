@@ -242,6 +242,8 @@ def managed_transition(monkeypatch, transition, request, managed_python):
             return _offline_import(command, **kwargs)
         if "-c" in command and "read_managed_plugin" in command[command.index("-c") + 1]:
             assert command[0] == str(upgrade._release_python(target))
+            assert kwargs.get("timeout") == 180
+            assert "sys.dont_write_bytecode = True" in command[command.index("-c") + 1]
             validation_commands.append(command)
             events.append("managed_validate")
             # Run the actual isolated target import check, with the validated test interpreter.
@@ -257,12 +259,12 @@ def managed_transition(monkeypatch, transition, request, managed_python):
             _python_proxy(Path(command[-1]) / "bin/python", target_interpreter["python"])
         return result
 
-    def run(*, confirm=True):
+    def run(*, confirm=True, plugin_asset_dir=None):
         run_state["upgrading"] = True
         try:
             return upgrade.service_upgrade(
                 repo_root=current, runtime_root=runtime, releases_root=target.parent, cache_root=current.parent / "cache",
-                target_version="1.0.1", confirm=confirm, run_cmd=runner,
+                target_version="1.0.1", confirm=confirm, run_cmd=runner, plugin_asset_dir=plugin_asset_dir,
             )
         finally:
             run_state["upgrading"] = False
@@ -379,7 +381,9 @@ def test_managed_channels_exclude_source_flags_without_losing_other_pip_selectio
     other = "wechat" if plugin_id == "feishu" else "feishu"
     assert read_managed_plugin(ctx.target, other) is None
     for name in ("feishu", "wechat"):
-        commands = [cmd for cmd in ctx.offline.commands if "install" in cmd and f"./plugins/{name}-channel" in cmd]
+        source = f"./plugins/{name}-channel"
+        commands = [cmd for cmd in ctx.offline.commands if "install" in cmd and
+                    (source in cmd or ctx.offline.source_wheels.get(cmd[-1]) == source)]
         assert bool(commands) is (name == other and other_pip)
     assert ctx.events.index("managed_validate") < ctx.events.index("configs") < ctx.events.index("switch")
 
@@ -577,6 +581,56 @@ def test_managed_upgrade_preview_never_installs(managed_transition):
     assert read_managed_plugin(ctx.target, "pm") is None
     assert _inventory(plugin_store(ctx.previous)) == before
     assert ctx.requests == [] and ctx.events == []
+
+
+@pytest.mark.parametrize("damage", [None, "catalog", "wheel", "missing"])
+def test_managed_upgrade_imports_verified_local_assets(managed_transition, tmp_path, monkeypatch, damage):
+    ctx = managed_transition
+    # Emulate a resumed upgrade. The online path already installed the target market plugin.
+    ctx.install("market-opend", ctx.target)
+    ctx.install("pm")
+    catalog_url, catalog = next(
+        (url, data) for url, data in ctx.downloads.items() if url.endswith("/v1.0.1/om-plugins.json")
+    )
+    asset_dir = tmp_path / "offline assets"
+    asset_dir.mkdir()
+    wheel = next(entry["asset"] for entry in json.loads(catalog)["plugins"] if entry["id"] == "pm")
+    wheel_bytes = ctx.downloads[catalog_url.rsplit("/", 1)[0] + "/" + wheel]
+    (asset_dir / "om-plugins.json").write_bytes(b"!" + catalog[1:] if damage == "catalog" else catalog)
+    if damage != "missing":
+        (asset_dir / wheel).write_bytes(b"!" + wheel_bytes[1:] if damage == "wheel" else wheel_bytes)
+    downloads = []
+
+    def forbidden_download(url, *args):
+        downloads.append(url)
+        raise AssertionError("local assets must not fall back to the download endpoint")
+
+    monkeypatch.setattr(runtime_bundle, "download_verified", forbidden_download)
+    ctx.requests.clear()
+    before = _inventory(plugin_store(ctx.previous))
+    preview = ctx.run(confirm=False, plugin_asset_dir=asset_dir)
+    assert preview["status"] == "dry_run"
+    assert any(str(asset_dir) in operation for operation in preview["planned_operations"])
+    assert read_managed_plugin(ctx.target, "pm") is None
+    assert ctx.current.resolve() == ctx.previous
+    assert not ctx.events
+
+    result = ctx.run(plugin_asset_dir=asset_dir)
+
+    assert downloads == []
+    assert all(url.startswith("https://api.github.com/") for url in ctx.requests)
+    assert _inventory(plugin_store(ctx.previous)) == before
+    if damage is None:
+        assert result["ok"], result
+        assert ctx.current.resolve() == ctx.target
+        assert read_managed_plugin(ctx.target, "pm")["wheel_sha256"] == hashlib.sha256(wheel_bytes).hexdigest()
+        assert ctx.events.index("managed_validate") < ctx.events.index("switch")
+    else:
+        assert not result["ok"], result
+        assert "local official plugin asset" in result["error"]
+        assert ctx.current.resolve() == ctx.previous
+        assert read_managed_plugin(ctx.target, "pm") is None
+        assert "switch" not in ctx.events and "restart" not in ctx.events
 
 
 def test_controller_pm_package_does_not_block_target_managed_upgrade(managed_transition, monkeypatch):
@@ -967,7 +1021,8 @@ def test_source_upgrade_preserves_previous_interpreter_pip_provider_selection(
         result = ctx.runner(command, **kwargs)
         if result.returncode == 0 and "install" in command:
             for key in selected:
-                if "./plugins/" + PLUGINS[key]["source"] in command:
+                source = "./plugins/" + PLUGINS[key]["source"]
+                if source in command or ctx.offline.source_wheels.get(command[-1]) == source:
                     install_source(key, new_site)
         return result
     result = upgrade.service_upgrade(repo_root=ctx.current, runtime_root=ctx.runtime, releases_root=ctx.target.parent,

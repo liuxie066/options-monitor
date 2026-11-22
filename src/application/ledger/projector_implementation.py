@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ast
+from collections.abc import Callable
+from functools import cache, partial
 import hashlib
 import json
 from pathlib import Path, PurePosixPath
@@ -138,7 +140,7 @@ _SEMANTIC_IMPORT_GRAPH: dict[str, tuple[str, ...]] = {
 
 # Generated from the manifest and exact raw source bytes by
 # compute_projector_implementation_fingerprint().
-EXPECTED_PROJECTOR_IMPLEMENTATION_FINGERPRINT = "8ebbb6b2ce92d91b9bc17355a666cd43cdebc67d8937fc75c1c2d62c84abecc3"
+EXPECTED_PROJECTOR_IMPLEMENTATION_FINGERPRINT = "8a6d5e1d224049c8cb5984c1f2e587a6b2504665c8d60edd3808d99a4f7f7bf7"
 
 
 class ProjectorImplementationUnavailable(RuntimeError):
@@ -206,48 +208,83 @@ def _resolve_from_module(current_path: str, node: ast.ImportFrom) -> str:
     return ".".join(prefix)
 
 
-def _discover_import_edges(root: Path, path: str) -> tuple[str, ...]:
+def _read_projector_source(root: Path, path: str) -> bytes:
     source_path = (root / _canonical_relative_path(path)).resolve()
-    if source_path.parent != root and root not in source_path.parents:
+    if root not in source_path.parents:
         raise ProjectorImplementationUnavailable(f"projector source escaped root: {path}")
     try:
-        raw = source_path.read_bytes()
+        return source_path.read_bytes()
+    except OSError as exc:
+        raise ProjectorImplementationUnavailable(f"projector source is unreadable: {path}") from exc
+
+
+def _discover_import_edges(
+    path: str, raw: bytes, resolve_module: Callable[[str], str | None],
+    *, check_dynamic_imports: bool,
+) -> tuple[str, ...]:
+    try:
         tree = ast.parse(raw, filename=path)
-    except (OSError, SyntaxError) as exc:
+    except SyntaxError as exc:
         raise ProjectorImplementationUnavailable(f"projector source is unreadable: {path}") from exc
 
     imports: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
+    pending = [tree]
+    while pending:
+        node = pending.pop()
+        kind = type(node)
+        if kind is ast.Call:
             direct_dynamic = isinstance(node.func, ast.Name) and node.func.id == "__import__"
             importlib_dynamic = isinstance(node.func, ast.Attribute) and node.func.attr == "import_module"
             if direct_dynamic or importlib_dynamic:
                 raise ProjectorImplementationUnavailable(f"dynamic import is not allowed in projector source: {path}")
-        if isinstance(node, ast.Import):
+        elif kind is ast.Import:
             for alias in node.names:
-                resolved = _module_path(root, alias.name)
+                resolved = resolve_module(alias.name)
                 if resolved is not None:
                     imports.add(resolved)
-        elif isinstance(node, ast.ImportFrom):
+        elif kind is ast.ImportFrom:
             module = _resolve_from_module(path, node)
-            resolved = _module_path(root, module)
+            resolved = resolve_module(module)
             if resolved is not None:
                 imports.add(resolved)
             for alias in node.names:
-                child = _module_path(root, f"{module}.{alias.name}")
+                child = resolve_module(f"{module}.{alias.name}")
                 if child is not None:
                     imports.add(child)
+        if not check_dynamic_imports:
+            # Imports are statements. Statement bodies and case/exception
+            # handlers are the only AST fields that can contain them.
+            for field in ("body", "orelse", "finalbody", "handlers", "cases"):
+                if (children := getattr(node, field, None)) is not None:
+                    pending.extend(children)
+        elif isinstance(node, ast.AST):
+            # Parser fields can contain scalars or list placeholders.
+            for field in node._fields:
+                value = getattr(node, field)
+                if type(value) is list:
+                    pending.extend(value)
+                elif isinstance(value, ast.AST):
+                    pending.append(value)
     return tuple(sorted(imports))
 
 
 def validate_projector_implementation_manifest(root: Path | None = None) -> None:
     source_root = resolve_projector_source_root(root)
+    _validate_import_graph(source_root, None, check_dynamic_imports=True)
+
+
+def _validate_import_graph(
+    source_root: Path, sources: dict[str, bytes] | None, *, check_dynamic_imports: bool,
+) -> None:
     declared = set(_SEMANTIC_IMPORT_GRAPH)
     if not set(_ROOTS).issubset(declared):
         raise ProjectorImplementationUnavailable("projector roots are absent from the manifest")
+    resolve_module = cache(partial(_module_path, source_root))
     for path, expected_edges in _SEMANTIC_IMPORT_GRAPH.items():
-        _canonical_relative_path(path)
-        actual_edges = _discover_import_edges(source_root, path)
+        raw = _read_projector_source(source_root, path) if sources is None else sources[path]
+        actual_edges = _discover_import_edges(
+            path, raw, resolve_module, check_dynamic_imports=check_dynamic_imports,
+        )
         if actual_edges != expected_edges:
             raise ProjectorImplementationUnavailable(
                 f"projector import graph differs for {path}: expected={expected_edges}, actual={actual_edges}"
@@ -266,6 +303,10 @@ def _frame(digest: Any, payload: bytes) -> None:
 
 def compute_projector_implementation_fingerprint(root: Path | None = None) -> str:
     source_root = resolve_projector_source_root(root)
+    return _fingerprint_and_sources(source_root)[0]
+
+
+def _fingerprint_and_sources(source_root: Path) -> tuple[str, dict[str, bytes]]:
     manifest_bytes = json.dumps(
         projector_implementation_manifest(),
         ensure_ascii=False,
@@ -275,27 +316,28 @@ def compute_projector_implementation_fingerprint(root: Path | None = None) -> st
     ).encode("utf-8")
     digest = hashlib.sha256()
     _frame(digest, manifest_bytes)
-    for raw_path in sorted(_SEMANTIC_IMPORT_GRAPH):
-        path = _canonical_relative_path(raw_path)
-        path_bytes = path.encode("utf-8")
-        source_path = (source_root / path).resolve()
-        if source_root not in source_path.parents:
-            raise ProjectorImplementationUnavailable(f"projector source escaped root: {path}")
-        try:
-            source_bytes = source_path.read_bytes()
-        except OSError as exc:
-            raise ProjectorImplementationUnavailable(f"projector source is unreadable: {path}") from exc
-        _frame(digest, path_bytes)
+    sources = {}
+    for path in sorted(_SEMANTIC_IMPORT_GRAPH):
+        source_bytes = _read_projector_source(source_root, path)
+        _frame(digest, path.encode("utf-8"))
         _frame(digest, source_bytes)
-    return digest.hexdigest()
+        sources[path] = source_bytes
+    return digest.hexdigest(), sources
 
 
 def verify_expected_projector_implementation(
     root: Path | None = None,
 ) -> str:
-    validate_projector_implementation_manifest(root)
-    actual = compute_projector_implementation_fingerprint(root)
-    if actual != EXPECTED_PROJECTOR_IMPLEMENTATION_FINGERPRINT:
+    return _verify_projector_sources(resolve_projector_source_root(root), exhaustive=True)
+
+
+def _verify_projector_sources(source_root: Path, *, exhaustive: bool) -> str:
+    actual, sources = _fingerprint_and_sources(source_root)
+    exact_sources = actual == EXPECTED_PROJECTOR_IMPLEMENTATION_FINGERPRINT
+    # The checked-in digest binds the source and manifest audited by the full
+    # validator. Each process still resolves all imports against its own tree.
+    _validate_import_graph(source_root, sources, check_dynamic_imports=exhaustive or not exact_sources)
+    if not exact_sources:
         raise ProjectorImplementationUnavailable(
             "loaded projector implementation differs from its checked-in fingerprint"
         )
@@ -304,7 +346,7 @@ def verify_expected_projector_implementation(
 
 def _load_projector_implementation_result() -> tuple[str | None, str | None]:
     try:
-        return verify_expected_projector_implementation(), None
+        return _verify_projector_sources(resolve_projector_source_root(), exhaustive=False), None
     except ProjectorImplementationUnavailable as exc:
         return None, str(exc)
 

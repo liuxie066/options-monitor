@@ -534,7 +534,7 @@ confirmed 升级/回滚先取得该 guard，再绑定 current、版本、profile
 
 `update verify` 汇总当前 symlink、版本、runtime config freshness、事件源配置、最近 upgrade status 和升级时保存的 service health 快照；`services.source=upgrade_status`，对应状态记录时间是 `upgrade.updated_at`，这不是当前 systemd live 查询。`--no-check-latest` 会跳过升级目标资格查询（包括 Git tag 和 GitHub Release），适合 release 已确认后快速复核远端状态。`upgrade.status` / `upgrade.last_status` 表示最近一次升级结果，`upgrade.has_status_record` 表示是否存在 `upgrade_status.json`；是否有新版本只看 `version.upgrade_available`。需要当前服务事实时，另行执行 `./om service drift --runtime-root /var/lib/options-monitor` 和对应 systemd 只读检查。
 
-当 `service.profile.json` 声明 `deploy_user` 时，升级和回滚的预览、执行都要求当前有效 UID 与该系统用户一致。无法解析用户或 UID 不一致时返回 `deployment_user_check_failed`，在目标查询、锁和状态文件写入之前停止。请以部署用户运行整个命令，仅由既有服务操作按需使用 sudo；不要用 sudo 包裹升级命令，以免原子替换后的配置归属 root。未声明部署用户的旧 profile 保留原有行为。
+当 `service.profile.json` 声明 `deploy_user` 时，升级和回滚的预览、执行都要求当前有效 UID 与该系统用户一致。无法解析用户或 UID 不一致时返回 `deployment_user_check_failed`，在目标查询、锁和状态文件写入之前停止。请以部署用户运行整个命令。systemd 只读状态查询由该用户直接执行，服务变更沿用既有授权路径。不要用 sudo 包裹升级命令，以免原子替换后的配置归属 root。未声明部署用户的旧 profile 保留原有行为。
 
 升级默认 dry-run：
 
@@ -554,6 +554,22 @@ confirmed 升级/回滚先取得该 guard，再绑定 current、版本、profile
 ```
 
 默认不自动跨 major；需要跨 major 时显式传 `--allow-major`。
+
+在阿里云的 Linux/systemd 源码部署上，root 可使用单独安装的 `/usr/local/sbin/om-root-upgrade`。
+发布源码归档提供 `scripts/om_root_upgrade.py`，核验官方归档后，安装为 root 所有、权限 0700 的入口。
+无参数显示入口状态。传入 root 所有、权限为 0600 的 JSON 文件先预览，例如
+`om-root-upgrade /root/om-upgrade-plan.json`。确认同一份清单后加 `--confirm`。
+清单含 `from`、`to`、状态显示中的 `profile_sha256` 和 `files`。
+`files` 的键是相对于 `/etc/systemd/system` 的改写路径，每项含现有文件的 `before` 和
+已审阅目标内容的 `after` SHA-256。先准备并核验已发布的目标源码和解释器，升级入口复用
+`liuxie` 的升级器，仅在本次执行期间代理清单内的修改和 systemd 重启。入口排除两套外部 OpenD。
+使用本地插件包时，在根入口的计划中添加可选的 `"plugin_asset_dir": "/absolute/path/to/assets"`。
+目录须可由部署用户读取。预览和确认使用计划中的同一路径，目标版本及已安装的根入口均须支持此字段。
+如果预览要求新增、退役、启用服务或变更特殊文件权限，入口会在切换前拒绝升级。
+旧版飞书凭据物化单元会触发额外启动，仅使用没有该单元改写的升级计划。
+确认时入口在重新预检期间持有项目原有的升级锁。已在暂存期间持锁的 root 启动器也可通过
+`--guard-fd` 传入对应描述符。入口在创建 OM 子进程前交还锁，由子进程按原流程立即竞争。
+如果另一进程在交接时先拿到锁，本次确认将由原有升级锁检查拒绝。systemd 代理仅受理来自本次升级进程会话的请求。
 
 service drift 仅将单元目录中的 `.service` / `.timer` 文件列入单元对账，
 `.bak`、`.disabled` 等备份文件不会被退役。`--confirm` 只自动退役部署器明确管理的
@@ -636,7 +652,11 @@ liuxie ALL=(root) NOPASSWD: /usr/bin/systemctl restart options-monitor-feishu-ws
 
 缓存内部固定使用 `origin`；`--remote-name` 只选择当前 Git checkout 的来源 URL。已有缓存缺少非空 `remote.origin.url` 时检查和物料提取会拒绝继续，不会猜测其他 remote。先人工核对缓存来源，再恢复其 `origin` 配置；程序不自动重命名或重建缓存。
 
-Release runtime 依赖安装默认使用 `OM_UPGRADE_INSTALLER=auto`：先检测宿主机 PATH 上的 `uv`，可用时把当前运行中的 Python 3.12+ `sys.executable` 传给 `uv venv --python`，再执行 `uv pip install -p .venv/bin/python ...`；不可用或 auto 模式下 uv 安装失败时回退到原 pip 流程。升级流程不会自动安装 uv；需要加速时应在宿主机安装一次。可用 `OM_UPGRADE_INSTALLER=pip` 强制旧流程，或 `OM_UPGRADE_INSTALLER=uv` 强制 uv 且失败即中止升级。依赖下载缓存默认复用 `_cache/uv` 和 `_cache/pip`；只配置了 `PIP_INDEX_URL` 时，升级会把它映射为 uv 命令的 `UV_INDEX_URL`。
+Release runtime 依赖安装默认使用 `OM_UPGRADE_INSTALLER=auto`。宿主机有 `uv` 时，用当前运行的 Python 3.12+ 创建环境并通过 `uv pip install` 安装依赖。找不到 uv 或 uv 安装失败时，auto 模式回退到 pip。`OM_UPGRADE_INSTALLER=pip` 可直接选择 pip 路径，`OM_UPGRADE_INSTALLER=uv` 则在 uv 失败时中止。依赖下载缓存默认复用 `_cache/uv` 和 `_cache/pip`。只配置了 `PIP_INDEX_URL` 时，升级会把它映射为 uv 命令的 `UV_INDEX_URL`。
+
+pip 路径在共享虚拟环境缓存未命中时，先用 `pip wheel` 按目标版本的约束统一准备基础、服务端及已选插件的依赖。备包复用 `PIP_CACHE_DIR`，也可通过 `PIP_FIND_LINKS` 使用已有 wheel。安装阶段只读取本次备好的本地 wheel，并执行 `pip check`。需要重新安装的源码插件也先构建 wheel，再离线安装到该 release 的插件目录。备包、安装或校验失败会中止升级，当前 release 链接留在旧版。
+
+同机部署可由部署用户先运行 `python scripts/prepare_wheels.py --wheel-dir <共享目录> -- -r requirements.txt -c constraints.txt`，命令从目标源码目录执行，按实际选用的 server、插件和 SDK 追加依赖和约束。命令默认只从本地 wheel 目录备包。冷缓存可显式加 `--allow-index`，从配置的软件源补齐。每份准备完成的 wheel 原子发布，同名异内容会报错。请使用可信的本地依赖清单和软件源，源码插件本身仍在对应的 release 内构建。使用已验的本地 wheel 集执行离线升级时，为预览和确认传入相同的 `OM_UPGRADE_INSTALLER=pip`、`PIP_NO_INDEX=1` 和本地 `PIP_FIND_LINKS`，并核对控制器实际所需的 pip 和插件构建依赖。
 
 确认升级时，用当前 release 声明的 Python 隔离读取 `om-pm-plugin`、`longbridge`
 与 `om-position-advice-plugin`
@@ -675,9 +695,25 @@ true 也不补装。首次安装可用 `scripts/install.sh --with-position-advic
 升级先校验旧代码实例的托管 receipt，再从目标 Release 安装精确配套 wheel，使用目标解释器验证，
 成功后才允许切换 `current`、配置和服务。选择与功能开关独立，主动卸载保持卸载；坏 receipt、
 缺目标资产或导入失败会中止，旧安装不被删除。外部插件目录不写入运行包 inventory 或依赖缓存。飞书复用目标环境中可用的 SDK；源码目标缺 SDK 时，确认安装按目标 release 约束将依赖暂存至插件专属目录，校验实际 SDK API、依赖与文件摘要后才激活。运行包缺 SDK 时拒绝，不修改其内置依赖。
+
+当 Release 下载地址不可用时，可将目标版本的官方 `om-plugins.json` 和尚未在目标目录安装的托管 wheel
+按发布文件名放入同一目录。可通过 GitHub 资产 API 获取这些文件。使用支持该选项的控制器预览：
+
+```bash
+./om update apply --repo-root <current-symlink> --runtime-root <runtime-root> \
+  --target-version <version> --plugin-asset-dir /absolute/path/to/assets
+```
+
+核对预览中的目标版本和目录，再用相同参数加 `--confirm`。确认时会从 GitHub API 读取目标 Release
+的已发布资产信息，验证本地清单和 wheel 的大小与 SHA-256，再进行原有 wheel 检查和导入校验。
+指定目录后，从目录取所需插件资产。已在目标目录通过 receipt 校验的插件会复用。缺件、摘要不符
+或导入失败均在切换前停止。目标源码或运行包的获取方式、其他依赖准备及发布元数据查询仍沿用原流程。
+
 回滚保留回滚目标原有的安装选择，不下载、安装或迁移插件。确认回滚时，在暂存配置、切换
 `current` 和操作服务之前，以目标解释器校验目标已有托管插件的 receipt 和实际加载；
 坏 receipt 或导入失败会中止，即使选择不重启服务也不能跳过。预览只校验本地 receipt，不加载插件。
+升级和回滚共用的托管插件批量校验限时 180 秒。校验进程禁止写入 Python 字节码，超时后仍可检查原样的插件目录。
+切换后的飞书健康检查也单独限时 180 秒，以容纳托管飞书 SDK 的文件清单及导入校验。
 对于支持 Provider 包的回滚目标，还以目标解释器校验其 pip 安装的 Provider、行情可用性和所需 SDK；缺失或不兼容时不切换、不补装。历史内置 Provider 目标沿用原合同。
 `market-opend`、`broker-futu`、`broker-longbridge` 也使用同一官方管理路径；长桥 SDK 仍是显式独立前提，基础运行包自检不能替代其迁移资格。
 

@@ -18,6 +18,7 @@ from tests.service_deploy_test_support import (
     _write_upgrade_release_skeleton,
     _write_runtime_target_with_server_deps,
     _create_fake_venv_python_at,
+    _fake_dependency_wheel,
     _fake_git_cache_materialize,
     _render_bundle,
 )
@@ -742,7 +743,15 @@ def test_render_systemd_bundle_can_include_quality_monitoring(tmp_path: Path) ->
 
     assert str(repo / "om") + " quality refresh --config-key us --config-key hk --no-deep" in refresh
     assert "TimeoutStartSec=600" in refresh
-    assert "OnUnitActiveSec=15min" in refresh_timer
+    status_timer = files["systemd/options-monitor-runtime-status.timer"]["content"]
+    assert "OnCalendar=*-*-* *:00,15,30,45:00 UTC" in refresh_timer
+    assert "OnCalendar=*-*-* *:05,20,35,50:00 UTC" in status_timer
+    for timer in (refresh_timer, status_timer):
+        assert "AccuracySec=1s" in timer
+        assert "RandomizedDelaySec=0" in timer
+        assert "Persistent=false" in timer
+        assert "OnBootSec=" not in timer
+        assert "OnUnitActiveSec=" not in timer
     assert str(repo / "om") + " quality recheck-due --config-key us --config-key hk" in recheck
     assert "After=network-online.target options-monitor-opend.service" in recheck
     assert "TimeoutStartSec=300" in recheck
@@ -1471,7 +1480,8 @@ def test_service_drift_privileged_executable_fails_if_install_did_not_publish(
     assert out["returncode"] == 1
     assert "ownership verification failed" in out["error"]
 
-def test_post_upgrade_service_health_reports_feishu_ws_check_failure(tmp_path: Path) -> None:
+@pytest.mark.parametrize("check_outcome", ["healthy", "invalid_credentials", "timeout"])
+def test_post_upgrade_service_health_reports_feishu_ws_check(tmp_path: Path, check_outcome: str) -> None:
     from src.application.service_upgrade import _post_upgrade_service_health
 
     repo = tmp_path / "repo"
@@ -1486,11 +1496,19 @@ def test_post_upgrade_service_health_reports_feishu_ws_check_failure(tmp_path: P
 
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
         if list(command)[:3] == [str(repo / "om"), "inbound", "feishu-ws"]:
-            return subprocess.CompletedProcess(command, 2, stdout="", stderr="missing Feishu app credentials\n")
+            assert _kwargs["timeout"] == 180
+            if check_outcome == "timeout":
+                raise subprocess.TimeoutExpired(command, _kwargs["timeout"])
+            if check_outcome == "invalid_credentials":
+                return subprocess.CompletedProcess(command, 2, stdout="", stderr="missing Feishu app credentials\n")
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     out = _post_upgrade_service_health(profile=profile, repo_root=repo, run_cmd=_run_cmd, operations=operations)
 
+    if check_outcome == "healthy":
+        assert out["ok"] is True
+        assert any(row["check"] == "feishu-ws-check" for row in out["checks"])
+        return
     assert out["ok"] is False
     assert out["status"] == "error"
     assert out["failed_checks"][0]["check"] == "feishu-ws-check"
@@ -1967,6 +1985,7 @@ def test_service_upgrade_runtime_prepare_auto_uses_pip_when_uv_missing(monkeypat
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
         if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
+        _fake_dependency_wheel(command)
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     out = _ensure_release_runtime(target_dir=target, run_cmd=_run_cmd, operations=operations)
@@ -1975,8 +1994,14 @@ def test_service_upgrade_runtime_prepare_auto_uses_pip_when_uv_missing(monkeypat
     assert out["installer"] == "pip"
     assert out["fallback"] is False
     assert ["uv", "pip", "install", "-p", build_python, "-r", "requirements.txt", "-c", "constraints.txt"] not in calls
-    assert [build_python, "-m", "pip", "install", "-r", "requirements.txt", "-c", "constraints.txt"] in calls
-    assert [build_python, "-m", "pip", "install", "-r", "requirements/server.txt", "-c", "constraints/server.txt"] in calls
+    prepare = next(command for command in calls if "wheel" in command)
+    assert prepare[:3] == [build_python, "-m", "pip"]
+    assert prepare[-8:] == ["-r", "requirements.txt", "-c", "constraints.txt",
+                           "-r", "requirements/server.txt", "-c", "constraints/server.txt"]
+    install = next(command for command in calls if "install" in command)
+    check = next(command for command in calls if command[-1] == "check")
+    assert calls.index(prepare) < calls.index(install) < calls.index(check)
+    assert "--no-index" in install and install[-1].endswith(".whl")
     assert (target / ".venv").is_symlink()
     assert Path(out["shared_venv_path"]).exists()
     assert not Path(out["shared_venv_build_path"]).exists()
@@ -2051,6 +2076,7 @@ def test_service_upgrade_runtime_prepare_pip_mode_skips_uv(monkeypatch, tmp_path
         calls.append(list(command))
         if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
+        _fake_dependency_wheel(command)
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     out = _ensure_release_runtime(target_dir=target, run_cmd=_run_cmd, operations=[])
@@ -2073,6 +2099,7 @@ def test_service_upgrade_runtime_prepare_reuses_dependency_cached_venv(monkeypat
         calls.append(list(command))
         if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
+        _fake_dependency_wheel(command)
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     first_out = _ensure_release_runtime(target_dir=first, cache_root=cache_root, run_cmd=_run_cmd, operations=[])
@@ -2090,7 +2117,7 @@ def test_service_upgrade_runtime_prepare_reuses_dependency_cached_venv(monkeypat
     assert (second / ".venv").is_symlink()
     assert not Path(second_out["shared_venv_build_path"]).exists()
     assert not any(command[:3] == [CURRENT_PYTHON, "-m", "venv"] for command in second_calls)
-    assert not any(command[1:4] == ["-m", "pip", "install"] for command in second_calls)
+    assert not any("pip" in command for command in second_calls)
 
 
 def test_service_upgrade_rebuilds_cache_with_relocated_pip_shebang(monkeypatch, tmp_path: Path) -> None:
@@ -2108,6 +2135,7 @@ def test_service_upgrade_rebuilds_cache_with_relocated_pip_shebang(monkeypatch, 
         calls.append(list(command))
         if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
+        _fake_dependency_wheel(command)
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     first_out = _ensure_release_runtime(
@@ -2166,8 +2194,9 @@ def test_service_upgrade_runtime_prepare_removes_temp_venv_on_install_failure(mo
         if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
             return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
-        if command[1:4] == ["-m", "pip", "install"] and "-r" in command:
+        if "pip" in command and "install" in command:
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="install failed\n")
+        _fake_dependency_wheel(command)
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     with pytest.raises(RuntimePrepareError) as _caught:
@@ -2220,6 +2249,7 @@ def test_service_upgrade_runtime_prepare_auto_falls_back_to_pip_after_uv_failure
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="uv install failed\n")
         if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
+        _fake_dependency_wheel(command)
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     out = _ensure_release_runtime(target_dir=target, run_cmd=_run_cmd, operations=[])
@@ -2246,6 +2276,7 @@ def test_service_upgrade_bot_prepare_retries_after_import_failure(monkeypatch, t
             attempts += 1
             if attempts == 1:
                 return subprocess.CompletedProcess(command, 1, stdout="", stderr="Bot import failed\n")
+        _fake_dependency_wheel(command)
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     operations: list[dict] = []
@@ -2272,6 +2303,7 @@ def test_service_upgrade_bot_smoke_timeout_keeps_structured_prepare_evidence(mon
             _create_fake_venv_python_at(Path(command[-1]))
         if command[1:] == ["-c", "import src.application.bot.host; import src.application.bot.runtime"]:
             raise subprocess.TimeoutExpired(command, timeout=30)
+        _fake_dependency_wheel(command)
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     with pytest.raises(RuntimePrepareError) as caught:

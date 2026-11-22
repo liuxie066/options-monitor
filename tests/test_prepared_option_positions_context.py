@@ -276,7 +276,7 @@ def test_prepare_publishes_zero_position_slices_from_one_ledger_and_fx_read(
     def _current_read_fails(*_args, **_kwargs):
         raise RuntimeError("shadow unavailable")
 
-    monkeypatch.setattr(mod, "read_current_decision_projection", _current_read_fails)
+    monkeypatch.setattr(mod.ledger_api, "read_current_decision_projection", _current_read_fails)
 
     batch = _prepare(
         tmp_path,
@@ -571,7 +571,7 @@ def test_fx_evidence_concurrent_winner_converges_to_idempotent(
     captured_at = datetime.fromtimestamp(captured_at_ms / 1000, timezone.utc)
     quoted_at = (captured_at - timedelta(hours=2)).isoformat()
     monkeypatch.setattr(
-        mod,
+        mod.ledger_api,
         "open_performance_evidence_repository",
         lambda _repo: racing,
     )
@@ -880,9 +880,9 @@ def test_prepare_timing_preserves_shared_reads_and_replay(monkeypatch, tmp_path)
     observation["observed_at"] = observation["timestamp"]
     observation["quote_timestamps"] = {pair: observation["timestamp"] for pair in observation["rates"]}
     fx = Mock(return_value=observation)
-    read = Mock(wraps=mod.read_decision_state_rows_many)
+    read = Mock(wraps=mod.ledger_api.read_decision_state_rows_many)
     monkeypatch.setattr(mod, "get_exchange_rates_or_fetch_latest", fx)
-    monkeypatch.setattr(mod, "read_decision_state_rows_many", read)
+    monkeypatch.setattr(mod.ledger_api, "read_decision_state_rows_many", read)
     log = SimpleNamespace(safe_event=Mock())
     kwargs = dict(run_id=run_id, config_path=config_path, configs=configs, authorities=authorities)
     with prepared_context_timing_scope(runlog=log):
@@ -933,7 +933,8 @@ def test_prepare_timing_reports_caught_failure_without_changing_fallback(monkeyp
     monkeypatch.setattr(mod, "get_exchange_rates_or_fetch_latest", _fx_stub())
     if phase == "unavailable_publication":
         monkeypatch.setattr(mod, "_publish_ready_context", Mock(side_effect=OSError("private value")))
-    monkeypatch.setattr(mod, operation, Mock(side_effect=OSError("private value")))
+    owner = mod.ledger_api if phase in {"ledger_paths", "ledger_read_a", "current_projection", "snapshot_build"} else mod
+    monkeypatch.setattr(owner, operation, Mock(side_effect=OSError("private value")))
     log = SimpleNamespace(safe_event=Mock())
     with prepared_context_timing_scope(runlog=log):
         batch = _prepare(tmp_path, run_id=run_id, config_path=config_path, configs=configs, authorities=authorities)
@@ -956,14 +957,14 @@ def test_prepare_timing_failed_second_fence_preserves_existing_fallback(monkeypa
     from src.application import prepared_option_positions_context as mod
     from src.application.multi_tick_audit import prepared_context_timing_scope
     configs, authorities, config_path, _ = _prepare_env(tmp_path, "timed-fence-b")
-    original = mod.read_decision_state_rows_many
+    original = mod.ledger_api.read_decision_state_rows_many
     read = Mock()
     def _read(*args, **kwargs):
         if read.call_count == 2:
             raise OSError("private B failure")
         return original(*args, **kwargs)
     read.side_effect = _read
-    monkeypatch.setattr(mod, "read_decision_state_rows_many", read)
+    monkeypatch.setattr(mod.ledger_api, "read_decision_state_rows_many", read)
     monkeypatch.setattr(mod, "get_exchange_rates_or_fetch_latest", _fx_stub())
     log = SimpleNamespace(safe_event=Mock())
     with prepared_context_timing_scope(runlog=log):
@@ -989,7 +990,7 @@ def test_snapshot_timing_preserves_entry_exception_semantics(monkeypatch, tmp_pa
     configs, authorities, config_path, _ = _prepare_env(tmp_path, "snapshot-timing-error")
     monkeypatch.setattr(mod, "get_exchange_rates_or_fetch_latest", _fx_stub())
     error = error_type("private snapshot detail")
-    monkeypatch.setattr(mod, operation, Mock(side_effect=error))
+    monkeypatch.setattr(mod.ledger_api, operation, Mock(side_effect=error))
     log = SimpleNamespace(safe_event=Mock())
     kwargs = dict(run_id="snapshot-timing-error", config_path=config_path, configs=configs, authorities=authorities)
     with prepared_context_timing_scope(runlog=log):
@@ -1110,11 +1111,17 @@ def test_sealed_ready_replay_repairs_original_fx_without_rebuilding_contexts(
     before = PerformanceEvidenceSQLiteRepository(paths["sy"]).read_all().fx_rates
     selection = select_cash_fx_rate(before, base_currency="USD", at_ms=int(NOW.timestamp() * 1000))
     assert selection.status == ("missing" if first_import == "before_commit" else "selected")
-    for name in ("open_position_ledger_from_data_config", "read_decision_state_rows_many",
-                 "read_current_decision_projection", "decision_state_snapshots_from_rows_many",
-                 "build_wheel_read_model_from_rows", "_publish_ready_context"):
-        monkeypatch.setattr(mod, name, lambda *_args, **_kwargs: pytest.fail("ready replay rebuilt positions"))
-    monkeypatch.setattr(read_model, "load_option_positions_repo",
+    for owner, name in (
+        (mod.ledger_api, "open_position_ledger_from_data_config"),
+        (mod.ledger_api, "read_decision_state_rows_many"),
+        (mod.ledger_api, "read_current_decision_projection"),
+        (mod.ledger_api, "decision_state_snapshots_from_rows_many"),
+        (mod, "build_wheel_read_model_from_rows"),
+        (mod, "_publish_ready_context"),
+    ):
+        monkeypatch.setattr(owner, name, lambda *_args, **_kwargs: pytest.fail("ready replay rebuilt positions"))
+    from src.application.ledger import bootstrap
+    monkeypatch.setattr(bootstrap, "load_option_positions_repo",
                         lambda *_args, **_kwargs: pytest.fail("ready replay bootstrapped positions"))
     monkeypatch.setattr(store_resolution, "_sqlite_counts",
                         lambda *_args, **_kwargs: pytest.fail("ready replay inspected position counts"))
@@ -1161,14 +1168,14 @@ def test_sealed_replay_combines_ready_and_pending_ledgers_once(monkeypatch, tmp_
     first = _prepare(tmp_path, **first_kwargs, persist_fx_evidence=True)
     assert _fx_counts(first) == ("error", 0, 0, 0, 1)
     frozen = _prepared_bytes(first)
-    reads = Mock(wraps=mod.read_decision_state_rows_many)
+    reads = Mock(wraps=mod.ledger_api.read_decision_state_rows_many)
     imports = []
 
     def record_import(repo, *args, **kw):
         imports.append(repo.db_path)
         return real_import(repo, *args, **kw)
 
-    monkeypatch.setattr(mod, "read_decision_state_rows_many", reads)
+    monkeypatch.setattr(mod.ledger_api, "read_decision_state_rows_many", reads)
     monkeypatch.setattr(PerformanceEvidenceSQLiteRepository, "import_envelope", record_import)
     batch = _prepare(tmp_path, **kwargs, persist_fx_evidence=True)
     count = 1 if shared else 2
@@ -1187,7 +1194,7 @@ def test_sealed_replay_target_failure_preserves_context_and_counts(monkeypatch, 
     kwargs, paths, _ = _sealed_fx_replay_setup(monkeypatch, tmp_path, shared=failure == "open_shared")
     first = _prepare(tmp_path, **kwargs)
     frozen = _prepared_bytes(first)
-    real_open = mod.open_performance_query_ledger_from_data_config
+    real_open = mod.ledger_api.open_performance_query_ledger_from_data_config
     opens = []
 
     def open_target(**kw):
@@ -1196,16 +1203,16 @@ def test_sealed_replay_target_failure_preserves_context_and_counts(monkeypatch, 
             raise OSError("synthetic opener failure")
         return real_open(**kw)
 
-    monkeypatch.setattr(mod, "open_performance_query_ledger_from_data_config", open_target)
+    monkeypatch.setattr(mod.ledger_api, "open_performance_query_ledger_from_data_config", open_target)
     if failure == "path":
-        real_resolve = mod.resolve_position_data_config_path
+        real_resolve = mod.ledger_api.resolve_position_data_config_path
 
         def resolve(**kw):
             if kw.get("cfg", {}).get("portfolio", {}).get("account") == "lx":
                 raise OSError("synthetic path failure")
             return real_resolve(**kw)
 
-        monkeypatch.setattr(mod, "resolve_position_data_config_path", resolve)
+        monkeypatch.setattr(mod.ledger_api, "resolve_position_data_config_path", resolve)
     elif failure in {"bytes", "account", "run", "state_path"}:
         authority = kwargs["authorities"]["lx"]
         changes = {"bytes": {"canonical_bytes": b"{}"}, "account": {"account": "sy"},
@@ -1232,7 +1239,7 @@ def test_sealed_replay_uses_retained_config_and_excludes_invalid_context(monkeyp
     kwargs["configs"]["lx"]["portfolio"]["data_config"] = str(redirected)
     sy_manifest = Path(first.manifests["sy"]["manifest_path"])
     sy_manifest.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(mod, "open_position_ledger_from_data_config",
+    monkeypatch.setattr(mod.ledger_api, "open_position_ledger_from_data_config",
                         lambda **_kwargs: pytest.fail("invalid context must not bootstrap"))
     batch = _prepare(tmp_path, **kwargs, persist_fx_evidence=True)
     assert _fx_counts(batch) == ("persisted", 1, 2, 0, 0)
@@ -1267,7 +1274,7 @@ def test_sealed_replay_unavailable_source_never_opens_or_fetches(monkeypatch, tm
         path.write_text(json.dumps(envelope), encoding="utf-8")
     for name in ("open_performance_query_ledger_from_data_config", "open_performance_evidence_repository",
                  "open_position_ledger_from_data_config"):
-        monkeypatch.setattr(mod, name, lambda *_args, **_kwargs: pytest.fail("unverified FX opened a ledger"))
+        monkeypatch.setattr(mod.ledger_api, name, lambda *_args, **_kwargs: pytest.fail("unverified FX opened a ledger"))
     batch = _prepare(tmp_path, **kwargs, persist_fx_evidence=True)
     assert _fx_counts(batch) == ("source_unavailable", 0, 0, 0, 0)
     assert batch.ledger_read_count == 0 and batch.fx_observation_count == 1
@@ -1283,9 +1290,13 @@ def test_ready_replay_disabled_or_unsealed_keeps_fast_return(monkeypatch, tmp_pa
     first = _prepare(tmp_path, **kwargs)
     if mode == "unsealed":
         kwargs["fx_snapshot_sha256"] = None
-    for name in ("load_run_fx_snapshot", "open_performance_query_ledger_from_data_config",
-                 "open_performance_evidence_repository", "open_position_ledger_from_data_config"):
-        monkeypatch.setattr(mod, name, lambda *_args, **_kwargs: pytest.fail("fast reuse performed I/O"))
+    for owner, name in (
+        (mod, "load_run_fx_snapshot"),
+        (mod.ledger_api, "open_performance_query_ledger_from_data_config"),
+        (mod.ledger_api, "open_performance_evidence_repository"),
+        (mod.ledger_api, "open_position_ledger_from_data_config"),
+    ):
+        monkeypatch.setattr(owner, name, lambda *_args, **_kwargs: pytest.fail("fast reuse performed I/O"))
     batch = _prepare(tmp_path, **kwargs, persist_fx_evidence=mode == "unsealed")
     assert _fx_counts(batch) == ("not_attempted", 0, 0, 0, 0)
     assert batch.ledger_read_count == batch.fx_observation_count == 0
@@ -1299,17 +1310,17 @@ def test_sealed_replay_cancellation_propagates_and_can_reenter(monkeypatch, tmp_
     kwargs, paths, _ = _sealed_fx_replay_setup(monkeypatch, tmp_path)
     first = _prepare(tmp_path, **kwargs)
     frozen = _prepared_bytes(first)
-    real_open = mod.open_performance_query_ledger_from_data_config
+    real_open = mod.ledger_api.open_performance_query_ledger_from_data_config
 
     def interrupted(**_kwargs):
         raise KeyboardInterrupt("synthetic cancellation")
 
-    monkeypatch.setattr(mod, "open_performance_query_ledger_from_data_config", interrupted)
+    monkeypatch.setattr(mod.ledger_api, "open_performance_query_ledger_from_data_config", interrupted)
     with pytest.raises(KeyboardInterrupt, match="synthetic cancellation"):
         _prepare(tmp_path, **kwargs, persist_fx_evidence=True)
     assert _prepared_bytes(first) == frozen
     assert all(PerformanceEvidenceSQLiteRepository(path).read_all().fx_rates == () for path in paths.values())
-    monkeypatch.setattr(mod, "open_performance_query_ledger_from_data_config", real_open)
+    monkeypatch.setattr(mod.ledger_api, "open_performance_query_ledger_from_data_config", real_open)
     resumed = _prepare(tmp_path, **kwargs, persist_fx_evidence=True)
     assert _fx_counts(resumed) == ("persisted", 2, 4, 0, 0)
     assert _prepared_bytes(resumed) == frozen

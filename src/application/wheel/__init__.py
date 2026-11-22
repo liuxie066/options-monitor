@@ -10,17 +10,6 @@ from src.application.wheel.capacity import (
     finalize_wheel_capacity,
     finalize_wheel_put_capacity,
 )
-from src.application.wheel.workflows import (
-    cancel_wheel_intent,
-    cancel_wheel_call_intent,
-    change_wheel_activation,
-    create_wheel_intent,
-    create_wheel_call_intent,
-    decide_wheel_branch,
-    end_wheel_lifecycle,
-    reject_wheel_linkage,
-    reject_wheel_call_linkage,
-)
 
 __all__ = [
     "build_wheel_read_model",
@@ -50,3 +39,30 @@ from src.application.wheel.candidate_snapshot import (
     seal_wheel_candidate_snapshot,
     validate_wheel_candidate_snapshot,
 )
+
+
+_WORKFLOW_EXPORTS = {
+    "cancel_wheel_intent",
+    "cancel_wheel_call_intent",
+    "change_wheel_activation",
+    "create_wheel_intent",
+    "create_wheel_call_intent",
+    "decide_wheel_branch",
+    "end_wheel_lifecycle",
+    "reject_wheel_linkage",
+    "reject_wheel_call_linkage",
+}
+
+
+def __getattr__(name: str):
+    if name not in _WORKFLOW_EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from src.application.wheel import workflows
+
+    value = getattr(workflows, name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()).union(_WORKFLOW_EXPORTS))

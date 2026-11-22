@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import time
+from decimal import localcontext
 from pathlib import Path
 
 import pytest
@@ -44,6 +45,27 @@ def test_fingerprint_preserves_distinct_spellings_of_equal_float_and_integer():
     assert json.loads(canonical_json_bytes([integer, floating, integer])) == [
         str(integer), "100000000000000000000000", str(integer),
     ]
+
+
+def test_fingerprint_text_reuse_respects_field_and_decimal_context():
+    raw = "+1.23450"
+    payload = {"strike": raw, "quantity_by_lot": {"b": raw}, "symbol": raw, "price_amount": "Infinity"}
+    with localcontext() as context:
+        context.prec = 3
+        assert canonical_json_bytes(payload) == (
+            b'{"price_amount":"Infinity","quantity_by_lot":{"b":"1.23"},"strike":"1.23","symbol":"+1.23450"}'
+        )
+        context.prec = 8
+        assert json.loads(canonical_json_bytes(payload))["strike"] == "1.2345"
+
+
+def test_fingerprint_mixed_keys_keep_stable_stringification_collision_order():
+    class Renamed(str):
+        def __str__(self):
+            return "1"
+
+    assert canonical_json_bytes({1: "first", "1": "second", "display_price": 10}) == b'{"1":"second"}'
+    assert canonical_json_bytes({"1": "first", Renamed("alias"): "second", 1: "third"}) == b'{"1":"third"}'
 
 
 def test_opening_hashes_match_independent_input_and_decision_hashes():

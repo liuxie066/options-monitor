@@ -32,6 +32,44 @@ def test_feishu_dependency_validator_is_available_in_core_source_runtime():
     assert "packaging" in {Requirement(line).name for line in requirements if line and not line.startswith("#")}
 
 
+@pytest.mark.parametrize("damage", [None, "changed", "missing", "unlisted", "unlisted_bytecode",
+                                    "file_link", "directory_link", "traversal"])
+def test_runtime_inventory_walk_checks_every_file_and_rejects_links(tmp_path, damage):
+    site = tmp_path / "site"
+    package = site / "sdk"
+    bytecode = package / "__pycache__"
+    bytecode.mkdir(parents=True)
+    source = package / "module.py"
+    source.write_bytes(b"source")
+    (bytecode / "module.cpython-312.pyc").write_bytes(b"cache")
+    inventory = {"sdk/module.py": hashlib.sha256(b"source").hexdigest()}
+    if damage is None:
+        runtime._validate_inventory(site, inventory, dependency_tree=True)
+        return
+    if damage == "changed":
+        source.write_bytes(b"change")
+    elif damage == "missing":
+        inventory["sdk/missing.py"] = inventory["sdk/module.py"]
+    elif damage == "unlisted":
+        (package / "extra.py").write_bytes(b"")
+    elif damage == "unlisted_bytecode":
+        (bytecode / "other.cpython-312.pyc").write_bytes(b"")
+    elif damage == "file_link":
+        source.unlink()
+        (tmp_path / "outside.py").write_bytes(b"source")
+        source.symlink_to(tmp_path / "outside.py")
+    elif damage == "directory_link":
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "module.py").write_bytes(b"source")
+        (site / "other").symlink_to(outside, target_is_directory=True)
+        inventory["other/module.py"] = inventory["sdk/module.py"]
+    elif damage == "traversal":
+        inventory["sdk/../sdk/module.py"] = inventory["sdk/module.py"]
+    with pytest.raises(ValueError):
+        runtime._validate_inventory(site, inventory, dependency_tree=True)
+
+
 def write_test_sdk(site, *, requirement=""):
     """Contract-only SDK fixture; real wheel acceptance is a separate offline QA."""
     content = {
@@ -151,10 +189,19 @@ def official(tmp_path, monkeypatch, plugin_python):
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "isolated-runtime"))
     for key in ("OM_ENV_FILE",):
         monkeypatch.delenv(key, raising=False)
+    plugin_roots = {item["module"] for item in runtime.PLUGINS.values()}
+    original_modules = {
+        name: module for name, module in sys.modules.items()
+        if name.partition(".")[0] in plugin_roots
+    }
+    for name in original_modules:
+        sys.modules.pop(name)
     yield root, assets, catalog, downloads
     for name in list(sys.modules):
-        if any(name == item["module"] or name.startswith(item["module"] + ".") for item in runtime.PLUGINS.values()):
+        if name.partition(".")[0] in plugin_roots:
             sys.modules.pop(name)
+    # Preserve the modules already imported during collection and their class identities.
+    sys.modules.update(original_modules)
 
 
 def test_cli_list_offline_and_install_preview_has_no_persistent_effect(official, capsys):

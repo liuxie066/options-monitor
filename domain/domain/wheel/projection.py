@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-from domain.domain.ledger.events import lot_id_for_open_event
-
 from collections import defaultdict
-from decimal import Decimal
-from typing import Any, Mapping, Sequence
+from collections.abc import Callable, Mapping
+from decimal import Decimal, getcontext
+from functools import lru_cache
+from typing import Any, Sequence
 
-from domain.domain.decision_state_fingerprint import canonical_sha256
+from domain.domain.decision_state_fingerprint import canonical_json_bytes, canonical_sha256
 from domain.domain.ledger import TradeEvent, project_trade_events
-from domain.domain.ledger.events import validate_trade_event
+from domain.domain.ledger.economics import OptionEconomicAllocation
+from domain.domain.ledger.events import lot_id_for_open_event, validate_trade_event
 from domain.domain.trade_execution import execution_identity_from_input
 from domain.domain.ledger.cash_facts import (
     assignment_principal_anchor,
@@ -66,11 +67,12 @@ def _call_allocation_held(lot_id: str, fields: Mapping[str, Any],
 
 
 def _event_type(row: Mapping[str, Any]) -> str:
+    event_type = row.get("event_type")
+    if event_type:
+        return str(event_type).strip().lower()
     payload = row.get("raw_payload")
     payload = payload if isinstance(payload, Mapping) else {}
-    return str(
-        row.get("event_type") or payload.get("close_type") or ""
-    ).strip().lower()
+    return str(payload.get("close_type") or "").strip().lower()
 
 
 def lot_contract_key(fields: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -143,7 +145,14 @@ def lot_strategy_metadata_from_trade_events(
     opening_by_lot: dict[str, Mapping[str, Any]] = {}
 
     active = _active_trade_events(trade_events)
-    openings = {row["event_id"]: lot_id_for_open_event(row) for row in active if row.get("event_type") == "open"}
+    openings: dict[str, str] = {}
+    lot_ids_by_row: dict[int, str] = {}
+    for row in active:
+        if row.get("event_type") == "open":
+            event_id = row["event_id"]
+            lot_id = lot_id_for_open_event(row)
+            openings[event_id] = lot_id
+            lot_ids_by_row[id(row)] = lot_id
     handled_proofs: set[str] = set()
     for raw in sorted(active, key=lambda row: (int(row.get("event_time_ms") or 0), str(row.get("event_id") or ""))):
         if not isinstance(raw, Mapping):
@@ -152,7 +161,7 @@ def lot_strategy_metadata_from_trade_events(
         payload = raw.get("raw_payload")
         payload = payload if isinstance(payload, Mapping) else {}
         if event_type == "open":
-            lot_id = lot_id_for_open_event(raw)
+            lot_id = lot_ids_by_row.get(id(raw)) or lot_id_for_open_event(raw)
             if lot_id in opening_by_lot and opening_by_lot[lot_id] != raw:
                 raise ValueError("duplicate_lot_id")
             opening_by_lot[lot_id] = raw
@@ -282,8 +291,10 @@ def _trade_position_side(row: Mapping[str, Any]) -> str:
 
 def _active_trade_events(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     voided = set()
+    active = []
     for row in rows:
         if _event_type(row) != "void":
+            active.append(row)
             continue
         try:
             event = TradeEvent.from_dict(dict(row))
@@ -291,11 +302,12 @@ def _active_trade_events(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, An
                 voided.add(str(event.target_event_id or ""))
         except (TypeError, ValueError, KeyError):
             continue
+    if not voided:
+        return [dict(row) for row in active]
     return [
         dict(row)
-        for row in rows
-        if _event_type(row) != "void"
-        and str(row.get("event_id") or "").strip() not in voided
+        for row in active
+        if str(row.get("event_id") or "").strip() not in voided
     ]
 
 
@@ -507,6 +519,9 @@ def _conflict_resolution_has_proof(resolution: Mapping[str, Any], conflict: Mapp
     return True
 
 
+_WheelEventNormalizationMemo = dict[int, tuple[Mapping[str, Any], dict[str, Any] | None]]
+
+
 def effective_wheel_events(
     wheel_events: Sequence[Mapping[str, Any]],
     *,
@@ -514,6 +529,7 @@ def effective_wheel_events(
     known_trade_event_ids: set[str] | None = None,
     trade_events: Sequence[Mapping[str, Any]] = (),
     conflict_statuses: dict[str, dict[str, Any]] | None = None,
+    _normalization_memo: _WheelEventNormalizationMemo | None = None,
 ) -> tuple[list[dict[str, Any]], dict[tuple[str, str], set[str]]]:
     events_by_id: dict[str, dict[str, Any]] = {}
     invalid_by_group: dict[tuple[str, str], set[str]] = defaultdict(set)
@@ -526,9 +542,18 @@ def effective_wheel_events(
                 or ""
             ).strip(),
         )
-        try:
-            event = normalize_persisted_wheel_event(raw)
-        except (TypeError, ValueError):
+        cached = _normalization_memo.get(id(raw)) if _normalization_memo is not None else None
+        if cached is None:
+            try:
+                event = normalize_persisted_wheel_event(raw)
+            except (TypeError, ValueError):
+                event = None
+            if _normalization_memo is not None:
+                # Keep the source alive for the lifetime of this read scope.
+                _normalization_memo[id(raw)] = (raw, event)
+        else:
+            event = cached[1]
+        if event is None:
             if all(group):
                 invalid_by_group[group].add("invalid_wheel_event")
             continue
@@ -667,12 +692,44 @@ def project_wheel_call_intents(
     )
 
 
+@lru_cache(maxsize=1024)
+def _call_linkage_candidate_id(call_open_event_id: str, stock_lot_id: str) -> str:
+    digest = canonical_sha256({
+        "call_open_event_id": call_open_event_id,
+        "stock_lot_id": stock_lot_id,
+    })[:24]
+    return f"wheel-call-linkage:{digest}"
+
+
+@lru_cache(maxsize=1024)
+def _put_linkage_candidate_id(open_event_id: str, branch_id: str) -> str:
+    digest = canonical_sha256({
+        "direction": "put",
+        "option_open_event_id": open_event_id,
+        "wheel_branch_id": branch_id,
+    })[:24]
+    return f"wheel-put-linkage:{digest}"
+
+
 def project_wheel_call_linkage_candidates(
     wheel_batches: Sequence[Mapping[str, Any]],
     unlinked_short_call_lots: Sequence[Mapping[str, Any]],
     rejected_linkages: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
     effective_linkages, _invalid = effective_wheel_events(rejected_linkages)
+    return _project_wheel_call_linkage_candidates(
+        wheel_batches, unlinked_short_call_lots, effective_linkages,
+    )
+
+
+def _project_wheel_call_linkage_candidates(
+    wheel_batches: Sequence[Mapping[str, Any]],
+    unlinked_short_call_lots: Sequence[Mapping[str, Any]],
+    effective_linkages: Sequence[Mapping[str, Any]],
+    *,
+    _matched_stock_lots: set[str] | None = None,
+    _validated_call_inputs: set[tuple[Any, ...]] | None = None,
+) -> list[dict[str, Any]]:
     rejected = {
         (
             str((event.get("payload") or {}).get("call_open_event_id") or "").strip(),
@@ -683,6 +740,8 @@ def project_wheel_call_linkage_candidates(
         == "wheel_call_linkage_rejected"
     }
     candidates: list[dict[str, Any]] = []
+    batches_by_scope: dict[tuple[str, str], list[tuple[str, Mapping[str, Any]]]] | None = None
+    available_by_batch: dict[int, int] = {}
     for row in unlinked_short_call_lots:
         fields = _lot_fields(row)
         contract_key = lot_contract_key(fields)
@@ -701,63 +760,62 @@ def project_wheel_call_linkage_candidates(
         )
         account = str(contract_key.get("account") or "").strip().lower()
         symbol = str(contract_key.get("underlying_symbol") or "").strip().upper()
-        for batch in wheel_batches:
-            lot_id = str(batch.get("stock_lot_id") or "").strip()
-            if (
-                batch.get("lifecycle_status") != "active"
-                or batch.get("integrity_status") != "trusted"
-                or str(batch.get("account") or "").strip().lower() != account
-                or str(batch.get("symbol") or "").strip().upper() != symbol
-                or (call_open_event_id, lot_id) in rejected
-            ):
+        if batches_by_scope is None:
+            batches_by_scope = defaultdict(list)
+            for batch in wheel_batches:
+                if batch.get("lifecycle_status") != "active" or batch.get("integrity_status") != "trusted":
+                    continue
+                scope = (str(batch.get("account") or "").strip().lower(),
+                         str(batch.get("symbol") or "").strip().upper())
+                batches_by_scope[scope].append((str(batch.get("stock_lot_id") or "").strip(), batch))
+        stable_call = None
+        required_shares = None
+        for lot_id, batch in batches_by_scope.get((account, symbol), ()):
+            if (call_open_event_id, lot_id) in rejected:
                 continue
             try:
-                required_shares = _contracts_open(fields) * int(
-                    float(fields.get("multiplier") or 0)
-                )
-                shares_remaining = (int(batch.get("shares_remaining"))
-                                    - int(batch.get("active_option_committed_shares") or 0))
+                if required_shares is None:
+                    contracts = _contracts_open(fields)
+                    multiplier = int(float(fields.get("multiplier") or 0))
+                    required_shares = contracts * multiplier
+                batch_key = id(batch)
+                shares_remaining = available_by_batch.get(batch_key)
+                if shares_remaining is None:
+                    shares_remaining = (int(batch.get("shares_remaining"))
+                                        - int(batch.get("active_option_committed_shares") or 0))
+                    available_by_batch[batch_key] = shares_remaining
             except (TypeError, ValueError):
                 continue
             if required_shares <= 0 or shares_remaining < required_shares:
                 continue
-            digest = canonical_sha256(
-                {
-                    "call_open_event_id": call_open_event_id,
-                    "stock_lot_id": lot_id,
+            if stable_call is None:
+                stable_call = {
+                    key: fields.get(key)
+                    for key in ("lot_id", "open_event_id", "position_side", "contracts_open", "multiplier")
                 }
-            )[:24]
-            stable_call = {
-                key: fields.get(key)
-                for key in (
-                    "lot_id",
-                    "open_event_id",
-                    "position_side",
-                    "contracts_open",
-                    "multiplier",
-                )
-            }
-            stable_call["contract_key"] = {
-                key: contract_key.get(key)
-                for key in (
-                    "account",
-                    "underlying_symbol",
-                    "option_type",
-                    "strike",
-                    "expiration_ymd",
-                )
-            }
+                stable_call["contract_key"] = {
+                    key: contract_key.get(key)
+                    for key in ("account", "underlying_symbol", "option_type", "strike", "expiration_ymd")
+                }
+                if _matched_stock_lots is not None:
+                    _validate_call_linkage_input(
+                        stable_call, call_lot_id, call_open_event_id, _validated_call_inputs,
+                    )
+            generation_hash = batch.get("batch_generation_hash")
+            if _matched_stock_lots is not None and type(generation_hash) is str:
+                generation_hash.encode("utf-8")
+                lot_id.encode("utf-8")
+                _matched_stock_lots.add(lot_id)
+                continue
             candidates.append(
                 {
-                    "linkage_candidate_id": f"wheel-call-linkage:{digest}",
+                    "linkage_candidate_id": _call_linkage_candidate_id(call_open_event_id, lot_id),
                     "input_snapshot_hash": canonical_sha256(
                         {
                             "call_record_id": call_lot_id,
                             "call": stable_call,
                             "stock_lot_id": lot_id,
-                            "batch_generation_hash": batch.get(
-                                "batch_generation_hash"
-                            ),
+                            "batch_generation_hash": generation_hash,
                         }
                     ),
                     "account": account,
@@ -765,10 +823,10 @@ def project_wheel_call_linkage_candidates(
                     "call_record_id": call_lot_id,
                     "call_open_event_id": call_open_event_id,
                     "stock_lot_id": lot_id,
-                    "contracts": _contracts_open(fields),
-                    "multiplier": int(float(fields.get("multiplier") or 0)),
+                    "contracts": contracts,
+                    "multiplier": multiplier,
                     "required_shares": required_shares,
-                    "batch_generation_hash": batch.get("batch_generation_hash"),
+                    "batch_generation_hash": generation_hash,
                 }
             )
     return sorted(
@@ -782,24 +840,54 @@ def project_wheel_call_linkage_candidates(
     )
 
 
+def _validate_call_linkage_input(
+    stable_call: dict[str, Any], lot_id: str, open_event_id: str,
+    validated: set[tuple[Any, ...]] | None,
+) -> None:
+    key = None
+    if validated is not None:
+        contracts = stable_call["contracts_open"]
+        multiplier = stable_call["multiplier"]
+        texts = (
+            lot_id, open_event_id, stable_call["lot_id"], stable_call["open_event_id"],
+            stable_call["position_side"], *stable_call["contract_key"].values(),
+        )
+        if type(contracts) is int and type(multiplier) is int and all(
+            type(value) is str or value is None for value in texts
+        ):
+            context = repr(getcontext())
+            key = (context, contracts, multiplier, *texts)
+            if key in validated:
+                return
+    canonical_json_bytes(stable_call)
+    lot_id.encode("utf-8")
+    open_event_id.encode("utf-8")
+    # Preserve Decimal flags as well as traps when a validation rounds.
+    if key is not None and validated is not None and repr(getcontext()) == key[0]:
+        validated.add(key)
+
+
 def project_wheel_linkage_candidates(
     wheel_branches: Sequence[Mapping[str, Any]],
     unlinked_short_option_lots: Sequence[Mapping[str, Any]],
     rejected_linkages: Sequence[Mapping[str, Any]],
+    *,
+    _unresolved_branch_ids: set[str] | None = None,
+    _validated_call_inputs: set[tuple[Any, ...]] | None = None,
+    _normalization_memo: _WheelEventNormalizationMemo | None = None,
 ) -> list[dict[str, Any]]:
     """Return deterministic Call and Put linkage choices without guessing."""
 
     call_branches = [
-        {
-            **row,
-            "batch_generation_hash": row.get("batch_generation_hash"),
-        }
+        row
         for row in wheel_branches
         if str(row.get("direction") or "call").strip().lower() == "call"
     ]
     call_branch_by_stock_lot = {
         str(row.get("stock_lot_id") or ""): row for row in call_branches
     }
+    matched_stock_lots: set[str] | None = set() if _unresolved_branch_ids is not None else None
+    effective_linkages, _invalid = effective_wheel_events(rejected_linkages, _normalization_memo=_normalization_memo)
     call_candidates = [
         {
             **item,
@@ -814,13 +902,14 @@ def project_wheel_linkage_candidates(
             "option_open_event_id": item["call_open_event_id"],
             "batch_generation_hash": item.get("batch_generation_hash"),
         }
-        for item in project_wheel_call_linkage_candidates(
+        for item in _project_wheel_call_linkage_candidates(
             call_branches,
             unlinked_short_option_lots,
-            rejected_linkages,
+            effective_linkages,
+            _matched_stock_lots=matched_stock_lots,
+            _validated_call_inputs=_validated_call_inputs,
         )
     ]
-    effective_linkages, _invalid = effective_wheel_events(rejected_linkages)
     rejected = {
         (
             str(
@@ -879,17 +968,10 @@ def project_wheel_linkage_candidates(
                 or multiplier != branch_multiplier
             ):
                 continue
-            digest = canonical_sha256(
-                {
-                    "direction": "put",
-                    "option_open_event_id": open_event_id,
-                    "wheel_branch_id": branch_id,
-                }
-            )[:24]
             generation_hash = str(branch.get("batch_generation_hash") or "")
             put_candidates.append(
                 {
-                    "linkage_candidate_id": f"wheel-put-linkage:{digest}",
+                    "linkage_candidate_id": _put_linkage_candidate_id(open_event_id, branch_id),
                     "input_snapshot_hash": canonical_sha256(
                         {
                             "option_record_id": lot_id,
@@ -937,6 +1019,17 @@ def project_wheel_linkage_candidates(
                     "batch_generation_hash": generation_hash,
                 }
             )
+    if _unresolved_branch_ids is not None:
+        assert matched_stock_lots is not None
+        _unresolved_branch_ids.update(
+            str(call_branch_by_stock_lot[lot_id].get("wheel_branch_id") or lot_id).strip()
+            for lot_id in matched_stock_lots
+        )
+        _unresolved_branch_ids.update(
+            str(item["wheel_branch_id"]).strip() for item in [*call_candidates, *put_candidates]
+        )
+        _unresolved_branch_ids.discard("")
+        return []
     return sorted(
         [*call_candidates, *put_candidates],
         key=lambda item: (
@@ -955,6 +1048,10 @@ def project_wheel_lifecycles(
     position_lots: Sequence[Mapping[str, Any]],
     assigned_stock_projection: Mapping[str, Any],
     as_of_ms: int,
+    *,
+    _strategy_by_lot_id: Mapping[str, Mapping[str, Any]] | None = None,
+    _include_projection_hash: bool = True,
+    _normalization_memo: _WheelEventNormalizationMemo | None = None,
 ) -> list[dict[str, Any]]:
     """Rebuild Wheel batches from immutable facts; never guesses a missing link."""
 
@@ -967,6 +1064,7 @@ def project_wheel_lifecycles(
         as_of_ms=instant,
         trade_events=trade_events,
         known_trade_event_ids={str(event.get("event_id") or "") for event in strategy_trade_events},
+        _normalization_memo=_normalization_memo,
     )
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     legacy_groups = {(event["account"], event["stock_lot_id"]) for event in effective_events
@@ -1009,7 +1107,8 @@ def project_wheel_lifecycles(
         if isinstance(row, Mapping)
     ]
 
-    strategy_by_lot_id = lot_strategy_metadata_from_trade_events(strategy_trade_events)
+    strategy_by_lot_id = (_strategy_by_lot_id if _strategy_by_lot_id is not None
+                          else lot_strategy_metadata_from_trade_events(strategy_trade_events))
     lots = [
         (
             str(row.get("record_id") or "").strip(),
@@ -1302,14 +1401,15 @@ def project_wheel_lifecycles(
             "active_intent_reserved_shares": reserved_shares,
             "candidate": None,
         }
-        result["projection_hash"] = canonical_sha256(
-            {
-                "schema_version": WHEEL_PROJECTION_SCHEMA,
-                "batch_generation_hash": batch_generation_hash,
-                "as_of_ms": instant,
-                "derived": result,
-            }
-        )
+        if _include_projection_hash:
+            result["projection_hash"] = canonical_sha256(
+                {
+                    "schema_version": WHEEL_PROJECTION_SCHEMA,
+                    "batch_generation_hash": batch_generation_hash,
+                    "as_of_ms": instant,
+                    "derived": result,
+                }
+            )
         results.append(result)
     return results
 
@@ -1322,6 +1422,10 @@ def project_wheel_branches(
     as_of_ms: int,
     *,
     monitoring_gate: str = "disabled",
+    _strategy_by_lot_id: Mapping[str, Mapping[str, Any]] | None = None,
+    _load_allocations: Callable[[], Sequence[OptionEconomicAllocation] | None] | None = None,
+    _include_projection_hash: bool = True,
+    _normalization_memo: _WheelEventNormalizationMemo | None = None,
 ) -> list[dict[str, Any]]:
     """Project v2 branches while adapting legacy Call batches unchanged."""
 
@@ -1332,13 +1436,24 @@ def project_wheel_branches(
     gate = str(monitoring_gate or "disabled").strip().lower()
     if gate not in {"enabled", "disabled", "config_mismatch"}:
         raise ValueError("invalid Wheel monitoring gate")
-    legacy_batches = project_wheel_lifecycles(
-        wheel_events,
-        trade_events,
-        position_lots,
-        assigned_stock_projection,
-        instant,
-    )
+    # Historical callers with prepared metadata already projected these lots.
+    # An explicit v2-only source cannot form any legacy group. The v2 path
+    # still validates the events, including cross-event evidence and voids.
+    legacy_batches = []
+    if _strategy_by_lot_id is None or any(
+        str(event.get("event_schema_version") or "").strip() != WHEEL_EVENT_SCHEMA_V2
+        for event in wheel_events
+    ):
+        legacy_batches = project_wheel_lifecycles(
+            wheel_events,
+            trade_events,
+            position_lots,
+            assigned_stock_projection,
+            instant,
+            _strategy_by_lot_id=_strategy_by_lot_id,
+            _include_projection_hash=_include_projection_hash,
+            _normalization_memo=_normalization_memo,
+        )
     branches: list[dict[str, Any]] = []
     for batch in legacy_batches:
         phase = {
@@ -1365,11 +1480,20 @@ def project_wheel_branches(
             }
         )
 
+    # The legacy projector already validated these events and returned batches
+    # in account/branch order. Only v2 sources need the second projection.
+    if not any(
+        str(event.get("event_schema_version") or "").strip() == WHEEL_EVENT_SCHEMA_V2
+        for event in wheel_events
+    ):
+        return branches
+
     effective_events, invalid_by_group = effective_wheel_events(
         wheel_events,
         as_of_ms=instant,
         trade_events=trade_events,
         known_trade_event_ids={str(event.get("event_id") or "") for event in strategy_trade_events},
+        _normalization_memo=_normalization_memo,
     )
     v2_events = [
         event
@@ -1395,17 +1519,8 @@ def project_wheel_branches(
         if str(item.get("event_id") or "").strip()
     }
     trade_ids = set(trade_by_id)
-    allocations_by_lot: dict[str, list[Any]] = defaultdict(list)
+    allocations_by_lot: dict[str, list[Any]] | None = None
     allocation_projection_available = True
-    try:
-        economic_projection = project_trade_events(
-            [TradeEvent.from_dict(dict(item)) for item in trade_events]
-        )
-    except (TypeError, ValueError, OverflowError):
-        allocation_projection_available = False
-    else:
-        for allocation in economic_projection.allocations:
-            allocations_by_lot[allocation.target_lot_id].append(allocation)
     stock_rows = assigned_stock_projection.get("_all_assigned_stock_lots")
     if not isinstance(stock_rows, Sequence):
         stock_rows = assigned_stock_projection.get("assigned_stock_lots") or []
@@ -1414,7 +1529,8 @@ def project_wheel_branches(
         for item in stock_rows
         if isinstance(item, Mapping) and str(item.get("stock_lot_id") or "").strip()
     }
-    strategy_by_lot_id = lot_strategy_metadata_from_trade_events(strategy_trade_events)
+    strategy_by_lot_id = (_strategy_by_lot_id if _strategy_by_lot_id is not None
+                          else lot_strategy_metadata_from_trade_events(strategy_trade_events))
     lots = [
         (
             str(item.get("record_id") or "").strip(),
@@ -1602,6 +1718,19 @@ def project_wheel_branches(
         ]
         realized_put_net_pnl: float | None = None
         if direction == "put":
+            if allocations_by_lot is None:
+                allocations_by_lot = defaultdict(list)
+                allocations = _load_allocations() if _load_allocations is not None else None
+                if allocations is None:
+                    try:
+                        allocations = project_trade_events(
+                            [TradeEvent.from_dict(dict(item)) for item in trade_events]
+                        ).allocations
+                    except (TypeError, ValueError, OverflowError):
+                        allocation_projection_available = False
+                        allocations = ()
+                for allocation in allocations:
+                    allocations_by_lot[allocation.target_lot_id].append(allocation)
             realized_net = Decimal(0)
             realized_net_available = allocation_projection_available
             for option_lot_id, fields in linked_lots:
@@ -1835,14 +1964,15 @@ def project_wheel_branches(
             "legacy_call_adapter": False,
             "candidate": None,
         }
-        branch["projection_hash"] = canonical_sha256(
-            {
-                "schema_version": WHEEL_PROJECTION_SCHEMA,
-                "batch_generation_hash": batch_generation_hash,
-                "as_of_ms": instant,
-                "derived": branch,
-            }
-        )
+        if _include_projection_hash:
+            branch["projection_hash"] = canonical_sha256(
+                {
+                    "schema_version": WHEEL_PROJECTION_SCHEMA,
+                    "batch_generation_hash": batch_generation_hash,
+                    "as_of_ms": instant,
+                    "derived": branch,
+                }
+            )
         branches.append(branch)
     return sorted(
         branches,

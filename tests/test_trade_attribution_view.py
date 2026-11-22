@@ -53,23 +53,45 @@ def test_global_wheel_rule_and_all_competing_executions(tmp_path, monkeypatch):
     second_lot["record_id"] = "second-lot"
     second_lot["fields"].update(lot_id="second-lot", open_event_id="second-fill")
     rows["stored_position_lots"].append(second_lot)
-    result = build_trade_attribution_view(rows, **args)
+    ordinary_basis = ledger_attribution.ordinary_attribution_basis
+    observed_events = []
+    encode = ledger_attribution.canonical_json_bytes
+    hash_inputs = {}
+    expected_hashes = []
+
+    def observe_basis(**kwargs):
+        observed_events.append(kwargs["events"])
+        return ordinary_basis(**kwargs)
+
+    def observe_hash_input(payload):
+        if "account_facts" in payload:
+            hash_inputs.update(payload)
+        if "fact_hash" in payload:
+            expected_hashes.append(ledger_attribution.canonical_sha256({**payload, **hash_inputs}))
+        return encode(payload)
+
+    monkeypatch.setattr(ledger_attribution, "ordinary_attribution_basis", observe_basis)
+    monkeypatch.setattr(ledger_attribution, "canonical_json_bytes", observe_hash_input)
+    result = build_trade_attribution_view(rows, **args, _reuse_ordinary_events=True)
     calls = [row for row in result["rows"] if row["contract_key"]["option_type"] == "call"]
     assert len(calls) == 2
     assert all(row["selected_candidate_id"] is None for row in calls)
     assert all("competing_fills_exceed_capacity" in row["reason_codes"] for row in calls)
+    assert len(observed_events) >= 2
+    assert all(events is observed_events[0] for events in observed_events)
+    assert [row["input_hash"] for row in result["rows"]] == expected_hashes
 
 
 def test_unrelated_fills_skip_historical_wheel_projection(tmp_path, monkeypatch):
     import src.application.trades.attribution as attribution
 
     rows, config, _branch = _call_scope(tmp_path, monkeypatch)
-    original = ledger_attribution.build_wheel_read_model_from_rows
+    original = ledger_attribution._historical_attribution_branches
     projected_at = []
     def tracked(*args, **kwargs):
         projected_at.append(kwargs["as_of_ms"])
         return original(*args, **kwargs)
-    monkeypatch.setattr(ledger_attribution, "build_wheel_read_model_from_rows", tracked)
+    monkeypatch.setattr(ledger_attribution, "_historical_attribution_branches", tracked)
     build_trade_attribution_view(rows, config=config, account="lx", market="us", now_ms=4000,
                                  combo_evidence={"complete": True, "exposures": []})
     put_times = {event["event_time_ms"] for event in rows["trade_events"]

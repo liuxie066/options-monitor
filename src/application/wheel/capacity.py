@@ -21,8 +21,7 @@ from src.application.portfolio_context_service import (
     portfolio_position_snapshot_errors,
     load_account_portfolio_context,
 )
-from src.application.ledger.api import (read_wheel_capacity_context,
-    trade_attribution_capacity_check as trade_attribution_capacity_check)
+from src.application.ledger.api import read_wheel_capacity_context
 from src.infrastructure.exchange_rates import (current_exchange_rate_snapshot, project_exchange_rate_snapshot)
 
 
@@ -998,3 +997,16 @@ __all__ = [
     "revalidate_selected_wheel_put_candidate",
     "revalidate_selected_wheel_put_candidate_from_rows",
 ]
+
+
+
+def __getattr__(name: str):
+    if name == "trade_attribution_capacity_check":
+        from src.application.ledger.api import trade_attribution_capacity_check
+
+        return trade_attribution_capacity_check
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()).union(("trade_attribution_capacity_check",)))

@@ -1,5 +1,7 @@
 # 共享能力与 API 索引
 
+研究不可覆盖文件发布：`research.underlier_history._publish_bytes_once` 维护同目录独占临时文件、0600 权限、flush/fsync、硬链接发布及 finally 清理；目标已存在时失败。两个采集器继续通过各自 `_write_once` 包装计算摘要，上层 `observation_series._put` 保留同内容采纳策略。发布实现留在 underlier 源文件内，使 `collector_sha256` 保持单文件原始字节摘要且继续覆盖发布代码；quote 的 `IMPLEMENTATION_SOURCES` 包含该文件，series 自动继承。因此 underlier 的其它源码变化也会改变 quote 实现指纹，不增加 manifest 字段、不重写历史产物。契约测试：`tests/test_research_file_publication.py`。
+
 2026-10-31 研究部署状态：固定研发包 `f0d46fbf…` 已在 `liuxie-incus` 独立安装并完成两市场Linux隔离、正式启动和独立回读，部署验收时timer均enabled/active，计划11月2日起持续采集，验收时新增真实观察0；这不是当前采集量或运行态的回读。总应用请求预算301次/日、研究占用/余量2GiB/2GiB；旧包原件保留，生产OM未改。下文各入口的“本地开发/未部署”是原切片记录，当前部署边界与真实数据待验项以[研究合同文首](RESEARCH_WATCHLIST_SCOPE.md)为准；不能当作正式OM版本已发布。
 
 研究附属原件输入：`watchlist_series.build_watchlist_series` 可选消费外部摘要绑定的
@@ -64,6 +66,7 @@
 | 券商资金/持仓、cash snapshot、portfolio context | `src/application/prepared_portfolio_context.py::load_prepared_portfolio_context`；独立请求 `src/application/portfolio_context_service.py::load_account_portfolio_context` | 正式 worker 读取绑定 run/account/config 的 prepared context；独立加载经 `src/application/broker_provider.py::resolve_broker_portfolio_provider` 选择已安装的富途或长桥券商包并默认写账户缓存；缺包在接受当前缓存前返回不可用，不假造零资金或切换其他券商；通用身份归 `domain/domain/risk_capacity.py::broker_capacity_binding`。长桥适配与凭据绑定归 `src/application/longbridge_portfolio_context.py`、`src/infrastructure/longbridge_gateway.py`；缓存消费复验当前凭据指纹。账户现金和持仓来源不能由 PM 镜像补成可信；现金资格复用同模块的 `src/application/portfolio_context_service.py::cash_snapshot_is_usable`；封存资格对象完整性用 `cash_snapshot_evidence_is_complete`，不将缺失资格当明确不可用；股票资格复用 `portfolio_position_snapshot_errors`，适配领域 `position_snapshot_scope_errors`，缓存与新响应都绑定有效配置身份；默认 300 秒，归属含期权仍为 60 秒。 | [资金与持仓边界](EXTERNAL_HOLDINGS_ACCOUNT_RETIREMENT_DESIGN.md)；`tests/test_prepared_portfolio_context.py`、`tests/test_futu_portfolio_context.py` |
 | 历史汇率、事件现金、cash_conversion | `src/application/cash_conversion.py::attach_trade_event_cash_conversions`、`domain/domain/performance/cash_conversion.py::select_cash_fx_rate` | 事件写入路径组装已验证的事件时点转换证据；持久化仍经 ledger owner。历史报告消费已落库证据，缺失走现有 preview/backfill，不拿当前 FX 回写历史；分配型正股销售的父事件与子分配由同一 migration owner 逐现金事实原子回填及审计。 | [历史 FX](EXCHANGE_RATE_FACT_DESIGN.md#历史现金与绩效)、[绩效](OPTION_PERFORMANCE_DESIGN.md)；`tests/test_cash_conversion_at_write.py`、`tests/test_cash_conversion_backfill.py` |
 | PM、非富途资产、valuation evidence | `src/application/portfolio_assignment_scenario.py::read_portfolio_valuation_evidence`；客户端 `plugins/portfolio-management/src/om_pm_plugin/client.py::PortfolioManagementClient`；共享验证 `src/application/portfolio_management_contract.py` | 联网读 PM 并经客户端验证 schema、scope、账户与来源证据；非富途补充使用 scoped 响应，不用 OM 的现价/FX 重算 PM 已估值事实。连接复用 `src/application/portfolio_management.py::resolve_portfolio_management_client`。 | [资产情景](PORTFOLIO_ASSIGNMENT_SCENARIO_DESIGN.md)；`contracts/portfolio-management/v1.openapi.json`、`tests/test_portfolio_management_client.py`、`tests/test_portfolio_management_contract_vendor.py` |
+| 富途货基互转在途、开仓资金 | `src/application/futu_mmf_funding.py::apply_mmf_funding`，逐笔对账证据来自 PM 原子发布的共享目录文件 | OM 直接读取 `FUTU_MMF_FUNDING_DIR` 下的账户文件，复核账户、环境、时效与当前 OpenD 余额。证据缺失或余额不一致时标记现金待核实。 | `tests/test_futu_mmf_funding.py` |
 
 ## 计算与决策
 

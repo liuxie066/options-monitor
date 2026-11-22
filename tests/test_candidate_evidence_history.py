@@ -5,6 +5,8 @@ import os
 from hashlib import sha256
 from pathlib import Path
 
+import pytest
+
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from src.application.candidate_evidence_history import (
     NOT_SCANNED,
@@ -356,6 +358,71 @@ def test_formal_v3_history_is_read_only_and_classified_as_limited(tmp_path: Path
     assert evidence.classification["status"] == SUPPORTED_LIMITED_LEGACY_SNAPSHOT
     assert evidence.classification["reason_code"] == "historical_candidate_snapshot_valid"
     assert evidence.manifest["schema_version"] == "candidate_snapshot_manifest.v3"
+
+
+def test_formal_v3_wheel_bundle_validates_content_binding_without_rewriting(tmp_path: Path) -> None:
+    from src.application.candidate_evidence_history import load_candidate_snapshot_bundle_for_inspection
+    from src.application.candidate_snapshot_manifest import CandidateSnapshotManifestError
+    from tests.test_candidate_snapshot_manifest import _seal_wheel_bundle
+
+    # Produce only isolated fixtures, then encode the historical v3/v4/v2 contract.
+    current_base = tmp_path / "current"
+    manifest = _seal_wheel_bundle(current_base)
+    current_dir = _account_dir(current_base)
+    history_base = tmp_path / "history"
+    history_dir = _account_dir(history_base)
+
+    def write(path, payload, digest_fn):
+        payload.pop("content_sha256", None)
+        payload["content_sha256"] = digest_fn(payload)
+        encoded = _encoded_json(payload)
+        path.write_bytes(encoded)
+        return sha256(encoded).hexdigest()
+
+    index = json.loads((current_dir / manifest["status_index"]["relpath"]).read_bytes())
+    index["schema_version"] = "strategy_scan_status_index.v4"
+    for row in index["items"]:
+        source = json.loads((current_dir / row["source_status_path"]).read_bytes())
+        source["schema_version"] = "strategy_scan_status.v2"
+        row["source_status_schema"] = source["schema_version"]
+        row["source_status_path"] = row["source_status_path"].replace(".v3.json", ".v2.json")
+        row["source_status_sha256"] = write(history_dir / row["source_status_path"], source, _plain_json_sha256)
+        row["source_status_content_sha256"] = source["content_sha256"]
+    index_name = "strategy_scan_status_index.v4.json"
+    index_hash = write(history_dir / index_name, index, _plain_json_sha256)
+    entry = manifest["owner_snapshots"][0]
+    owner = json.loads((current_dir / entry["relpath"]).read_bytes())
+    owner["schema_version"] = "wheel_candidate_snapshot.v2"
+    entry.update(schema_version=owner["schema_version"], relpath="state/wheel_candidate_snapshot.v2.json")
+    entry["sha256"] = write(history_dir / entry["relpath"], owner, canonical_sha256)
+    entry["content_sha256"] = owner["content_sha256"]
+    manifest["schema_version"] = "candidate_snapshot_manifest.v3"
+    manifest["status_index"] = {
+        "schema_version": index["schema_version"], "relpath": index_name,
+        "sha256": index_hash, "content_sha256": index["content_sha256"],
+    }
+    manifest_path = history_dir / "state" / CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE
+    write(manifest_path, manifest, canonical_sha256)
+    before = {path: path.read_bytes() for path in history_dir.rglob("*.json")}
+
+    bundle = load_candidate_snapshot_bundle_for_inspection(base=history_base, run_id="run-1", account="lx")
+
+    assert {row["direction"] for row in bundle["status_index"]["items"]} == {"call", "put"}
+    assert bundle["owners"]["wheel"]["schema_version"] == "wheel_candidate_snapshot.v2"
+    assert {path: path.read_bytes() for path in history_dir.rglob("*.json")} == before
+    # Keep the enclosing byte bindings valid: only the source content digest is wrong.
+    row = index["items"][0]
+    source_path = history_dir / row["source_status_path"]
+    source = json.loads(source_path.read_bytes())
+    source["detail"] = "changed without updating the content digest"
+    encoded = _encoded_json(source)
+    source_path.write_bytes(encoded)
+    row["source_status_sha256"] = sha256(encoded).hexdigest()
+    manifest["status_index"]["sha256"] = write(history_dir / index_name, index, _plain_json_sha256)
+    manifest["status_index"]["content_sha256"] = index["content_sha256"]
+    write(manifest_path, manifest, canonical_sha256)
+    with pytest.raises(CandidateSnapshotManifestError, match="historical candidate Wheel source status content binding mismatch"):
+        load_candidate_snapshot_bundle_for_inspection(base=history_base, run_id="run-1", account="lx")
 
 
 def test_nonempty_formal_v3_history_preserves_non_wheel_v1_source_status(

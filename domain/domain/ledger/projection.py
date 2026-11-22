@@ -169,6 +169,8 @@ def project_resumable_trade_events(
     *,
     initial_state: ResumableProjectionState | None = None,
     entry_mode: str = "full",
+    _opening_lots: dict[int, tuple[TradeEvent, PositionLot]] | None = None,
+    _build_resumable_state: bool = True,
 ) -> ResumableProjectionResult:
     """Project full history or an append-only tail into active resumable state."""
 
@@ -180,6 +182,7 @@ def project_resumable_trade_events(
     if mode == "tail" and initial_state is None:
         raise ValueError("tail resumable projection requires initial_state")
 
+    opening_lots = {} if _opening_lots is None else _opening_lots
     validated_events = _validated_events(events)
     if mode == "full":
         _append_target_event_graph_diagnostics(validated_events)
@@ -248,6 +251,7 @@ def project_resumable_trade_events(
             diagnostics=diagnostics,
             evict_finalized=mode == "tail",
             allocate_economics=mode == "tail",
+            opening_lots=opening_lots,
         )
         if transition.applied and transition.lot_after is not None:
             if mode == "tail" and event.event_type == "open" and event.asset_type != "stock":
@@ -276,6 +280,7 @@ def project_resumable_trade_events(
             realized_pnl_by_event,
         ) = _project_effective_economic_allocations(
             validated_events,
+            opening_lots=opening_lots,
             voided_event_ids=voided_event_ids,
             applied_event_ids={
                 item.event.event_id for item in transitions if item.applied
@@ -369,7 +374,7 @@ def project_resumable_trade_events(
     )
     state = None
     state_error = False
-    if not diagnostics:
+    if not diagnostics and (_build_resumable_state or mode == "tail"):
         try:
             state = _resumable_state_from_accumulator(accumulator)
         except (TypeError, ValueError, OverflowError):
@@ -570,12 +575,14 @@ def _apply_event_transition(
     diagnostics: list[LedgerDiagnostic],
     evict_finalized: bool,
     allocate_economics: bool,
+    opening_lots: dict[int, tuple[TradeEvent, PositionLot]],
 ) -> ProjectionTransition:
     if event.event_type == "open":
         lot_id = _apply_open_event(
             event,
             lots_by_id=accumulator.lots_by_id,
             diagnostics=diagnostics,
+            opening_lots=opening_lots,
         )
         lot_after = accumulator.lots_by_id.get(lot_id or "")
         if lot_id is not None and lot_after is not None:
@@ -762,6 +769,7 @@ def _project_effective_economic_allocations(
     *,
     voided_event_ids: set[str],
     applied_event_ids: set[str],
+    opening_lots: dict[int, tuple[TradeEvent, PositionLot]],
 ) -> tuple[
     list[OptionEconomicAllocation],
     list[LedgerDiagnostic],
@@ -784,12 +792,12 @@ def _project_effective_economic_allocations(
         and event.asset_type != "stock"
     ]
     opens = {
-        lot_id_for_open_event(event): event
+        _opening_lot_id(event, opening_lots): event
         for event in surviving
         if event.event_type == "open"
     }
     effective_lots = {
-        lot_id: PositionLot.from_open_event(event, lot_id=lot_id)
+        lot_id: _opening_lot(event, lot_id, opening_lots)
         for lot_id, event in opens.items()
     }
     effective_events = dict(opens)
@@ -1202,6 +1210,8 @@ def _scope_diagnostics(
     validated_events: list[tuple[TradeEvent, list[LedgerDiagnostic]]],
     lots: list[PositionLot],
 ) -> list[LedgerDiagnostic]:
+    if not diagnostics:
+        return diagnostics
     events_by_id: dict[str, list[TradeEvent]] = {}
     opens_by_lot: dict[str, TradeEvent] = {}
     for event, _event_diagnostics in validated_events:
@@ -1244,13 +1254,32 @@ def _scope_diagnostics(
     return scoped
 
 
+def _opening_lot_id(
+    event: TradeEvent, opening_lots: dict[int, tuple[TradeEvent, PositionLot]],
+) -> str:
+    cached = opening_lots.get(id(event))
+    return cached[1].lot_id if cached is not None else lot_id_for_open_event(event)
+
+
+def _opening_lot(
+    event: TradeEvent, lot_id: str, opening_lots: dict[int, tuple[TradeEvent, PositionLot]],
+) -> PositionLot:
+    if event.asset_type == "stock":
+        return PositionLot.from_open_event(event, lot_id=lot_id)
+    key = id(event)
+    if key not in opening_lots:
+        opening_lots[key] = event, PositionLot.from_open_event(event, lot_id=lot_id)
+    return opening_lots[key][1]
+
+
 def _apply_open_event(
     event: TradeEvent,
     *,
     lots_by_id: dict[str, PositionLot],
     diagnostics: list[LedgerDiagnostic],
+    opening_lots: dict[int, tuple[TradeEvent, PositionLot]],
 ) -> str | None:
-    lot_id = lot_id_for_open_event(event)
+    lot_id = _opening_lot_id(event, opening_lots)
     if lot_id in lots_by_id:
         diagnostics.append(
             LedgerDiagnostic(
@@ -1262,7 +1291,7 @@ def _apply_open_event(
             )
         )
         return None
-    lots_by_id[lot_id] = PositionLot.from_open_event(event, lot_id=lot_id)
+    lots_by_id[lot_id] = _opening_lot(event, lot_id, opening_lots)
     return lot_id
 
 

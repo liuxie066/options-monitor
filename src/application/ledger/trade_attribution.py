@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from contextlib import contextmanager, nullcontext
+from hashlib import sha256
 from typing import Any, Callable, Iterator, Mapping, Sequence
 import time
 
-from domain.domain.decision_state_fingerprint import canonical_sha256
+from domain.domain.decision_state_fingerprint import canonical_json_bytes, canonical_sha256
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.ledger.position_fields import effective_contracts_open
 from domain.domain.trade_execution import execution_identity_from_input, legacy_open_execution_input_from_event
@@ -36,7 +37,12 @@ from domain.domain.trade_contract_identity import contract_share_quantity
 from domain.domain import risk_capacity
 from src.application.portfolio_context_service import evaluate_account_cash_snapshot, cash_snapshot_is_usable
 from src.infrastructure.exchange_rates import capacity_currency_converter
-from .assigned_stock_projection import build_wheel_read_model_from_rows, build_wheel_read_model_with_capacity_from_rows
+from .assigned_stock_projection import (
+    _HistoricalTradeRows,
+    _historical_attribution_branches,
+    build_wheel_read_model_from_rows,
+    build_wheel_read_model_with_capacity_from_rows,
+)
 from .ordinary_attribution import ordinary_attribution_basis, ordinary_attribution_is_unopposed
 
 
@@ -635,13 +641,21 @@ def build_trade_attribution_view(
     rows: Mapping[str, Any], *, config: Mapping[str, Any], account: str, market: str, now_ms: int,
     combo_evidence: Mapping[str, Any], capacity_observation: Mapping[str, Any] | None = None,
     combo_mode: str = "confirm", revalidate_expired: bool = False,
+    _account_facts: Sequence[dict[str, Any]] | None = None,
+    _reuse_ordinary_events: bool = False,
 ) -> dict[str, Any]:
     """Collect every competitor before selecting any execution; this function never writes."""
     # The Wheel package initializes its application workflows; load config after the ledger facade.
     from src.application.wheel.config import resolve_wheel_config, evaluate_wheel_activation_readiness
     if combo_mode not in {"off", "observe", "confirm", "auto"}:
         raise ValueError("invalid Combo attribution mode")
-    account_facts = trade_attribution_facts_from_events(rows["trade_events"], account=account)
+    # Batch selection may already have projected this snapshot. Give the
+    # view its own facts and reason lists before adding view-specific evidence.
+    account_facts = (
+        trade_attribution_facts_from_events(rows["trade_events"], account=account)
+        if _account_facts is None else
+        [{**fact, "reason_codes": list(fact["reason_codes"])} for fact in _account_facts]
+    )
     facts = [row for row in account_facts
              if str(symbol_market(row["contract_key"]["underlying_symbol"]) or "").lower() == market]
     physical_ids = resolve_futu_account_ids(config, account=account)
@@ -689,6 +703,14 @@ def build_trade_attribution_view(
                        if row.get("status") in {"proposal_ready", "ambiguous", "user_confirmed"}}
     candidates: dict[str, list[dict[str, Any]]] = {row["lot_id"]: [] for row in facts}
     by_lot = {row["lot_id"]: row for row in facts}
+    booked_positions: dict = {}
+
+    def check_capacity(fact, **kwargs):
+        return trade_attribution_capacity_check(
+            config=config, fact=fact, facts=account_facts, wheel_read_model=capacity_model,
+            observation=capacity_observation or {}, now_ms=now_ms, _booked_positions=booked_positions, **kwargs,
+        )
+
     for pair in combos["inferences"]:
         if combo_mode == "off" and pair["inference_id"] not in known_proposals and pair["evidence_grade"] != "exact_delivered_candidate":
             continue
@@ -703,9 +725,7 @@ def build_trade_attribution_view(
         if any(lot not in by_lot or by_lot[lot]["reason_codes"] or by_lot[lot].get("origin") == "manual" for lot in members):
             reasons.append("combo_member_unavailable")
         if members[0] in by_lot:
-            reasons.extend(trade_attribution_capacity_check(config=config, fact=by_lot[members[0]], facts=account_facts,
-                wheel_read_model=capacity_model, observation=capacity_observation or {}, now_ms=now_ms,
-                check_account_capacity=False)["reason_codes"])
+            reasons.extend(check_capacity(by_lot[members[0]], check_account_capacity=False)["reason_codes"])
         for lot in members:
             if lot in candidates:
                 candidates[lot].append({"candidate_id": "combo:" + pair["strategy_group_id"], "strategy": "combo_yield",
@@ -715,6 +735,9 @@ def build_trade_attribution_view(
     # be reused only at the identical fill instant, never across distinct times.
     branch_account_refs: dict[str, dict[str, Any] | None] = {}
     historical_branches_by_time: dict[int, dict[str, Any]] = {}
+    historical_rows = None
+    # Current intent snapshots share one time and one observed event set.
+    current_intents: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for fact in facts:
         lot = fact["lot_id"]
         if effective_contracts_open(stored.get(lot) or {}) != fact["contracts_open"]:
@@ -741,8 +764,12 @@ def build_trade_attribution_view(
             continue
         fill_time = fact["event_time_ms"]
         if fill_time not in historical_branches_by_time:
-            historical = build_wheel_read_model_from_rows(rows, account=account, as_of_ms=fill_time, market=market)
-            historical_branches_by_time[fill_time] = {row["wheel_branch_id"]: row for row in historical["wheel_branches"]}
+            if not historical_branches_by_time:
+                historical_rows = _HistoricalTradeRows.from_rows(rows)
+            historical_branches_by_time[fill_time] = _historical_attribution_branches(
+                rows, account=account, as_of_ms=fill_time, market=market,
+                historical_rows=historical_rows,
+            )
         history = historical_branches_by_time[fill_time]
         for branch in matching_branches:
             branch_id = branch["wheel_branch_id"]
@@ -768,7 +795,7 @@ def build_trade_attribution_view(
                 continue
             fill = events_by_id[fact["open_event_id"]]
             intent_check = resolve_wheel_fill_intent(branch, fill, rows["account_wheel_events"], now_ms=now_ms,
-                known_trade_event_ids=known_event_ids)
+                known_trade_event_ids=known_event_ids, _current_intents=current_intents)
             reasons.extend(intent_check["reason_codes"])
             intent = intent_check["intent"]
             if branch["integrity_status"] != "trusted" or (not readiness["ready"]
@@ -804,8 +831,7 @@ def build_trade_attribution_view(
                             and lot not in projection.get("active_option_lot_ids", [])
                             for projection in (prior, branch))):
                 continue
-            check = trade_attribution_capacity_check(config=config, fact=fact, facts=account_facts, wheel_read_model=capacity_model,
-                observation=capacity_observation or {}, now_ms=now_ms, consumed_reservation=consumed_reservation)
+            check = check_capacity(fact, consumed_reservation=consumed_reservation)
             reasons.extend(check["reason_codes"])
             candidates[lot].append({"candidate_id": "wheel:" + branch_id, "strategy": "wheel", "eligible": not reasons,
                 "reason_codes": sorted(set(reasons)), "wheel_branch_id": branch_id, "member_lot_ids": [lot],
@@ -840,8 +866,7 @@ def build_trade_attribution_view(
                     reasons.add("wheel_branch_capacity_exceeded")
             candidate["consumed_reservation"]["contracts"] = credit
             candidate["member_lot_ids"] = member_ids
-            check = trade_attribution_capacity_check(config=config, fact=fact, facts=account_facts, wheel_read_model=capacity_model,
-                observation=capacity_observation or {}, now_ms=now_ms, consumed_reservation=candidate["consumed_reservation"])
+            check = check_capacity(fact, consumed_reservation=candidate["consumed_reservation"])
             reasons.update(check["reason_codes"])
             candidate["capacity_evidence_complete"] = check.get("evidence_complete") is True
             candidate["reason_codes"] = sorted(reasons)
@@ -871,6 +896,13 @@ def build_trade_attribution_view(
         "fx_rates": (portfolio.get("exchange_rates") or {}).get("rates"), "fx_status": portfolio.get("exchange_rate_status"),
     }
     results = []
+    ordinary_events = None
+    if facts:
+        # account_facts is the first member in the sorted canonical object.
+        # Its string pairs are unchanged for every attribution in this view.
+        account_facts_prefix = sha256(canonical_json_bytes({
+            "account_facts": sorted((item["open_event_id"], item["input_hash"]) for item in account_facts),
+        })[:-1] + b",")
     for fact in facts:
         proposals = sorted(candidates[fact["lot_id"]], key=lambda row: row["candidate_id"])
         for proposal in proposals:
@@ -896,13 +928,13 @@ def build_trade_attribution_view(
             and ordinary_attribution_is_unopposed(fact=fact, facts=account_facts, proposals=proposals))
         ordinary_basis = None
         if complete and existing["status"] != "conflict":
+            if ordinary_events is None or not _reuse_ordinary_events:
+                ordinary_events = _effective_events(rows["trade_events"])
             ordinary_basis = ordinary_attribution_basis(fact=fact, facts=account_facts,
-                events=_effective_events(rows["trade_events"]), proposals=proposals, exposures=exposures,
+                events=ordinary_events, proposals=proposals, exposures=exposures,
                 exposure_ids=combos["delivered_exposure_ids_by_lot"].get(fact["lot_id"], []),
                 observation=capacity_observation or {}, now_ms=now_ms)
-            if ordinary_basis is not None and trade_attribution_capacity_check(config=config, fact=fact,
-                    facts=account_facts, wheel_read_model=capacity_model, observation=capacity_observation or {},
-                    now_ms=now_ms)["status"] != "available":
+            if ordinary_basis is not None and check_capacity(fact)["status"] != "available":
                 ordinary_basis = None
         resolution = resolve_trade_attribution(candidates=tuple([] if ordinary_basis else proposals), evidence_complete=complete,
             existing=existing, applicable=fact["contracts_open"] > 0)
@@ -924,19 +956,20 @@ def build_trade_attribution_view(
                                 if asset == "option"]}
         semantic = {"fact_hash": fact["input_hash"], "candidates": proposals, "policy": wheel_config.get("policy_hash"),
                     "complete": complete, "enabled": enabled, "capacity": capacity_evidence, "ordinary_basis": ordinary_basis,
-                    "account_facts": sorted((item["open_event_id"], item["input_hash"]) for item in account_facts),
                     "combo_inferences": sorted(({key: pair.get(key) for key in (
                         "inference_id", "status", "input_snapshot_hash", "put_lot_snapshot", "call_lot_snapshot",
                         "proposal_expires_at_ms", "strategy_group_id")} for pair in rows.get("account_combo_inferences") or []),
                         key=lambda pair: pair["inference_id"]),
                     "wheel_evidence": sorted((event["event_id"], event["payload_hash"]) for event in wheel_events)}
+        input_digest = account_facts_prefix.copy()
+        input_digest.update(canonical_json_bytes(semantic)[1:])
         results.append({**fact, "status": "ordinary" if preserving_ordinary else "pending" if selecting_ordinary else resolution.status,
             "candidate_ids": [item["candidate_id"] for item in proposals] if ordinary_basis else list(resolution.candidate_ids),
             "candidates": proposals, "ordinary_basis": ordinary_basis,
             "reason_codes": sorted(set(fact["reason_codes"]) | ({"existing_ordinary_preserved"} if preserving_ordinary else {"awaiting_ledger_commit"} if selecting_ordinary else set(resolution.reason_codes))),
             "ordinary_previewable": fact["ordinary_previewable"] and not fact["reason_codes"],
             "selected_candidate_id": ("ordinary" if selecting_ordinary else resolution.selected_candidate_id) if enabled and not preserving_ordinary else None, "rules_enabled": enabled,
-            "input_hash": canonical_sha256(semantic), "evaluated_at_ms": now_ms, "evidence_complete": complete,
+            "input_hash": input_digest.hexdigest(), "evaluated_at_ms": now_ms, "evidence_complete": complete,
             "capacity_evidence": {
                 "semantic_sha256": canonical_sha256(capacity_evidence),
                 "authority": dict(portfolio.get("capacity_authority") or {}),
@@ -1233,6 +1266,7 @@ def trade_attribution_capacity_check(
     config: Mapping[str, Any],
     consumed_reservation: Mapping[str, Any] | None = None,
     check_account_capacity: bool = True,
+    _booked_positions: dict | None = None,
 ) -> dict[str, Any]:
     """Verify booked positions; Wheel additionally requires account coverage."""
     from datetime import datetime, timezone
@@ -1285,6 +1319,7 @@ def trade_attribution_capacity_check(
         convert_currency=capacity_currency_converter(portfolio.get("exchange_rates") or {}),
         fx_status=portfolio.get("exchange_rate_status"),
         consumed_reservation=consumed_reservation, check_account_capacity=check_account_capacity,
+        _booked_positions=_booked_positions,
     )
 
 

@@ -194,6 +194,30 @@ def test_exposure_requires_one_rendered_live_occurrence() -> None:
     assert derive_combo_candidate_exposures(duplicate) == []
 
 
+@pytest.mark.parametrize("duplicate_count", [0, 1, 2])
+def test_exposure_index_preserves_unique_matching_and_identity_filter(duplicate_count: int) -> None:
+    nvda, amd = _candidate_row(), _amd_row()
+    for row in (nvda, amd):
+        row.update(_occurrence(row))
+    brief, amd_brief = _brief(nvda), _brief(amd)
+    brief["candidate_index"].extend(amd_brief["candidate_index"])
+    brief["candidates"]["combo_yield"].extend([
+        amd,
+        _candidate_row(multiplier=None),
+        _candidate_row(currency="CAD"),
+        _candidate_row(multiplier=10),
+        *[_candidate_row() for _ in range(duplicate_count)],
+    ])
+    expected = derive_combo_candidate_exposures(amd_brief)
+    if not duplicate_count:
+        expected += derive_combo_candidate_exposures(_brief(nvda))
+    assert derive_combo_candidate_exposures(brief) == sorted(expected, key=lambda row: row["candidate_exposure_id"])
+    assert derive_combo_candidate_exposures(
+        brief, candidate_identities=[amd_brief["candidate_index"][0]["identity"]],
+    ) == derive_combo_candidate_exposures(amd_brief)
+    assert derive_combo_candidate_exposures(brief, candidate_identities=[]) == []
+
+
 def test_publication_keeps_incomplete_rows_but_only_complete_rows_get_occurrences() -> None:
     published = attach_combo_candidate_occurrences(
         pd.DataFrame([_candidate_row(), _candidate_row(multiplier=None)]),

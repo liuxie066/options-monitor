@@ -23,19 +23,7 @@ from src.infrastructure.exchange_rates import (
 )
 from src.application.current_fx_run import load_run_fx_snapshot
 from src.application.multi_tick_audit import prepared_context_phase
-from src.application.ledger.api import (
-    CURRENT_DECISION_READ_SCHEMA,
-    attach_event_strategy_metadata,
-    decision_state_snapshots_from_rows_many,
-    open_performance_evidence_repository,
-    open_performance_query_ledger_from_data_config,
-    open_position_ledger_from_data_config,
-    read_current_decision_projection,
-    read_decision_state_rows_many,
-    resolve_position_data_config_path,
-    resolve_position_ledger_sqlite_path,
-    validate_position_fact_snapshot_contract,
-)
+from src.application.ledger import api as ledger_api
 from src.application.source_receipts import sha256_bytes
 from src.application.runtime_config_freshness import infer_runtime_config_market
 from src.application.cash_conversion import cash_fx_observation_facts
@@ -168,7 +156,7 @@ def _persist_fx_evidence(
     errors = 0
     for repo in repos_by_ledger_path.values():
         try:
-            evidence_repo = open_performance_evidence_repository(repo)
+            evidence_repo = ledger_api.open_performance_evidence_repository(repo)
             repo_envelope = _reuse_existing_fx_facts(
                 envelope,
                 evidence_repo.read_all().fx_rates,
@@ -528,12 +516,12 @@ def prepare_option_positions_contexts(
     for account in sorted(configs):
         try:
             with prepared_context_phase("ledger_paths", account=account):
-                data_path = resolve_position_data_config_path(
+                data_path = ledger_api.resolve_position_data_config_path(
                     base=base_path,
                     cfg=configs[account],
                     config_path=Path(config_path),
                 ).resolve()
-                ledger_path = resolve_position_ledger_sqlite_path(
+                ledger_path = ledger_api.resolve_position_ledger_sqlite_path(
                     base=base_path,
                     data_config=data_path,
                 )
@@ -559,11 +547,11 @@ def prepare_option_positions_contexts(
     ):
         try:
             with prepared_context_phase("ledger_read_a"):
-                _resolved_path, repo = open_position_ledger_from_data_config(
+                _resolved_path, repo = ledger_api.open_position_ledger_from_data_config(
                     base=base_path,
                     data_config=data_config_by_ledger_path[ledger_path],
                 )
-                rows_a_by_ledger_path[ledger_path] = read_decision_state_rows_many(
+                rows_a_by_ledger_path[ledger_path] = ledger_api.read_decision_state_rows_many(
                     repo,
                     accounts=tuple(sorted(accounts)),
                 )
@@ -624,19 +612,19 @@ def prepare_option_positions_contexts(
                             run_id=run_id_norm,
                             account=account,
                         )
-                        data_path = resolve_position_data_config_path(
+                        data_path = ledger_api.resolve_position_data_config_path(
                             base=base_path,
                             cfg=retained_config,
                             config_path=Path(config_path),
                         ).resolve()
-                        ledger_path = resolve_position_ledger_sqlite_path(
+                        ledger_path = ledger_api.resolve_position_ledger_sqlite_path(
                             base=base_path,
                             data_config=data_path,
                         )
                         if ledger_path in attempted_paths:
                             continue
                         attempted_paths.add(ledger_path)
-                        _resolved_path, repo = open_performance_query_ledger_from_data_config(
+                        _resolved_path, repo = ledger_api.open_performance_query_ledger_from_data_config(
                             base=base_path,
                             data_config=data_path,
                         )
@@ -670,7 +658,7 @@ def prepare_option_positions_contexts(
             continue
         try:
             with prepared_context_phase("ledger_read_b"):
-                rows_b_by_ledger_path[ledger_path] = read_decision_state_rows_many(
+                rows_b_by_ledger_path[ledger_path] = ledger_api.read_decision_state_rows_many(
                     repo,
                     accounts=tuple(sorted(accounts)),
                 )
@@ -700,7 +688,7 @@ def prepare_option_positions_contexts(
                     rows_by_account,
                     accounts,
                 )
-                records = attach_event_strategy_metadata(
+                records = ledger_api.attach_event_strategy_metadata(
                     first_rows["stored_position_lots"],
                     first_rows.get("trade_events"),
                 )
@@ -708,7 +696,7 @@ def prepare_option_positions_contexts(
                 for account in accounts:
                     try:
                         with prepared_context_phase("current_projection", account=account):
-                            current_projection = read_current_decision_projection(
+                            current_projection = ledger_api.read_current_decision_projection(
                                 repos_by_ledger_path[ledger_path],
                                 account=account,
                                 now_ms=lifecycle_now_ms,
@@ -723,7 +711,7 @@ def prepare_option_positions_contexts(
                         }
                     current_projections[account] = current_projection
                 with prepared_context_phase("snapshot_build"):
-                    snapshots = decision_state_snapshots_from_rows_many(
+                    snapshots = ledger_api.decision_state_snapshots_from_rows_many(
                         {account: rows_by_account[account] for account in accounts},
                         portfolio_scope_ids={account: portfolio_scope_id(account) for account in accounts},
                         source_observed_at=observed_at_utc,
@@ -740,7 +728,7 @@ def prepare_option_positions_contexts(
         for account in accounts:
             snapshot = snapshots[account]
             with prepared_context_phase("snapshot_contract", account=account):
-                contract_reasons = validate_position_fact_snapshot_contract(
+                contract_reasons = ledger_api.validate_position_fact_snapshot_contract(
                     snapshot
                 )
             if (
@@ -1121,7 +1109,7 @@ def _load_prepared_option_positions_context_artifacts(
                 "prepared option current decision read is invalid"
             )
     elif (
-        current_read.get("schema_version") != CURRENT_DECISION_READ_SCHEMA
+        current_read.get("schema_version") != ledger_api.CURRENT_DECISION_READ_SCHEMA
         or normalize_account(current_read.get("account")) != account
         or not isinstance(current_read.get("position_lots"), list)
         or (

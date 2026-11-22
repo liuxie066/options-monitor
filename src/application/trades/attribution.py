@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from typing import Any, Iterable, Mapping, MutableMapping, Sequence
+from contextlib import ExitStack
 from copy import deepcopy
 from datetime import datetime, timezone
 import json
 import time
 from pathlib import Path
+from typing import Any, Callable, Iterable, Mapping, MutableMapping, Sequence
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.strategy_membership import trade_attribution_conflict_execution_keys as _conflict_execution_keys
@@ -206,10 +207,21 @@ def apply_referenced_trade_attribution(repo: Any, *, account: str, config: Mappi
                    if inference_id else ("planned" if not apply_changes else "confirmed" if result["write_applied"] else "idempotent"))}
 
 
+_InitialAttributionObservation = tuple[
+    Callable[..., dict[str, Any] | None], dict[str, Any], list[dict[str, Any]]
+]
+
+
 def reconcile_trade_attribution_account(
     repo: Any, *, config: Mapping[str, Any], account: str, market: str, runtime_root: Path,
     inbox_path: Path, combo_mode: str, cursor: str = "", stop_event: Any = None,
+    _initial_observation: _InitialAttributionObservation | None = None,
 ) -> dict[str, Any]:
+    if _initial_observation is not None:
+        reader, rows, facts = _initial_observation
+        return _reconcile_trade_attribution_batch(repo, config=config, account=account, market=market,
+            runtime_root=runtime_root, inbox_path=inbox_path, combo_mode=combo_mode, cursor=cursor,
+            stop_event=stop_event, read_if_changed=reader, initial_rows=rows, initial_facts=facts)
     with open_trade_attribution_snapshot_reader(repo, account=account, market=market) as read_if_changed:
         return _reconcile_trade_attribution_batch(repo, config=config, account=account, market=market,
             runtime_root=runtime_root, inbox_path=inbox_path, combo_mode=combo_mode, cursor=cursor,
@@ -219,14 +231,19 @@ def reconcile_trade_attribution_account(
 def _reconcile_trade_attribution_batch(
     repo: Any, *, config: Mapping[str, Any], account: str, market: str, runtime_root: Path,
     inbox_path: Path, combo_mode: str, cursor: str, stop_event: Any, read_if_changed: Any,
+    initial_rows: dict[str, Any] | None = None,
+    initial_facts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     from src.application.wheel.capacity import observe_trade_attribution_capacity
     from src.application.trades.inbox import cache_trade_attribution_result
 
     rows = read_if_changed()
-    if rows is None:
+    if rows is not None:
+        facts = trade_attribution_facts_from_events(rows["trade_events"], account=account)
+    elif initial_rows is not None and initial_facts is not None:
+        rows, facts = initial_rows, initial_facts
+    else:
         raise RuntimeError("initial trade attribution snapshot is unavailable")
-    facts = trade_attribution_facts_from_events(rows["trade_events"], account=account)
     selected = sorted((row for row in facts if row["execution_key"] and row["execution_key"] > cursor
         and str(symbol_market(row["contract_key"]["underlying_symbol"]) or "").lower() == market),
         key=lambda row: row["execution_key"])[:100]
@@ -252,6 +269,7 @@ def _reconcile_trade_attribution_batch(
     result["observation"] = _attribution_observation_status(
         observation, account=account, market=market, config=config, ordinary_requested=bool(history_starts))
     view = None
+    account_facts: list[dict[str, Any]] | None = facts
     for selected_fact in selected:
         if stop_event is not None and stop_event.is_set():
             break
@@ -265,12 +283,14 @@ def _reconcile_trade_attribution_batch(
             evidence = read_attribution_combo_evidence(rows, account=account, runtime_root=runtime_root,
                 now_ms=int(time.time() * 1000))
             view = None
+            account_facts = None
         if stop_event is not None and stop_event.is_set():
             break
         if view is None:
             view = build_trade_attribution_view(rows, config=config, account=account, market=market,
                 now_ms=int(time.time() * 1000), combo_evidence=evidence,
-                capacity_observation=observation, combo_mode=combo_mode)
+                capacity_observation=observation, combo_mode=combo_mode, _account_facts=account_facts,
+                _reuse_ordinary_events=True)
         current = next((row for row in view["rows"] if row["execution_key"] == selected_fact["execution_key"]), None)
         if current is None:
             continue
@@ -292,7 +312,8 @@ def _reconcile_trade_attribution_batch(
                         if current["selected_candidate_id"].startswith("combo:") else None))
                 committed = read_trade_attribution_snapshot(repo, account=account, market=market)
                 after_view = build_trade_attribution_view(committed, config=config, account=account, market=market,
-                    now_ms=int(time.time() * 1000), combo_evidence=evidence, capacity_observation=observation, combo_mode=combo_mode)
+                    now_ms=int(time.time() * 1000), combo_evidence=evidence, capacity_observation=observation,
+                    combo_mode=combo_mode, _reuse_ordinary_events=True)
                 current = next(row for row in after_view["rows"] if row["execution_key"] == current["execution_key"])
                 result["ordinary" if current["status"] == "ordinary" else "linked"] += int(applied["write_applied"])
             elif (current["status"] == "conflict" and current["rules_enabled"]
@@ -360,11 +381,10 @@ def bind_attribution_market_config(
     return bound
 
 
-def _attribution_recoverable_markets(repo: Any, *, account: str, market: str) -> set[str]:
+def _attribution_recoverable_markets(facts: Sequence[Mapping[str, Any]]) -> set[str]:
     """Only supported markets with an open canonical execution have recovery work."""
-    rows = read_trade_attribution_snapshot(repo, account=account, market=market)
     markets: set[str] = set()
-    for fact in trade_attribution_facts_from_events(rows["trade_events"], account=account):
+    for fact in facts:
         if not fact["execution_key"] or fact["contracts_open"] <= 0:
             continue
         fact_market = str(symbol_market(fact["contract_key"]["underlying_symbol"]) or "").strip().lower()
@@ -385,42 +405,51 @@ def reconcile_trade_attribution_source(
             recovery[account] = {source_market: {"observation": observation_status("cancelled", "cancelled")}}
             continue
         entry = recovery.setdefault(account, {})
-        try:
-            if account not in (config.get("accounts") or []):
-                raise ValueError(f"source runtime config does not configure account {account}")
-            discovered = _attribution_recoverable_markets(repo, account=account, market=source_market)
-        except Exception as exc:
-            entry["error"] = f"{type(exc).__name__}: {exc}"
-            continue
-        # Discovery read the account's canonical facts successfully. An absent
-        # market has no recoverable work, so no extra provider probe is needed.
-        for market in set(RUNTIME_MARKETS) - discovered - {source_market}:
-            entry[market] = {"observation": observation_status("not_required")}
-        for market in [source_market, *sorted(discovered - {source_market})]:
-            if stop_event is not None and stop_event.is_set():
-                entry[market] = {"observation": observation_status("cancelled", "cancelled")}
+        with ExitStack() as scope:
+            try:
+                if account not in (config.get("accounts") or []):
+                    raise ValueError(f"source runtime config does not configure account {account}")
+                reader = scope.enter_context(
+                    open_trade_attribution_snapshot_reader(repo, account=account, market=source_market)
+                )
+                rows = reader()
+                if rows is None:
+                    raise RuntimeError("initial trade attribution snapshot is unavailable")
+                facts = trade_attribution_facts_from_events(rows["trade_events"], account=account)
+                discovered = _attribution_recoverable_markets(facts)
+            except Exception as exc:
+                entry["error"] = f"{type(exc).__name__}: {exc}"
                 continue
-            key = f"{account}:{market}"
-            if market == source_market:
-                bound, mode = dict(config), combo_mode
-            else:
+            # An absent market has no recoverable work in the observed facts.
+            for market in set(RUNTIME_MARKETS) - discovered - {source_market}:
+                entry[market] = {"observation": observation_status("not_required")}
+            for market in [source_market, *sorted(discovered - {source_market})]:
+                if stop_event is not None and stop_event.is_set():
+                    entry[market] = {"observation": observation_status("cancelled", "cancelled")}
+                    continue
+                key = f"{account}:{market}"
+                initial = None
+                if market == source_market:
+                    bound, mode = dict(config), combo_mode
+                    initial = (reader, rows, facts)
+                else:
+                    try:
+                        bound = bind_attribution_market_config(config=config, repo=repo, account=account,
+                            market=market, runtime_root=runtime_root)
+                    except Exception as exc:
+                        entry[market] = {"error": f"{type(exc).__name__}: {exc}"}
+                        continue
+                    mode = combo_reconciliation_mode_for_account(bound, account=account)
                 try:
-                    bound = bind_attribution_market_config(config=config, repo=repo, account=account,
-                        market=market, runtime_root=runtime_root)
+                    result = reconcile_trade_attribution_account(
+                        repo, config=bound, account=account, market=market, runtime_root=runtime_root,
+                        inbox_path=inbox_path, combo_mode=mode,
+                        cursor=str(cursors.get(key) or ""), stop_event=stop_event, _initial_observation=initial)
                 except Exception as exc:
                     entry[market] = {"error": f"{type(exc).__name__}: {exc}"}
                     continue
-                mode = combo_reconciliation_mode_for_account(bound, account=account)
-            try:
-                result = reconcile_trade_attribution_account(
-                    repo, config=bound, account=account, market=market, runtime_root=runtime_root,
-                    inbox_path=inbox_path, combo_mode=mode,
-                    cursor=str(cursors.get(key) or ""), stop_event=stop_event)
-            except Exception as exc:
-                entry[market] = {"error": f"{type(exc).__name__}: {exc}"}
-                continue
-            cursors[key] = result["next_cursor"]
-            entry[market] = result
+                cursors[key] = result["next_cursor"]
+                entry[market] = result
     return recovery
 
 

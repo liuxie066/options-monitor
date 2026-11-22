@@ -21,6 +21,7 @@ POSITION_LOT_STRATEGY_PATCH_FIELDS = (
     "strategy", "leg_role", "strategy_group_id", "source_stock_lot_id",
     "source_wheel_branch_id", "wheel_call_allocations", "strategy_snapshot",
 )
+_STRATEGY_OWNER_INPUT_FIELDS = frozenset((*POSITION_LOT_STRATEGY_PATCH_FIELDS, "expiry_structure", "structure_mode"))
 
 
 def validate_attribution_decision(
@@ -181,6 +182,8 @@ class TradeAttributionResolution:
 
 def strategy_metadata_has_owner(metadata: Mapping[str, Any]) -> bool:
     """CSP/CC describe a leg; only relationship metadata claims strategy ownership."""
+    if type(metadata) is dict and _STRATEGY_OWNER_INPUT_FIELDS.isdisjoint(metadata):
+        return False
     resolved = resolve_strategy_metadata(metadata)
     value = resolved.metadata
     return bool(resolved.issues or value.strategy not in {"", "unassigned", STRATEGY_SELL_PUT, STRATEGY_COVERED_CALL}

@@ -1690,7 +1690,14 @@ def render_service_bundle(
         )
         add(
             f"systemd/{status_timer}",
-            _systemd_timer(description="Options Monitor runtime status timer", unit_name=status_service, interval="15min"),
+            _systemd_timer(
+                description="Options Monitor runtime status timer",
+                unit_name=status_service,
+                calendar="*-*-* *:05,20,35,50:00 UTC",
+                accuracy_sec="1s",
+                randomized_delay_sec=0,
+                persistent=False,
+            ),
             install_path=f"/etc/systemd/system/{status_timer}",
             kind="systemd_timer",
             service_name=status_timer,
@@ -1730,7 +1737,10 @@ def render_service_bundle(
                 _systemd_timer(
                     description="Options Monitor regular quality artifact refresh timer",
                     unit_name=quality_refresh_service,
-                    interval=QUALITY_REFRESH_INTERVAL_SYSTEMD,
+                    calendar="*-*-* *:00,15,30,45:00 UTC",
+                    accuracy_sec="1s",
+                    randomized_delay_sec=0,
+                    persistent=False,
                 ),
                 install_path=f"/etc/systemd/system/{quality_refresh_timer}",
                 kind="systemd_timer",
@@ -3201,8 +3211,21 @@ def render_service_bundle_from_profile(
         "include_content": True,
         "group_query_bot_instances": group_query_bot_instances or None,
     }
+    external_opend = profile.get("external_opend_units", [])
+    if not isinstance(external_opend, list) or any(
+        not isinstance(name, str) or not re.fullmatch(r"options-monitor-opend-[a-z0-9-]+\.service", name)
+        for name in external_opend
+    ):
+        raise ValueError("external_opend_units must list exact per-account OpenD systemd unit names")
+    if external_opend and provider != "systemd":
+        raise ValueError("external_opend_units requires systemd")
     bundle = render_service_bundle(**render_kwargs)
     expected_profile = _bundle_profile(bundle)
+    if external_opend:
+        overlap = set(external_opend) & set(_service_names_from_profile(expected_profile))
+        if overlap:
+            raise ValueError("OpenD units cannot be both external and OM-managed: " + ", ".join(sorted(overlap)))
+        expected_profile["external_opend_units"] = external_opend
     if include_opend:
         previous_services_raw = opend.get("services")
         previous_services = previous_services_raw if isinstance(previous_services_raw, list) else []

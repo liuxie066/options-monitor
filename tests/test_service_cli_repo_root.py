@@ -90,6 +90,7 @@ def linked_entry(monkeypatch, tmp_path):
     (["update", "check"], "service_upgrade_check"),
     (["update", "verify", "--no-check-latest"], "service_upgrade_verify"),
     (["update", "apply", "--target-version", "1.0.1"], "service_upgrade"),
+    (["update", "apply", "--target-version", "1.0.1", "--plugin-asset-dir", "/staging/release assets"], "service_upgrade"),
     (["update", "rollback", "--to-version", "1.0.0"], "service_rollback"),
 ])
 def test_main_service_defaults_and_explicit_override(linked_entry, monkeypatch, tmp_path, capsys, argv, consumer, explicit):
@@ -114,6 +115,8 @@ def test_main_service_defaults_and_explicit_override(linked_entry, monkeypatch, 
     assert json.loads(capsys.readouterr().out)["ok"] is True
     assert len(captured) == 1
     assert Path(captured[0]["repo_root"]) == requested
+    if "--plugin-asset-dir" in argv:
+        assert captured[0]["plugin_asset_dir"] == argv[-1]
     assert cli.repo_base() == REPO
 
 

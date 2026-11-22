@@ -34,7 +34,7 @@ def test_replay_immutable_conflict_new_run_and_failure_current(tmp_path):
             conn.execute("DELETE FROM decisions")
 
 
-def test_identical_input_and_payload_keep_independent_objects_and_hash_checks(tmp_path):
+def test_identical_input_and_payload_keep_independent_objects_and_hash_checks(tmp_path, monkeypatch):
     persist_daily_decision_brief_success(base=tmp_path, brief=_brief(run_id="first"))
     store = DecisionHistoryStore(history_path(tmp_path))
     with store.connect() as conn:
@@ -43,9 +43,23 @@ def test_identical_input_and_payload_keep_independent_objects_and_hash_checks(tm
     decoded = store.decode(row)
     decoded["input"]["actions"].append("changed")
     assert "changed" not in decoded["payload"]["actions"]
+    loads = json.loads
+    payload_decodes = []
+
+    def count_loads(encoded):
+        if encoded == row["payload_json"]:
+            payload_decodes.append(encoded)
+        return loads(encoded)
+
+    monkeypatch.setattr(json, "loads", count_loads)
+    payload_only = store.decode(row, _payload_only=True)
+    assert payload_only == {key: value for key, value in decoded.items() if key != "input"}
+    assert len(payload_decodes) == 1
     row["input_hash"] = "0" * 64
     with pytest.raises(DecisionHistoryError, match="history_content_corrupt"):
         store.decode(row)
+    with pytest.raises(DecisionHistoryError, match="history_content_corrupt"):
+        store.decode(row, _payload_only=True)
 
 
 def test_history_hash_reuse_checks_current_bytes_and_preserves_legacy_json(tmp_path):
@@ -64,6 +78,39 @@ def test_history_hash_reuse_checks_current_bytes_and_preserves_legacy_json(tmp_p
             store.decode({**row, "input_json": "{}"})
         with pytest.raises(DecisionHistoryError, match="history_identity_corrupt"):
             store.decode({**row, "run_id": "changed"})
+
+
+def test_payload_only_reuses_verified_input_bytes_and_validates_changed_rows(tmp_path, monkeypatch):
+    persist_daily_decision_brief_success(base=tmp_path, brief=_brief(run_id="first"))
+    persist_daily_decision_brief_success(base=tmp_path, brief=_brief(run_id="second"))
+    store = DecisionHistoryStore(history_path(tmp_path))
+    with store.connect() as conn:
+        row = dict(conn.execute("SELECT * FROM decisions WHERE run_id='second'").fetchone())
+    assert row["input_json"] != row["payload_json"]
+    loads = json.loads
+    pretty = json.dumps(loads(row["input_json"]), indent=2)
+    decoded_inputs = []
+
+    def count_loads(encoded):
+        if encoded in (row["input_json"], pretty):
+            decoded_inputs.append(encoded)
+        return loads(encoded)
+
+    monkeypatch.setattr(json, "loads", count_loads)
+    with history_hash_read_scope():
+        first = store.decode(row, _payload_only=True)
+        assert store.decode(row, _payload_only=True) == first
+        assert decoded_inputs == [row["input_json"]]
+        assert store.decode({**row, "input_json": pretty}, _payload_only=True) == first
+        assert decoded_inputs[-1] == pretty
+        for change, error in (
+            ({"input_json": "{}"}, "history_content_corrupt"),
+            ({"input_hash": "0" * 64}, "history_content_corrupt"),
+            ({"scope_hash": "0" * 64}, "history_scope_corrupt"),
+            ({"run_id": "changed"}, "history_identity_corrupt"),
+        ):
+            with pytest.raises(DecisionHistoryError, match=error):
+                store.decode({**row, **change}, _payload_only=True)
 
 
 def test_json_is_disposable_not_authority_and_missing_sqlite_is_not_empty(tmp_path):

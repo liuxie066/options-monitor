@@ -1047,6 +1047,21 @@ def fetch_futu_portfolio_context(
         exchange_rate_observation=exchange_rate_observation,
         position_snapshot_input=snapshot_input,
     )
+    from src.application.futu_mmf_shared import mmf_shared_configured, read_mmf_shared
+
+    if mmf_shared_configured():
+        from src.application.futu_mmf_funding import apply_mmf_funding
+
+        check_fetch_control(deadline, cancelled)
+        try:
+            apply_mmf_funding(
+                context, read_mmf_shared(account), account=account,
+                physical_account_id=physical_account_id, environment=trd_env,
+            )
+        except (ValueError, TypeError, KeyError, RuntimeError, OSError, OverflowError):
+            check_fetch_control(deadline, cancelled)
+            context["cash_balance_reliable"] = False
+            context["cash_balance_unavailable_by_row"]["shared_mmf_funding"] = "shared_mmf_funding_unverified"
     check_fetch_control(deadline, cancelled)
     return context
 

@@ -1,0 +1,34 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.48",
+  "base": {
+    "tag": "v4.6.47",
+    "commit": "a516e6c9a491cce54c94a86d44c4879216d7abea"
+  },
+  "reviewed_head": "822fb267110b1e71411428e5f115c815c898aa59",
+  "commits": [
+    {
+      "sha": "822fb267110b1e71411428e5f115c815c898aa59",
+      "subject": "Preserve externally managed OpenD systemd units"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "升级对账保留显式登记为外部管理的 OpenD 单元和 drop-in，避免改写或退役现有网关。",
+      "commits": [
+        "822fb267110b1e71411428e5f115c815c898aa59"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "822fb267110b1e71411428e5f115c815c898aa59",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1229",
+        "docs/DEPLOY_LINUX_MAC.md"
+      ]
+    }
+  ]
+}

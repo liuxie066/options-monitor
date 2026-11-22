@@ -35,6 +35,7 @@ from src.application.ledger.event_codec import stored_trade_event_to_ledger_even
 from src.application.ledger.lot_resolver import contract_key_from_lot_fields, lot_contract_value
 from src.application.ledger.order_fee_semantics import futu_order_namespace_issue, option_fee_input_identity, order_fee_currency_matches, zero_option_fee_lifecycle_reason
 from src.application.ledger.position_projection_runtime import (
+    PositionProjectionEventSnapshot,
     run_position_projection_in_transaction,
 )
 from src.application.ledger.repository import (
@@ -1215,12 +1216,14 @@ def _apply_unit(
             raise ValueError(f"fee enrichment update failed: {change.event_id}")
         _insert_audit(conn, unit=unit, change=change, applied_at_ms=applied_at_ms)
 
+    event_snapshot = PositionProjectionEventSnapshot.capture(repo, conn=conn) if option_changed else None
     projection = (
         run_position_projection_in_transaction(
             repo,
             (),
             conn=conn,
             mode="forced_full",
+            event_snapshot=event_snapshot,
         )
         if option_changed
         else None
@@ -1230,6 +1233,7 @@ def _apply_unit(
         conn=conn,
         accounts=accounts,
         as_of_ms=applied_at_ms,
+        trade_events=event_snapshot.events if event_snapshot is not None else None,
     )
     decision = finalize_current_decision_projection(
         repo,
@@ -1312,8 +1316,10 @@ def _assigned_after_by_account(
     conn: Any,
     accounts: Sequence[str],
     as_of_ms: int,
+    trade_events: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    trade_events = repo.list_trade_events(conn=conn)
+    if trade_events is None:
+        trade_events = repo.list_trade_events(conn=conn)
     stock_events = repo.list_assigned_stock_events(conn=conn)
     lots = repo.list_position_lots(conn=conn)
     result: dict[str, dict[str, Any]] = {}

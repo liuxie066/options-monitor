@@ -1410,6 +1410,39 @@ def test_projection_reuse_still_checks_bound_bytes(tmp_path, monkeypatch, canoni
     assert corrupted.value.reason == "receipt_or_payload_mismatch"
 
 
+@pytest.mark.parametrize("mutate_blob", [False, True])
+def test_seal_reuses_resolver_projection_after_fresh_blob_read(tmp_path, monkeypatch, mutate_blob):
+    from unittest.mock import Mock
+    from src.application import opend_symbol_outputs as outputs
+    from src.application import required_data_snapshot as snapshot
+
+    root, manifest_path = _workspace(tmp_path)
+    _publish_quote(root, run_id="run-1", canonical_blob=True)
+    validate_bytes = Mock(wraps=outputs.validate_required_data_quote_bytes)
+    validate_projection = Mock(wraps=snapshot.validate_required_data_quote_projection)
+    resolve = snapshot.resolve_exact_fresh_required_data_quote_receipt
+
+    def resolve_then_mutate(**kwargs):
+        evidence = resolve(**kwargs)
+        assert evidence is not None
+        if mutate_blob:
+            blob = root.parents[2] / evidence["scan_blob_ref"]["blob_relpath"]
+            blob.write_bytes(blob.read_bytes()[:-1])
+        return evidence
+
+    monkeypatch.setattr(outputs, "validate_required_data_quote_bytes", validate_bytes)
+    monkeypatch.setattr(snapshot, "validate_required_data_quote_projection", validate_projection)
+    monkeypatch.setattr(snapshot, "resolve_exact_fresh_required_data_quote_receipt", resolve_then_mutate)
+    result = _seal(root, manifest_path, _summary("3690.HK"))
+
+    entry = result["symbols"]["3690.HK"]
+    assert entry["status"] == ("failed" if mutate_blob else "ready")
+    if mutate_blob:
+        assert entry["reason"] == "quote_receipt_invalid"
+    assert validate_bytes.call_count == 1
+    assert validate_projection.call_count == 0
+
+
 def test_batch_validates_each_ready_symbol_once(
     monkeypatch,
     tmp_path: Path,

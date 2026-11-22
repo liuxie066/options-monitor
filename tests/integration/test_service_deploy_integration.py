@@ -22,6 +22,7 @@ from tests.service_deploy_test_support import (
     _write_upgrade_release_skeleton,
     _write_systemd_units_from_bundle,
     _create_fake_venv_python_at,
+    _fake_dependency_wheel,
     _fake_git_cache_materialize,
     _fake_release_drift_command,
     _fake_release_target_query,
@@ -786,7 +787,7 @@ def test_service_drift_confirm_uses_sudo_fallback_for_systemd_permission_errors(
         if command[:4] == ["sudo", "-n", "sh", "-c"]:
             original_write_text(Path(command[-1]), str(kwargs.get("input") or ""), encoding="utf-8")
             return subprocess.CompletedProcess(command, 0, stdout="written\n", stderr="")
-        if command[0:1] == ["systemctl"]:
+        if command[0:1] == ["systemctl"] and command[1] not in {"is-active", "is-enabled", "show"}:
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="Access denied\n")
         return _fake_systemd_query_runner()(command, **kwargs)
 
@@ -796,6 +797,8 @@ def test_service_drift_confirm_uses_sudo_fallback_for_systemd_permission_errors(
     assert any(item.get("sudo_fallback") for item in out["operations"] if item.get("operation") == "write_unit")
     assert ["sudo", "-n", "systemctl", "daemon-reload"] in calls
     assert ["sudo", "-n", "systemctl", "enable", "--now", "options-monitor-projection-verify.timer"] in calls
+    assert not any(command[:3] == ["sudo", "-n", "systemctl"] and
+                   command[3] in {"is-active", "is-enabled", "show"} for command in calls)
 
 @pytest.mark.parametrize("target", ["systemd", "launchd"])
 @pytest.mark.parametrize("intent", ["enabled", "service-entry", "empty-enabled"])
@@ -1639,6 +1642,41 @@ def test_service_drift_preserves_profile_opend_service(tmp_path: Path) -> None:
     assert out["mismatched_units"] == []
 
 
+def test_service_drift_preserves_external_opend_units_and_dropins(tmp_path: Path) -> None:
+    repo, runtime, systemd_root = _drift_roots(tmp_path)
+    bundle = _render_bundle(repo, runtime, accounts=["lx", "sy"], markets=["hk"])
+    profile = json.loads(next(item["content"] for item in bundle["files"]
+                              if item["kind"] == "service_profile"))
+    names = [f"options-monitor-opend-{account}.service" for account in ("lx", "sy")]
+    profile["external_opend_units"] = names
+    profile_path = runtime / "service.profile.json"
+    profile_path.write_text(json.dumps(profile))
+    _write_systemd_units_from_bundle(bundle, systemd_root)
+    installed = {}
+    for name in names:
+        unit = systemd_root / name
+        dropin = systemd_root / (name + ".d") / "zzzz-secret-credentials.conf"
+        dropin.parent.mkdir()
+        installed[unit] = "[Service]\nExecStart=/fixture/remembered-opend\n"
+        installed[dropin] = "[Service]\nEnvironment=FIXTURE=1\n"
+    for path, content in installed.items():
+        path.write_text(content)
+    calls = []
+    runner = _fake_systemd_query_runner(record=lambda command, kwargs: calls.append(command))
+    preview = _drift_at(repo, runtime, systemd_root, run_cmd=runner)
+    assert preview["external_opend_units"] == names
+    assert set(names) <= set(preview["installed_units"])
+    for key in ("expected_services", "extra_managed_units", "mismatched_units"):
+        assert set(names).isdisjoint(preview[key])
+    assert preview["extra_managed_files"] == []
+    applied = _drift_at(repo, runtime, systemd_root, confirm=True, run_cmd=runner)
+    assert applied["summary"]["ok"]
+    assert applied["applied"]["retired_units"] == []
+    assert all(path.read_text() == content for path, content in installed.items())
+    assert not any(set(command) & set(names) for command in calls)
+    assert json.loads(profile_path.read_text())["external_opend_units"] == names
+
+
 def test_service_drift_preserves_quality_monitoring_opt_in_and_detects_metadata_drift(tmp_path: Path) -> None:
     from src.application.service_deploy import render_service_bundle
     from src.application.service_drift import service_drift
@@ -2297,17 +2335,13 @@ def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(
     assert [target_python, "scripts/release_check.py", "--tag", "v1.0.1"] in calls
     runtime_prepare = out["runtime_prepare"]
     venv_python = str(Path(runtime_prepare["shared_venv_build_path"]) / "bin" / "python")
-    assert [venv_python, "-m", "pip", "install", "-r", "requirements.txt", "-c", "constraints.txt"] in calls
-    assert [
-        venv_python,
-        "-m",
-        "pip",
-        "install",
-        "-r",
-        "requirements/server.txt",
-        "-c",
-        "constraints/server.txt",
-    ] in calls
+    prepare = next(command for command in calls if "wheel" in command)
+    assert prepare[:3] == [venv_python, "-m", "pip"]
+    assert "requirements.txt" in prepare and "requirements/server.txt" in prepare
+    install_command = next(command for command in calls if "install" in command)
+    check = next(command for command in calls if command[-1] == "check")
+    assert "--no-index" in install_command and install_command[-1].endswith(".whl")
+    assert calls.index(prepare) < calls.index(install_command) < calls.index(check)
     release_python = str(releases / "1.0.1" / ".venv" / "bin" / "python")
     assert any(command[:2] == [release_python, "-c"] for command in calls)
     assert ["systemctl", "restart", "options-monitor-trade-intake.service"] in calls
@@ -2547,6 +2581,7 @@ def test_service_upgrade_confirm_uses_cached_remote_when_current_release_has_no_
         if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
             return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
+        _fake_dependency_wheel(command)
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     out = service_upgrade(
@@ -2643,6 +2678,7 @@ def test_service_upgrade_bot_prepare_failure_keeps_current_and_precedes_config(m
             return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
         if command[1:] == ["-c", "import src.application.bot.host; import src.application.bot.runtime"]:
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="Bot import failed\n")
+        _fake_dependency_wheel(command)
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     out = service_upgrade_module.service_upgrade(
@@ -3272,6 +3308,7 @@ def test_service_upgrade_post_switch_config_validation_failure_restores_symlink_
             return subprocess.CompletedProcess(command, 0, stdout="built assistant\n", stderr="")
         if command[:4] == ["./om", "config", "validate", "--config-path"] and command[4] == str(us_runtime) and current.resolve().name == "1.0.1":
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="target validation failed")
+        _fake_dependency_wheel(command)
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     out = service_upgrade(
@@ -3414,6 +3451,7 @@ def test_service_upgrade_coerces_release_entity_repo_root_to_current_symlink(mon
         drift = _fake_release_drift_command(list(command), run_cmd=_run_cmd)
         if drift is not None:
             return drift
+        _fake_dependency_wheel(command)
         return _fake_systemd_query_runner()(command, **kwargs)
 
     out = service_upgrade(
@@ -5268,6 +5306,7 @@ def transition_case(monkeypatch, tmp_path):
                 _create_fake_venv_python_at(Path(command[-1]))
                 return result()
             if command[1:3] == ["-m", "pip"]:
+                _fake_dependency_wheel(command)
                 return result()
             if command[1:2] == ["-c"] and "import src.application.multi_account_tick" in command[2]:
                 return result()

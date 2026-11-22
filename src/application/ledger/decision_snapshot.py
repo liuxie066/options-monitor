@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from domain.domain.decision_state_fingerprint import (
+    CURRENT_DECISION_READ_SCHEMA as CURRENT_DECISION_READ_SCHEMA,
     DECISION_STATE_FINGERPRINT_SCHEMA,
     DECISION_STATE_SNAPSHOT_SCHEMA,
     build_decision_state_fingerprint,

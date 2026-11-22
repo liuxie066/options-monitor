@@ -1,12 +1,14 @@
 """Real intake reconciliation must reuse the public history batch boundary."""
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 import json
 import shutil
-import threading
+import subprocess
+import sys
 
 import pytest
 
+from test_daily_decision_brief_repository_v2 import _brief
 from trade_intake_combo_history_fixtures import seed_intake_combo_history
 from src.application import daily_decision_brief_repository as history
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
@@ -14,10 +16,12 @@ from src.application.trades import combo_reconciliation as application
 from src.infrastructure.decision_history_sqlite import DecisionHistoryStore
 
 
-def test_real_intake_reconciliation_reads_delivery_once_per_market(tmp_path, monkeypatch):
+@pytest.mark.parametrize("shared_validation", [False, True])
+def test_real_intake_reconciliation_reads_delivery_once_per_market(tmp_path, monkeypatch, shared_validation):
     ledger, dates, now_ms = seed_intake_combo_history(tmp_path)
-    reads, connections = [], []
+    reads, connections, validations = [], [], []
     original_read, original_connect = Path.read_text, DecisionHistoryStore.connect
+    original_normalize = history._DeliveryValidation.normalize
 
     def counted_read(path, *args, **kwargs):
         if path.name.endswith(".delivery.json"):
@@ -30,16 +34,25 @@ def test_real_intake_reconciliation_reads_delivery_once_per_market(tmp_path, mon
             connections.append(store.path)
             yield conn
 
+    def counted_normalize(validation, *args, **kwargs):
+        validations.append(validation)
+        return original_normalize(validation, *args, **kwargs)
+
     monkeypatch.setattr(Path, "read_text", counted_read)
     monkeypatch.setattr(DecisionHistoryStore, "connect", counted_connect)
-    result = application.reconcile_account_post_trade_combos(
-        repo=ledger, runtime_root=tmp_path, account="lx",
-        runtime_environment="opend:127.0.0.1:11111", mode="observe",
-        effective_now_ms=now_ms)
+    monkeypatch.setattr(history._DeliveryValidation, "normalize", counted_normalize)
+    scope = history.daily_brief_delivery_validation_scope() if shared_validation else nullcontext()
+    with scope:
+        ambient = history._DELIVERY_VALIDATION.get()
+        result = application.reconcile_account_post_trade_combos(
+            repo=ledger, runtime_root=tmp_path, account="lx",
+            runtime_environment="opend:127.0.0.1:11111", mode="observe",
+            effective_now_ms=now_ms)
     assert [r["market_date"] for r in result["evidence_reads"]] == dates
     assert all(r["complete"] and r["exposure_count"] == 1 for r in result["evidence_reads"])
     assert len(reads) == 1
     assert len(connections) == 1
+    assert validations == ([ambient] if shared_validation else [])
 
 
 def test_market_batches_preserve_date_order_and_per_date_completeness(tmp_path, monkeypatch):
@@ -188,44 +201,48 @@ def test_delivery_change_between_dates_is_seen_by_next_batch(tmp_path, monkeypat
 
 
 @pytest.mark.parametrize("fail_read", [False, True])
-def test_waiting_history_writer_resumes_after_batch_or_exception(tmp_path, monkeypatch, fail_read):
-    ledger, _dates, now_ms = seed_intake_combo_history(tmp_path)
-    started, acquired = threading.Event(), threading.Event()
-    errors = []
-    original = history.read_combo_candidate_exposures
+def test_tick_commits_while_intake_decodes_its_history_snapshot(tmp_path, monkeypatch, fail_read):
+    ledger, dates, now_ms = seed_intake_combo_history(tmp_path)
+    original_decode = DecisionHistoryStore.decode
+    committed = False
+    run_id = "concurrent-tick"
+    source = _brief(run_id=run_id, status="failed", actionability="blocked")
+    write_brief = """
+import json
+from pathlib import Path
+import sys
+from src.application.daily_decision_brief_repository import persist_daily_decision_brief_failure
 
-    def write():
-        started.set()
-        try:
-            with DecisionHistoryStore(history.history_path(tmp_path)).connect(write=True) as conn:
-                acquired.set()
-                conn.execute("SELECT 1")
-        except Exception as exc:
-            errors.append(exc)
+saved = persist_daily_decision_brief_failure(base=Path(sys.argv[1]), brief=json.loads(sys.argv[2]))
+assert saved["revision"] == 1
+"""
 
-    writer = threading.Thread(target=write, daemon=True)
-
-    def observed(**kwargs):
-        result = original(**kwargs)
-        if not started.is_set():
-            writer.start()
-            assert started.wait(2)
-            assert not acquired.wait(0.02)
+    def observed(row, **kwargs):
+        nonlocal committed
+        if not committed:
+            result = subprocess.run(
+                [sys.executable, "-c", write_brief, str(tmp_path), json.dumps(source)],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            assert result.returncode == 0, result.stderr
+            committed = True
+            assert history._BRIEF_HISTORY_OBSERVATION.get().revisions(dates[-1]) == [0]
             if fail_read:
                 raise RuntimeError("isolated mid-batch failure")
-        return result
+        return original_decode(row, **kwargs)
 
-    monkeypatch.setattr(history, "read_combo_candidate_exposures", observed)
+    monkeypatch.setattr(DecisionHistoryStore, "decode", staticmethod(observed))
     args = dict(repo=ledger, runtime_root=tmp_path, account="lx",
                 runtime_environment="opend:127.0.0.1:11111", mode="observe", effective_now_ms=now_ms)
-    try:
-        if fail_read:
-            with pytest.raises(RuntimeError, match="isolated mid-batch failure"):
-                application.reconcile_account_post_trade_combos(**args)
-            assert ledger.list_combo_pair_inferences(account="lx") == []
-        else:
+    if fail_read:
+        with pytest.raises(RuntimeError, match="isolated mid-batch failure"):
             application.reconcile_account_post_trade_combos(**args)
-    finally:
-        writer.join(3)
-    assert acquired.is_set() and not writer.is_alive() and not errors
+        assert ledger.list_combo_pair_inferences(account="lx") == []
+    else:
+        result = application.reconcile_account_post_trade_combos(**args)
+        assert all(r["complete"] and r["exposure_count"] == 1 for r in result["evidence_reads"])
+    assert committed
     assert history._BRIEF_HISTORY_OBSERVATION.get() is None
+    assert history.list_daily_decision_brief_revisions(
+        base=tmp_path, account="lx", market="US", market_trading_date=dates[-1],
+    )["revisions"] == [0, 1]

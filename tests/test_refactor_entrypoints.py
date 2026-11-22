@@ -22,6 +22,34 @@ def _cli(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     return _run([sys.executable, "-m", "src.interfaces.cli.main", *args], check=check)
 
 
+def test_scan_pipeline_module_preserves_environment_and_config_errors(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+    monkeypatch.delenv("OM_ENV_FILE", raising=False)
+    monkeypatch.delenv("OM_ACCOUNT_CONFIG_CANONICAL_B64", raising=False)
+    config = tmp_path / "config.json"
+    config.write_text("{", encoding="utf-8")
+    env_file = tmp_path / "options-monitor.env"
+    env_file.write_text("OM_ACCOUNT_CONFIG_CANONICAL_B64=not-base64\n", encoding="utf-8")
+
+    proc = _cli(
+        "scan-pipeline", "--config", str(config),
+        "--account-config-base", str(tmp_path), "--account-config-run-id", "run-1",
+        "--account-config-account", "lx", "--account-config-sha256", "0" * 64,
+        check=False,
+    )
+    assert proc.returncode == 1
+    assert "[CONFIG_ERROR] ACCOUNT_CONFIG_CANONICAL_BYTES_INVALID" in proc.stderr
+    assert proc.stdout == ""
+    assert not (tmp_path / "output_shared").exists()
+
+    env_file.write_text("", encoding="utf-8")
+    proc = _cli("scan-pipeline", "--config", str(config), check=False)
+    assert proc.returncode == 2
+    assert proc.stderr == ""
+    assert json.loads(proc.stdout)["error"]["code"] == "CONFIG_ERROR"
+    assert (tmp_path / "output_shared" / "state").is_dir()
+
+
 def test_shell_entrypoints_work_outside_repo_cwd(tmp_path: Path) -> None:
     proc = _run([str((ROOT / "om").resolve()), "--help"], cwd=tmp_path, check=True)
     assert "首次安装" in proc.stdout and "日常管理" in proc.stdout

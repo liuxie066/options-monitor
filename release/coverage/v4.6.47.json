@@ -1,0 +1,56 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.47",
+  "base": {
+    "tag": "v4.6.46",
+    "commit": "fb8d01a882caf50cbf3c58a06ae5b1cbe727f106"
+  },
+  "reviewed_head": "964a1c40965a9d99b754c976d02915a744ecaf8d",
+  "commits": [
+    {
+      "sha": "68a15d63f3b142d3caad4ac254bd4d9431ec5c4e",
+      "subject": "Prepare and install OM upgrades from shared wheels"
+    },
+    {
+      "sha": "964a1c40965a9d99b754c976d02915a744ecaf8d",
+      "subject": "Restore plugin modules after distribution tests"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "源码升级支持共用 wheel 缓存，依赖备齐后离线安装并校验，验证通过才切换版本。（#1226）",
+      "commits": [
+        "68a15d63f3b142d3caad4ac254bd4d9431ec5c4e"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "升级器查询 systemd 服务状态时直接使用部署账号，避免只读查询因 sudo 权限中断。（#1226）",
+      "commits": [
+        "68a15d63f3b142d3caad4ac254bd4d9431ec5c4e"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "964a1c40965a9d99b754c976d02915a744ecaf8d",
+      "reason": "仅隔离测试夹具的模块缓存，不影响生产代码、依赖或部署。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "68a15d63f3b142d3caad4ac254bd4d9431ec5c4e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1226",
+        "docs/RELEASE_PROCESS.md"
+      ]
+    },
+    {
+      "commit": "964a1c40965a9d99b754c976d02915a744ecaf8d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1227"
+      ]
+    }
+  ]
+}

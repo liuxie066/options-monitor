@@ -12,6 +12,7 @@ from domain.domain.wheel import (
     project_wheel_lifecycles,
 )
 from src.application.ledger import assigned_stock_projection as assigned
+from src.application.ledger import event_codec, publisher
 from src.application.ledger.api import project_position_lots_and_assigned_stock_from_rows
 from src.application.ledger.queries import project_trade_event_log
 from src.application.wheel.read_model import build_wheel_read_model_from_rows
@@ -50,13 +51,13 @@ def test_composed_inputs_equal_independent_projection_and_preserve_rows(monkeypa
     original = deepcopy(rows)
     expected = _old_inputs(rows, 4000)
     calls = []
-    real = assigned.project_trade_event_log
+    real = publisher._collect_projection_inputs
 
     def counted(events):
         calls.append(deepcopy(events))
         return real(events)
 
-    monkeypatch.setattr(assigned, "project_trade_event_log", counted)
+    monkeypatch.setattr(publisher, "_collect_projection_inputs", counted)
     actual = project_position_lots_and_assigned_stock_from_rows(rows, account="lx", as_of_ms=4000)
     assert actual == expected
     assert rows == original
@@ -73,6 +74,30 @@ def test_composition_preserves_first_error_before_assigned_stock_trust():
     assert "bad-time" in str(optimized.value)
     with pytest.raises(ValueError, match="untrusted"):
         assigned.project_assigned_stock_lifecycle_from_rows(rows, account="lx", as_of_ms=4000)
+
+
+def test_ordinary_history_selects_by_time_without_decoding_future_events(monkeypatch):
+    rows = {"trade_events": [
+        _trade().to_dict(),
+        _assign_put().to_dict(),
+        _trade(event_id="future", lot_id="future-lot", event_time_ms=6000).to_dict(),
+    ]}
+
+    def fail_if_graph_decoded(_rows):
+        pytest.fail("ordinary history has no target controls to validate")
+
+    decoded_ids = []
+    decode = event_codec._stored_trade_event_payload_to_ledger_event
+
+    def count_decode(payload):
+        decoded_ids.append(payload["event_id"])
+        return decode(payload)
+
+    monkeypatch.setattr(assigned, "iter_import_stored_trade_events", fail_if_graph_decoded)
+    monkeypatch.setattr(event_codec, "_stored_trade_event_payload_to_ledger_event", count_decode)
+    report = assigned.project_assigned_stock_lifecycle_from_rows(rows, account="lx", as_of_ms=4000)
+    assert [lot["shares_remaining"] for lot in report["assigned_stock_lots"]] == [100]
+    assert decoded_ids == [row["event_id"] for row in rows["trade_events"][:2]]
 
 
 @pytest.mark.parametrize("market", [None, "us", "hk"])
@@ -101,13 +126,17 @@ def test_real_wheel_projection_equivalence_and_replay_counts(monkeypatch, kind, 
         branch["monitoring_gate"] = "disabled"
         branch["coverage"] = project_wheel_coverage(branch)
     calls = []
-    real = assigned.project_trade_event_log
-    monkeypatch.setattr(assigned, "project_trade_event_log", lambda events: (calls.append(len(events)), real(events))[1])
+    real = publisher._collect_projection_inputs
+    monkeypatch.setattr(publisher, "_collect_projection_inputs", lambda events: (calls.append(len(events)), real(events))[1])
     import domain.domain.wheel.projection as wheel_projection
     real_lifecycle = wheel_projection.project_wheel_lifecycles
+    real_economics = wheel_projection.project_trade_events
     lifecycle_calls = []
+    economics_calls = []
     monkeypatch.setattr(wheel_projection, "project_wheel_lifecycles",
                         lambda *a, **kw: (lifecycle_calls.append(1), real_lifecycle(*a, **kw))[1])
+    monkeypatch.setattr(wheel_projection, "project_trade_events",
+                        lambda events: (economics_calls.append(len(events)), real_economics(events))[1])
     actual = build_wheel_read_model_from_rows(rows, account="lx", as_of_ms=4000, market=market)
     # Presentation enrichment must leave the canonical projection unchanged.
     enriched = deepcopy(actual["wheel_branches"])
@@ -125,3 +154,4 @@ def test_real_wheel_projection_equivalence_and_replay_counts(monkeypatch, kind, 
     assert rows == original
     assert calls == [3]
     assert len(lifecycle_calls) == 1
+    assert economics_calls == ([3] if kind == "v2" else [])

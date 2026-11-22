@@ -449,6 +449,12 @@ def _fake_release_drift_command(
     )
 
 
+def _fake_dependency_wheel(command: list[str]) -> None:
+    if "pip" in command and "wheel" in command and "--wheel-dir" in command:
+        destination = Path(command[command.index("--wheel-dir") + 1])
+        (destination / "fixture_dependency-1.0-py3-none-any.whl").touch()
+
+
 def _fake_upgrade_release_runner(
     record=None,  # type: ignore[no-untyped-def]
     *,
@@ -495,6 +501,7 @@ def _fake_upgrade_release_runner(
             result = tail(command)
             if result is not None:
                 return result
+        _fake_dependency_wheel(command)
         return query_runner(command, **kwargs)
 
     return _run_cmd

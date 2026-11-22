@@ -29,7 +29,6 @@ from domain.domain.wheel import (
 )
 from src.application.config_loader import resolve_data_config_path
 from src.application.settings import build_effective_env
-from src.application.ledger.bootstrap import load_option_positions_repo
 from src.application.ledger.repository import require_option_positions_read_repo
 from src.infrastructure.feishu_bitable import safe_float
 
@@ -63,6 +62,8 @@ def resolve_position_repo(
     config_path: str | Path | None = None,
     runtime_root: str | Path | None = None,
 ) -> tuple[Path, Any]:
+    from src.application.ledger.bootstrap import load_option_positions_repo
+
     resolved_data_config = _resolve_data_config_for_config_path(
         base=base,
         data_config=data_config,

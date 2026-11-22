@@ -1,0 +1,48 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.56",
+  "base": {
+    "tag": "v4.6.55",
+    "commit": "47fc99606e4dbc050d7ee5ff159d1c726af4507d"
+  },
+  "reviewed_head": "974ae9698cee89e15b8d8d90c0500b986e25b3cf",
+  "commits": [
+    {
+      "sha": "01628822546a855029e32761a02b21aa785c786f",
+      "subject": "fix(upgrade): import verified local plugin assets"
+    },
+    {
+      "sha": "974ae9698cee89e15b8d8d90c0500b986e25b3cf",
+      "subject": "Merge pull request #1247 from liuxie066/fix/local-upgrade-plugin-assets"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "升级可从指定目录导入目标版本的官方托管插件包，继续校验发布摘要和实际导入。",
+      "commits": [
+        "01628822546a855029e32761a02b21aa785c786f"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "974ae9698cee89e15b8d8d90c0500b986e25b3cf",
+      "reason": "合并 PR #1247，变更已由实现提交对应的发布说明覆盖。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "01628822546a855029e32761a02b21aa785c786f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1247"
+      ]
+    },
+    {
+      "commit": "974ae9698cee89e15b8d8d90c0500b986e25b3cf",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1247"
+      ]
+    }
+  ]
+}

@@ -17,6 +17,19 @@ from src.application.ledger.queries import project_trade_event_log
 GROUP_ID = "Combo:Opaque:1"
 
 
+@pytest.mark.parametrize("metadata,owned", [
+    ({"position_side": "short", "contracts_open": 1}, False),
+    ({"strategy": "cc"}, False),
+    ({"strategy_snapshot": {"source_wheel_branch_id": "wheel-1"}}, True),
+    ({"expiry_structure": "same_expiry", "strategy_snapshot": {"expiry_structure": "staggered"}}, True),
+    ({"wheel_call_allocations": None}, True),
+])
+def test_strategy_owner_detects_nested_relationships_and_invalid_evidence(metadata, owned):
+    from domain.domain.strategy_membership import strategy_metadata_has_owner
+
+    assert strategy_metadata_has_owner(metadata) is owned
+
+
 def _contract(
     *,
     account: str = "lx",

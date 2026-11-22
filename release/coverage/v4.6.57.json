@@ -1,0 +1,48 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.57",
+  "base": {
+    "tag": "v4.6.56",
+    "commit": "1900ec250f200df184ecbab2564d4bddc7a4038f"
+  },
+  "reviewed_head": "52919e8d0c3bd7df8c280b5bcef93041717c41af",
+  "commits": [
+    {
+      "sha": "ff216f2ef2b1fab37d011ff1e2b3ab5ced8044f5",
+      "subject": "perf(combo): index candidate contract keys for exposure matching"
+    },
+    {
+      "sha": "52919e8d0c3bd7df8c280b5bcef93041717c41af",
+      "subject": "Merge pull request #1250 from liuxie066/perf/combo-contract-key-index"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "组合证据读取复用候选行合约键，减少成交归因恢复中的重复匹配。",
+      "commits": [
+        "ff216f2ef2b1fab37d011ff1e2b3ab5ced8044f5"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "52919e8d0c3bd7df8c280b5bcef93041717c41af",
+      "reason": "合并 PR #1250，发布说明对应实现提交。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "ff216f2ef2b1fab37d011ff1e2b3ab5ced8044f5",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1250"
+      ]
+    },
+    {
+      "commit": "52919e8d0c3bd7df8c280b5bcef93041717c41af",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1250"
+      ]
+    }
+  ]
+}

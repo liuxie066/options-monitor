@@ -6,9 +6,7 @@ import asyncio
 import hashlib
 import json
 import math
-import os
 import re
-import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -17,6 +15,7 @@ from domain.domain.symbol_identity import OPTION_CODE_RE
 from src.application.opend_fetch_config import OpenDEndpointRateLimit
 from src.application.opend_market_snapshot_fetching import fetch_option_snapshots
 from src.application.payload_helpers import canonical_json_bytes_lines
+from src.application.research.underlier_history import _publish_bytes_once
 from src.application.source_receipts import publish_source_receipt
 from src.infrastructure.futu_gateway import build_ready_futu_quote_gateway
 
@@ -45,6 +44,7 @@ IMPLEMENTATION_SOURCES = (
     "src/application/expiration_normalization.py",
     "src/application/payload_helpers.py",
     "src/application/research/option_quote_capture.py",
+    "src/application/research/underlier_history.py",
     "src/application/source_receipts.py",
     "src/application/symbol_aliases.py",
     "src/infrastructure/futu_dataframe.py",
@@ -136,16 +136,7 @@ def _json_safe(value: Any) -> Any:
 
 
 def _write_once(path: Path, content: bytes) -> str:
-    temporary = path.with_name(f".{path.name}.tmp.{uuid.uuid4().hex}")
-    try:
-        with temporary.open("xb") as stream:
-            temporary.chmod(0o600)
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.link(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    _publish_bytes_once(path, content)
     return hashlib.sha256(content).hexdigest()
 
 

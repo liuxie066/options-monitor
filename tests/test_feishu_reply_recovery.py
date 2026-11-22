@@ -52,6 +52,33 @@ def test_empty_reply_poll_does_not_need_write_lock(tmp_path):
         assert store.claim_reply(channel="feishu") is None
 
 
+def test_background_recovery_checks_channel_before_claiming_new_work(tmp_path, monkeypatch):
+    from src.application.agent_tool_contracts import AgentToolError
+
+    settings = FeishuWsSettings(audit_db=str(tmp_path / "host.sqlite3"),
+                               app_id="synthetic-app", app_secret="synthetic-secret")
+    checks = []
+
+    def disabled(channel, config_path):
+        checks.append(channel)
+        raise AgentToolError(code="CHANNEL_RECEIVE_DISABLED", message="disabled")
+
+    def forbidden(**kwargs):
+        pytest.fail("the idle or disabled recovery poll reached the provider")
+
+    monkeypatch.setattr(feishu_ws, "require_inbound_channel", disabled)
+    kwargs = {"settings": settings, "reply_fn": forbidden, "_background_poll": True}
+    assert feishu_ws._retry_pending_feishu_reply(**kwargs)["reason"] == "outbox_empty"
+    assert checks == []
+    store = BotHostStore(settings.audit_db)
+    assert not store.path.exists()
+    store.enqueue_reply(delivery_key="new", channel="feishu", payload={"text": "synthetic"})
+    before = store.list_replies()
+    assert feishu_ws._retry_pending_feishu_reply(**kwargs)["reason"] == "channel_receive_disabled"
+    assert checks == ["feishu"]
+    assert store.list_replies() == before
+
+
 def test_reply_poll_scrubs_legacy_terminal_payload_without_claiming_it(tmp_path):
     store = BotHostStore(tmp_path / "host.sqlite3")
     opts = {"channel": "feishu", "payload": {"text": "old"}}

@@ -208,7 +208,7 @@ def test_competing_wheel_candidate_keeps_fx_in_confirmation_hash(tmp_path, monke
         'batch_generation_hash': 'generation', 'source_trade_event_id': None}
     model = {'wheel_branches': [branch]}
     monkeypatch.setattr(ledger_attribution, 'build_wheel_read_model_with_capacity_from_rows', lambda *a, **kw: (model, model))
-    monkeypatch.setattr(ledger_attribution, 'build_wheel_read_model_from_rows', lambda *a, **kw: model)
+    monkeypatch.setattr(ledger_attribution, '_historical_attribution_branches', lambda *a, **kw: {'competing-put': branch})
     monkeypatch.setattr(ledger_attribution, 'resolve_wheel_fill_intent', lambda *a, **kw: {
         'reason_codes': [], 'intent': None, 'reserved_contracts_to_consume': 0})
     rows = read_trade_attribution_snapshot(repo, account='lx', market='us')
