@@ -259,6 +259,7 @@ def backfill_decision(run, number, outcome):
                "failure_scenario": "original trigger", "expected": "1", "actual": "2", "evidence_log": "probe.log",
                "fix_scope": ["example.py", "tests/test_example.py"]} if outcome == "confirmed" else None
     closure = {"reason": "Original trigger now passes the complete expected assertions", "fix_commit": "",
+               "resolution_scope": "full", "acceptance_comment_id": 0, "acceptance_quote": "",
                "verification_log": "probe.log", "commands": [{"command": "probe original-trigger", "exit_code": 0}]} if outcome == "already_fixed" else None
     return {"outcome": "complete", "report_markdown": BACKFILL_REPORT, "reviews": [{
         "number": number, "outcome": outcome, "report_markdown": BACKFILL_REPORT,
@@ -294,7 +295,7 @@ def test_backfill_scans_64_checkpoints_batches_and_resumes_only_pending(backfill
     run = Path(receipt["run_dir"])
     assert len(list((run / "issues/items").glob("*/result.json"))) == 63
     assert (run / "issues/items/2/pending.json").exists()
-    assert "建议关闭" in (run / "issues/report.md").read_text()
+    assert "收尾候选" in (run / "issues/report.md").read_text()
     printed = capsys.readouterr().out
     assert '"issue_batch": 1' in printed and '"issue_batch": 7' in printed
     for name, original in preserved.items():

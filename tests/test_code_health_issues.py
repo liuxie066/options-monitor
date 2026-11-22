@@ -669,6 +669,7 @@ CLOSURE_LOG = json.dumps({"command": CLOSURE_COMMAND, "exit_code": 0, "output": 
 def closure():
     return {"reason": "Original trigger and subsequent correction both pass at the frozen target",
             "fix_commit": "", "verification_log": "probe.log",
+            "resolution_scope": "full", "acceptance_comment_id": 0, "acceptance_quote": "",
             "commands": [{"command": CLOSURE_COMMAND, "exit_code": 0}]}
 
 
