@@ -63,6 +63,7 @@ from src.application.strategy_scan_status import (
     validate_strategy_scan_status_index_v4,
 )
 from src.application.source_receipts import sha256_bytes
+from src.application.payload_helpers import canonical_json_bytes
 from src.application.tick_run_workspace import (
     ACCOUNT_RUN_CONFIG_NAME,
     AccountRunConfigError,
@@ -889,15 +890,7 @@ def _validate_historical_source_status_bytes(
         )
     content_hash = payload.get("content_sha256")
     content = {key: value for key, value in payload.items() if key != "content_sha256"}
-    computed = sha256_bytes(
-        json.dumps(
-            content,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
-    )
+    computed = sha256_bytes(canonical_json_bytes(content))
     if (
         content_hash != row.get("source_status_content_sha256")
         or computed != content_hash

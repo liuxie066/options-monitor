@@ -2658,10 +2658,12 @@ def test_lifecycle_receipt_cli_applied_dispatch_rejects_account_scope(
     assert repo.list_trade_lifecycle_notification_batches() == []
 
 
+@pytest.mark.parametrize("source_receipt_override", [False, True])
 def test_lifecycle_receipt_cli_applied_dispatch_filters_disabled_account(
     monkeypatch,
     tmp_path: Path,
     capsys,
+    source_receipt_override,
 ) -> None:
     from src.application.trades.lifecycle_outbox import QUIET_WINDOW_MS
 
@@ -2672,6 +2674,16 @@ def test_lifecycle_receipt_cli_applied_dispatch_filters_disabled_account(
             sy_intake_enabled=False,
         )
     )
+    resolve_intake = cli_mod.resolve_trade_intake_config
+    expected_receipt = resolve_intake(json.loads(runtime_config.read_text()))["receipt"]
+    if source_receipt_override:
+        def resolve_with_source_receipt(config):
+            intake = resolve_intake(config)
+            for source in intake["sources"]:
+                source["receipt"] = {"enabled": True, "notify_unresolved": False}
+            return intake
+
+        monkeypatch.setattr(cli_mod, "resolve_trade_intake_config", resolve_with_source_receipt)
     rows = _enqueue_lifecycle_cli_intents(
         repo,
         accounts=["lx", "sy"],
@@ -2719,6 +2731,7 @@ def test_lifecycle_receipt_cli_applied_dispatch_filters_disabled_account(
     assert stored["lx"]["status"] == "confirmed"
     assert stored["sy"]["status"] == "pending"
     assert stored["sy"]["delivery_batch_id"] is None
+    assert calls[0]["receipt_config"] == expected_receipt
 
 
 def test_lifecycle_receipt_cli_disabled_config_is_no_write(
