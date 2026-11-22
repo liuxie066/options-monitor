@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Improvements
+- 组合证据读取复用候选行合约键，减少成交归因恢复中的重复匹配。
+
 ## 4.6.56 - 2026-11-21
 
 ### Improvements
