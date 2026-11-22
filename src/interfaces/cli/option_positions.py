@@ -92,6 +92,9 @@ from src.application.futu_quote_routing import resolve_futu_quote_route
 from src.application.trades.lifecycle_runtime import (
     reconcile_due_lifecycle_cases_for_source,
 )
+from src.application.trades.lifecycle_batch_dispatcher import (
+    resolve_lifecycle_receipt_dispatch_scope,
+)
 from src.application.trades.inbox import (
     SettlementAttemptClaimOwnershipLost,
     resolve_ambiguous_settlement_attempt,
@@ -146,35 +149,7 @@ def _load_json_object(path: Path) -> dict[str, Any]:
 def _lifecycle_receipt_enabled_accounts(
     intake_config: dict[str, Any],
 ) -> set[str]:
-    fallback_receipt = (
-        dict(intake_config.get("receipt") or {})
-        if isinstance(intake_config.get("receipt"), dict)
-        else {}
-    )
-    accounts: set[str] = set()
-    for raw_source in intake_config.get("sources") or []:
-        if not isinstance(raw_source, dict) or not bool(
-            raw_source.get("enabled", True)
-        ):
-            continue
-        source_receipt = (
-            dict(raw_source.get("receipt") or {})
-            if isinstance(raw_source.get("receipt"), dict)
-            else fallback_receipt
-        )
-        if not bool(source_receipt.get("enabled", True)):
-            continue
-        account = str(raw_source.get("account") or "").strip().lower()
-        if account:
-            accounts.add(account)
-        mapping = raw_source.get("account_mapping")
-        if isinstance(mapping, dict):
-            accounts.update(
-                str(value or "").strip().lower()
-                for value in mapping.values()
-                if str(value or "").strip()
-            )
-    return accounts
+    return set(resolve_lifecycle_receipt_dispatch_scope(intake_config)["allowed_accounts"])
 
 
 def _lifecycle_dispatch_write_applied(

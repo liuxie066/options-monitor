@@ -241,6 +241,50 @@ def test_dispatch_scope_uses_source_receipt_enable_precedence() -> None:
     assert scope["receipt_config"] == {"enabled": True}
 
 
+@pytest.mark.parametrize(
+    "source, fallback, accounts",
+    [
+        (None, {}, []),
+        ({"account": " LX ", "account_mapping": {"one": " SY ", "two": "lx", "empty": None}}, {}, ["lx", "sy"]),
+        ({"account": "lx", "enabled": False}, {}, []),
+        ({"account": "lx", "enabled": "false"}, {}, ["lx"]),
+        ({"account": "lx"}, {"enabled": False}, []),
+        ({"account": "lx", "receipt": {}}, {"enabled": False}, ["lx"]),
+        ({"account": "lx", "receipt": None}, {"enabled": False}, []),
+        ({"account": "lx", "receipt": "invalid"}, {"enabled": True}, ["lx"]),
+        ({"account": "lx", "receipt": {"enabled": False}}, {}, []),
+        ({"account_mapping": ["lx"]}, {}, []),
+    ],
+)
+def test_receipt_scope_and_cli_preserve_source_qualification(source, fallback, accounts) -> None:
+    from src.interfaces.cli.option_positions import _lifecycle_receipt_enabled_accounts
+
+    config = {"receipt": fallback, "sources": [source]}
+    original = copy.deepcopy(config)
+    assert resolve_lifecycle_receipt_dispatch_scope(config)["allowed_accounts"] == accounts
+    assert _lifecycle_receipt_enabled_accounts(config) == set(accounts)
+    assert config == original
+
+
+def test_dispatch_scope_preserves_first_receipt_and_shallow_copy() -> None:
+    nested = {"label": "kept"}
+    first = {"enabled": True, "nested": nested}
+    config = {
+        "receipt": {"enabled": False},
+        "sources": [
+            {"account": "sy", "receipt": first},
+            {"account": "lx", "receipt": {"enabled": True, "nested": {"label": "later"}}},
+        ],
+    }
+    scope = resolve_lifecycle_receipt_dispatch_scope(config)
+    assert scope["allowed_accounts"] == ["lx", "sy"]
+    assert scope["receipt_config"] == first
+    assert scope["receipt_config"] is not first
+    assert scope["receipt_config"]["nested"] is nested
+    scope["receipt_config"]["enabled"] = False
+    assert first["enabled"] is True
+
+
 def test_dispatcher_close_cancels_cancellable_poll_wait(
     tmp_path: Path,
 ) -> None:
