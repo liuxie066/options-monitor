@@ -728,7 +728,9 @@ def save_daily_summary(run, receipt):
                "delivery_errors": receipt.get("delivery", {}).get("errors", []),
                "queued_repairs": queued, "repair_attempted": phase.get("attempted", []),
                "local_verified": phase.get("local_verified", []), "prs": phase.get("prs", []),
-               "prs_created": phase.get("prs_created", []), "merged": phase.get("merged", []), "closed": phase.get("closed", []),
+               "prs_created": phase.get("prs_created", []), "merged": phase.get("merged", []),
+               "closed": sorted(set(phase.get("closed", [])) | set(receipt.get("delivery", {}).get("closed", []))),
+               "issue_completions": receipt.get("delivery", {}).get("issue_completions", []),
                "pending": inventory.get("pending", []), "blocked": inventory.get("blocked", []),
                "needs_triage": inventory.get("needs_triage", []), "ready": inventory.get("ready", []),
                "source_closed": inventory.get("source_closed", []),
@@ -768,6 +770,8 @@ def save_daily_summary(run, receipt):
     if summary["release"]:
         lines.append(f"发布：{summary['release'].get('status')}；{summary['release'].get('reason', '')}")
     lines.extend(f"- 交付阻塞：{error}" for error in summary["delivery_errors"])
+    lines.extend(f"- Issue #{item['number']} 收尾：{item['status']}；{item.get('pr_url', '')}；"
+                 f"{item.get('comment_url') or item.get('reason', '')}" for item in summary["issue_completions"])
     if summary["review_blockers"]:
         lines.append("\n## 卡点")
         for row in summary["review_blockers"]:

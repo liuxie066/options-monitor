@@ -898,23 +898,8 @@ def _deliver_one(root, config, run_dir, deadline, record, task, approved_head):
         delivery["merge_proof"] = {"head": head, "merge_commit": merge, "merged_at": pr["mergedAt"], "main_ref": "refs/remotes/origin/main"}
         task["status"] = "merged"
         save(record, task)
-        closed = delivery.setdefault("closed_issues", {})
-        requests = delivery.setdefault("close_requests", {})
-        for number in source_issues():
-            issue = api(number)
-            if issue["state"] == "open":
-                if not isinstance(issue.get("assignees"), list) or issue["assignees"]:
-                    raise ValueError(f"merged source issue #{number} acquired an owner; human closing decision required")
-                requests.setdefault(str(number), {"merge_commit": merge, "run_dir": str(run_dir), "requested_at": timestamp()})
-                save(record, task)
-                api(number, "--method", "PATCH", "-f", "state=closed", "-f", "state_reason=completed")
-                if api(number)["state"] != "closed":
-                    raise ValueError(f"issue #{number} close was not confirmed by readback")
-            # Count the first confirmed outcome, including a preceding request whose response was lost.
-            if str(number) in requests and str(number) not in closed:
-                result["closed"].append(number)
-            closed[str(number)] = {"state": "closed", "merge_commit": merge, "observed_at": timestamp()}
-            save(record, task)
+        # Merge proves the repair revision, not resolution of every source issue.
+        result["issue_closeout_required"] = source_issues()
         delivery["complete"] = True
         result["status"] = "merged"
         return result

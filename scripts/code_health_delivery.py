@@ -91,7 +91,7 @@ def handled_target(root, kind, number):
     return False
 
 
-def comment(root, config, folder, deadline, command, *, kind, number, body):
+def comment(root, config, folder, deadline, command, *, kind, number, body, purpose=""):
     """Only a handled record may enqueue a reply; reconcile ambiguous writes by owned marker."""
     if not config.get("comments_enabled", True):
         return {"status": "disabled", "number": number}
@@ -107,7 +107,7 @@ def comment(root, config, folder, deadline, command, *, kind, number, body):
         return ledger[token]
     marker = f"<!-- code-health:{token} -->"
     call = lambda *args: execute(config, folder, deadline, command, [config["gh"], *args])
-    ledger[token] = {"number": number, "kind": kind, "status": "pending", "marker": marker, "body": body}
+    ledger[token] = {"number": number, "kind": kind, "status": "pending", "marker": marker, "body": body, "purpose": purpose}
     save_json(ledger_path, ledger)
     actor = json.loads(call("api", "user"))["login"]
     target = json.loads(call("api", f"repos/{config['repository']}/issues/{number}"))
@@ -122,7 +122,7 @@ def comment(root, config, folder, deadline, command, *, kind, number, body):
     if len(existing) > 1:
         raise ValueError("duplicate owned reply markers require inspection")
     ledger[token] = {"number": number, "kind": kind, "status": "pending", "actor": actor,
-                     "marker": marker, "body": body}
+                     "marker": marker, "body": body, "purpose": purpose}
     save_json(ledger_path, ledger)
     if not existing:
         body_file = folder / f"comment-{token}.md"
@@ -175,6 +175,136 @@ def close_not_worthwhile(root, config, folder, deadline, command, posted, reason
         ledger[token]["close_error"] = f"{type(exc).__name__}: {exc}"
         save_json(ledger_path, ledger)
         raise
+
+
+def completion_identity(repository, row):
+    return issue_intake.digest({"repository": repository, "number": row["number"],
+                                "target": row["target"], "input_digest": row["input_digest"],
+                                "proof": row["close_recommendation"]["completion"]})
+
+
+def close_completed_issue(root, config, folder, deadline, command, number):
+    """Recheck an independently verified issue resolution before explaining and closing it."""
+    state_path = root / "issue-state.json"
+    state = read_json(state_path, {"issues": {}})
+    row = state["issues"][str(number)]
+    evidence = row.get("close_recommendation", {})
+    proof = evidence.get("completion") or {}
+    result = {"number": number, "status": "blocked", "closed_now": False}
+    previous = row.get("completion_receipt", {})
+    call = lambda *args: execute(config, folder, deadline, command, [config["gh"], *args])
+    def save():
+        row["completion_receipt"] = result
+        save_json(state_path, state)
+    try:
+        if (row.get("outcome") != "already_fixed" or row.get("disposition") != "close_recommended"
+                or row.get("triage", {}).get("decision") != "worthwhile"
+                or row["triage"].get("third_party_service") is not False
+                or proof.get("repository") != config["repository"]
+                or evidence.get("number") != number or evidence.get("target") != row.get("target")
+                or evidence.get("input_digest") != row.get("input_digest")):
+            raise ValueError("issue lacks an independently verified, bound completed-fix decision")
+        identity = completion_identity(config["repository"], row)
+        if previous.get("identity") == identity:
+            result.update({key: previous[key] for key in ("close_requested_at", "comment_url", "close_actor", "observed_closed_at") if key in previous})
+        result.update({"identity": identity, "merge_commit": proof["merge_commit"],
+                       "pr_url": f"https://github.com/{config['repository']}/pull/{proof['number']}"})
+        api = issue_intake.github_api(config, command, deadline)
+        target = api(f"issues/{number}")
+        if (target.get("number") != number or "pull_request" in target
+                or target.get("html_url") != f"https://github.com/{config['repository']}/issues/{number}"
+                or target.get("state") not in {"open", "closed"}):
+            raise ValueError("completed-fix target is not this repository's issue")
+        if target["state"] == "closed":
+            attributable = (result.get("close_requested_at") and target.get("state_reason") == "completed"
+                            and target.get("closed_by", {}).get("login") == result.get("close_actor")
+                            and target.get("closed_at") and datetime.fromisoformat(target["closed_at"]) >=
+                            datetime.fromisoformat(result["close_requested_at"]).replace(microsecond=0))
+            result.update(status="closed", closed_now=bool(attributable) and not result.get("observed_closed_at"),
+                          observed_closed_at=target.get("closed_at") or repair.timestamp(),
+                          closure_origin="requested_actor" if attributable else "external_or_unknown")
+            return result
+        if result.get("observed_closed_at"):
+            raise ValueError("issue reopened after completion; fresh scope review required")
+        def current_scope():
+            current = api(f"issues/{number}")
+            if current.get("assignees") != []:
+                raise ValueError("issue ownership requires a separate closing decision")
+            comments = api(f"issues/{number}/comments?per_page=100", pages=True)
+            timeline = api(f"issues/{number}/timeline?per_page=100", pages=True)
+            if result.get("close_requested_at") and any(
+                event.get("event") == "reopened" and event.get("created_at")
+                and datetime.fromisoformat(event["created_at"]) >=
+                datetime.fromisoformat(result["close_requested_at"]).replace(microsecond=0) for event in timeline
+            ):
+                raise ValueError("issue reopened after a possibly completed request; fresh scope review required")
+            open_prs = api("pulls?state=open&per_page=100", pages=True)
+            own_ids = issue_intake.own_comment_ids(root, number, comments)
+            linked = issue_intake.linked_prs(current, [entry for entry in comments if entry.get("id") not in own_ids],
+                                             timeline, open_prs, config["repository"], api)
+            if issue_intake.issue_input_digest(current, linked, comments, ignored_comment_ids=own_ids) != row["input_digest"]:
+                raise ValueError("issue discussion or linked PR changed; fresh issue review required")
+            snapshot = {"number": number, "issue": current, "comments": comments,
+                        "linked_pull_requests": linked, "own_comment_ids": own_ids}
+            if issue_intake.completed_fix(evidence, snapshot, config) != proof:
+                raise ValueError("resolution scope or accepted limited scope is no longer proven")
+            return comments
+        current_scope()
+        issue_intake.completed_commands(evidence, Path(row["run_dir"]))
+        verified = issue_intake.closure_evidence(
+            {"closure_evidence": {key: evidence[key] for key in issue_intake.CLOSURE_SCHEMA["required"]}},
+            Path(row["run_dir"]) / "work", row["target"], {**config, "mirror": str(root / "repository.git")}, command, deadline)
+        if verified["verification_log_sha256"] != evidence.get("verification_log_sha256"):
+            raise ValueError("completed-fix verification evidence changed")
+        pr = json.loads(call("pr", "view", str(proof["number"]), "--repo", config["repository"],
+                             "--json", "number,url,state,headRefOid,baseRefName,mergeCommit,mergedAt,statusCheckRollup"))
+        if (pr.get("number") != proof["number"] or pr.get("url") != result["pr_url"]
+                or pr.get("state") != "MERGED" or not pr.get("mergedAt") or pr.get("baseRefName") != "main"
+                or pr.get("headRefOid") != proof["head"]
+                or (pr.get("mergeCommit") or {}).get("oid") != proof["merge_commit"]
+                or repair._repair_ci(pr) != "passed"):
+            raise ValueError("associated PR lacks the exact merged revision and successful required CI")
+        def git(*args):
+            return execute(config, folder, deadline, command,
+                           [config["git"], "--git-dir", str(root / "repository.git"), *args])
+        if git("remote", "get-url", "origin") not in {
+                f"https://github.com/{config['repository']}.git", f"https://github.com/{config['repository']}",
+                f"git@github.com:{config['repository']}.git"}:
+            raise ValueError("closure mirror points to another repository")
+        git("fetch", "origin", "+refs/heads/main:refs/heads/main")
+        git("merge-base", "--is-ancestor", row["target"], "refs/heads/main")
+        body = (f"Code-health 已完成修复收尾：{result['pr_url']}（{proof['merge_commit']}）。\n\n"
+                f"解决范围：{evidence['reason']}\n\n独立复核已覆盖原报告及后续纠正；"
+                f"记录的 {len(evidence['commands'])} 条验证命令均通过，关联 PR 的必需 CI 通过，合并提交已在 main。")
+        if evidence["resolution_scope"] == "accepted_scope":
+            body += (f"\n\n按用户接受的有限范围收口：https://github.com/{config['repository']}/issues/{number}"
+                     f"#issuecomment-{evidence['acceptance_comment_id']}\n{evidence['acceptance_quote']}")
+        posted = comment(root, config, folder, deadline, command, kind="issue", number=number,
+                         body=body, purpose="completed_fix")
+        if posted.get("status") != "posted" or not posted.get("url"):
+            raise ValueError("completion explanation was not confirmed; issue remains open")
+        comments = current_scope()
+        confirmed = [entry for entry in comments if entry.get("id") == posted["id"]
+                     and entry.get("user", {}).get("login") == posted.get("actor")
+                     and (entry.get("body") or "").strip() == posted["body"] + "\n\n" + posted["marker"]]
+        if len(confirmed) != 1:
+            raise ValueError("completion explanation changed or disappeared; inspect before closing")
+        result.update(comment_url=posted["url"], close_actor=posted["actor"],
+                      close_requested_at=repair.timestamp(), status="pending")
+        save()
+        call("issue", "close", str(number), "--repo", config["repository"], "--reason", "completed")
+        target = api(f"issues/{number}")
+        if (target.get("number") != number or target.get("state") != "closed" or "pull_request" in target
+                or target.get("state_reason") != "completed" or target.get("closed_by", {}).get("login") != posted["actor"]
+                or target.get("html_url") != f"https://github.com/{config['repository']}/issues/{number}"):
+            raise ValueError("completed issue closure was not positively read back")
+        result.update(status="closed", closed_now=True, closure_origin="requested_actor",
+                      observed_closed_at=target.get("closed_at") or repair.timestamp())
+    except Exception as exc:
+        result.update(status="blocked", reason=f"{type(exc).__name__}: {exc}")
+    finally:
+        save()
+    return result
 
 
 def merged_sources(root, config, folder, deadline, command):
@@ -515,6 +645,7 @@ def merge_pull_requests(root, config, run_dir, deadline, *, command, receipt):
 def process_delivery(root, config, run_dir, deadline, invoke, *, command, receipt):
     run_dir.mkdir(parents=True, exist_ok=True)
     result = {"status": "complete", "comments": [], "github_closed": [], "release": {"status": "no_merged_work"}, "errors": []}
+    result.update(closed=[], issue_completions=[])
     def reply(kind, number, body, *, close_reason=None):
         try:
             posted = comment(root, config, run_dir, deadline, command, kind=kind, number=number, body=body)
@@ -525,7 +656,7 @@ def process_delivery(root, config, run_dir, deadline, invoke, *, command, receip
             result["errors"].append(f"{kind} #{number}: {type(exc).__name__}: {exc}")
     # Retry only our own previously queued replies, including after a lost response.
     for row in read_json(root / "comment-state.json", {}).values():
-        if row.get("status") == "pending":
+        if row.get("status") == "pending" and row.get("purpose") != "completed_fix":
             reply(row["kind"], row["number"], row["body"])
     issues = read_json(root / "issue-state.json", {}).get("issues", {})
     closable = {int(number) for number, row in issues.items()
@@ -541,10 +672,22 @@ def process_delivery(root, config, run_dir, deadline, invoke, *, command, receip
             if row.get("disposition") == "repair":
                 body += "\n\n已进入修复队列；尚未完成修复或发版。"
             reply("issue", number, body, close_reason=row["triage"]["reason"] if number in closable else None)
+    for number, row in issues.items():
+        if row.get("close_recommendation", {}).get("completion"):
+            if (row.get("completion_receipt", {}).get("status") == "closed"
+                    and row["completion_receipt"].get("identity") == completion_identity(config["repository"], row)
+                    and int(number) not in receipt.get("issues", {}).get("reviewed", [])):
+                continue
+            completion = close_completed_issue(root, config, run_dir, deadline, command, int(number))
+            result["issue_completions"].append(completion)
+            if completion["closed_now"]:
+                result["closed"].append(int(number))
+            if completion["status"] == "blocked":
+                result["errors"].append(f"issue #{number} completion: {completion['reason']}")
     issue_receipt = receipt.get("issues", {})
     if issue_receipt.get("run_dir") and issue_receipt.get("summary"):
         summary = issue_receipt["summary"]
-        summary["github_closed"] = sorted(set(summary.get("github_closed", [])) | set(result["github_closed"]))
+        summary["github_closed"] = sorted(set(summary.get("github_closed", [])) | set(result["github_closed"]) | set(result["closed"]))
         issue_run = Path(issue_receipt["run_dir"])
         issue_intake.write_summary(issue_run, summary)
         save_json(issue_run / "receipt.json", issue_receipt)

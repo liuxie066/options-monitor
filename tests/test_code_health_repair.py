@@ -1251,19 +1251,27 @@ def test_pr_body_uses_recorded_commands_and_disables_issue_closing_directives(re
     assert "Fixes #7" not in body and "Resolves fixture/repo#8" not in body and "Related issues: #7" in body
 
 
-def test_verified_repair_merge_closes_only_its_source_issue_once(repair_delivery):
+def test_verified_repair_merge_defers_issue_closure_to_independent_issue_review(repair_delivery):
     _, _, _, record, tree, task, state, calls, deliver = repair_delivery
     deliver()
     result = deliver(approved_head=git(tree, "rev-parse", "HEAD"))
-    assert result["merged"] == [task["id"]] and result["closed"] == [7] and result["manual_todo"] == []
+    assert result["merged"] == [task["id"]] and result["closed"] == [] and result["manual_todo"] == []
     saved = json.loads(record.read_text())
     assert saved["status"] == "merged" and saved["delivery"]["complete"] and saved["delivery"]["merge_proof"]
-    assert saved["delivery"]["closed_issues"]["7"]["state"] == "closed" and state["issue"] == "closed"
-    patch = next(index for index, argv in enumerate(calls) if "PATCH" in argv)
-    assert any(argv[:3] == ["github-client", "pr", "merge"] for argv in calls[:patch])
-    assert sum("--is-ancestor" in argv for argv in calls[:patch]) == 2
+    assert result["results"][0]["issue_closeout_required"] == [7]
+    assert state["issue"] == "open" and not any("PATCH" in argv or "close" in argv for argv in calls)
     before = len(calls)
     assert deliver()["processed"] == [] and len(calls) == before
+
+
+def test_recovered_external_merge_does_not_bypass_issue_scope_review(repair_delivery):
+    _, _, _, record, _, task, state, calls, deliver = repair_delivery
+    deliver()
+    state["merged"] = True
+    result = deliver()
+    assert result["merged"] == [task["id"]] and result["closed"] == []
+    assert json.loads(record.read_text())["delivery"]["complete"]
+    assert state["issue"] == "open" and not any("PATCH" in argv or "close" in argv for argv in calls)
 
 
 @pytest.mark.parametrize("failure", ["merge_readback", "reachability", "wrong_head", "error_envelope"])
@@ -1292,18 +1300,6 @@ def test_delivery_keeps_unapproved_content_and_changed_ownership_local(repair_de
     assert not any(argv[:2] == ["git", "push"] or argv[:3] in (["github-client", "pr", "create"], ["github-client", "pr", "merge"]) or "PATCH" in argv for argv in calls)
     assert json.loads(record.read_text())["status"] == "awaiting_delivery_authorization"
 
-
-def test_ambiguous_close_response_retries_readback_without_duplicate_patch(repair_delivery):
-    _, _, _, record, tree, task, state, calls, deliver = repair_delivery
-    deliver()
-    state["close_timeout"] = True
-    first = deliver(approved_head=git(tree, "rev-parse", "HEAD"))
-    assert first["merged"] == [task["id"]] and first["results"][0]["status"] == "pending"
-    assert state["issue"] == "closed" and not json.loads(record.read_text())["delivery"].get("complete")
-    resumed = deliver()
-    assert resumed["results"][0]["status"] == "merged" and resumed["merged"] == [] and resumed["closed"] == [7]
-    assert json.loads(record.read_text())["delivery"]["complete"]
-    assert sum("PATCH" in argv for argv in calls) == 1
 
 
 @pytest.mark.parametrize("failure", ["failed", "missing"])

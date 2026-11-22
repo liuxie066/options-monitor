@@ -8,7 +8,7 @@
 
 巡检阶段对业务代码和外部系统保持只读；可在隔离临时目录运行无外部副作用的定向测试。用户于 2026-11-03 进一步授权：确认缺陷后，在同次调度接上独立本地修复、回归验证与独立审核。检查前阅读 [Agent Manual](../AGENTS.md)、本次相关合同和经验条目；保留无关工作区的改动。
 
-手动报告保存在 gitignored 的 `docs/reviews/`，定时报告、修复任务和交付回执位于独立状态目录。用户于 2026-11-09 明确授权本 loop：评论实际处理过的 issue/PR；对逐行审查、实际验证与 CI 均通过的精确 PR 修订执行 squash 合并；修复合入 main 后按既有流程准备发布 PR，并在发布证据齐全后回复版本。开关和默认值见下文。新建 issue、修改标题/标签、人工关闭 issue/PR、改权限、封禁贡献者和操作生产仍需单独授权；已合并修复的来源 issue 沿用既有自动关闭路径；2026-11-14 新增授权仅允许 `not_worthwhile` 在分诊评论和关闭说明确认投递后自动关闭，具体重试与回读规则见下文。疑似敏感或恶意内容仅保留必要脱敏证据，按 [Security](../SECURITY.md) 处理。
+手动报告保存在 gitignored 的 `docs/reviews/`，定时报告、修复任务和交付回执位于独立状态目录。用户于 2026-11-09 明确授权本 loop：评论实际处理过的 issue/PR；对逐行审查、实际验证与 CI 均通过的精确 PR 修订执行 squash 合并；修复合入 main 后按既有流程准备发布 PR，并在发布证据齐全后回复版本。开关和默认值见下文。新建 issue、修改标题/标签、人工关闭 issue/PR、改权限、封禁贡献者和操作生产仍需单独授权；已合并修复的关联 issue 须经下文的独立问题范围复核与交付核验后收尾；2026-11-14 新增授权仅允许 `not_worthwhile` 在分诊评论和关闭说明确认投递后自动关闭，具体重试与回读规则见下文。疑似敏感或恶意内容仅保留必要脱敏证据，按 [Security](../SECURITY.md) 处理。
 
 ## 每轮范围与续跑
 
@@ -61,9 +61,21 @@ python scripts/code_health_review.py run \
 
 常规自动合并由下文“开放 PR 审查与实际验证”的独立阶段负责，`pull_request_merge_enabled=true` 才可在所有门禁通过后 squash 合并；本地修复者的 approve 不能替代该阶段。修复交付模块本身仍保留人工兼容入口：`--approve-repair-merge <16位任务ID>=<40位HEAD>`，须同时带 `--deliver-repairs`，仅用于当次指定 task/HEAD，使用原有 `--merge --match-head-commit` 并要求 `CLEAN`。关闭 PR 自动合并开关后，仍可由用户在 GitHub 人工合并或使用这个精确批准入口。任何路径都不使用 admin 或自动等待合并选项。`status`、`issues-backfill`、smoke、dry-run 均拒绝交付参数，也不运行新增评论/发布阶段。
 
-合并命令成功仍不算完成。程序重新回读同仓库、同分支、base=`main`、同 HEAD 的 merged PR，再次核对上述必需 CI，记录合并 SHA 与时间，fetch 后证明修复 HEAD 属于合并提交、合并提交属于 `origin/main`，才记录任务为 `merged`。手工已合并 PR 和中断后的恢复路径同样必须满足 CI 证据，不能绕过后直接关单。只有这条有证据的修复路径可以 PATCH 关闭该任务已有的来源 issue，并再次 GET 确认；新归属出现时转人工处理。squash 后 HEAD 不再是合并提交的祖先时，须用 Git 证明合并树与已验证 HEAD 的内容完全一致；不能证明时保留人工核对。开放 PR 自动合并另要求 squash 的第一父提交等于实测 base，才把它交给发布阶段。
+合并命令成功仍不算完成。程序重新回读同仓库、同分支、base=`main`、同 HEAD 的 merged PR，再次核对上述必需 CI，记录合并 SHA 与时间，fetch 后证明修复 HEAD 属于合并提交、合并提交属于 `origin/main`，才记录任务为 `merged`。手工已合并 PR 和中断后的恢复路径同样必须满足 CI 证据，不能绕过后直接关单。合并证明只完成 PR 交付，不再直接关闭来源 issue；整个问题的解决范围由下文独立 issue 复核确认，新归属出现时保持开放。squash 后 HEAD 不再是合并提交的祖先时，须用 Git 证明合并树与已验证 HEAD 的内容完全一致；不能证明时保留人工核对。开放 PR 自动合并另要求 squash 的第一父提交等于实测 base，才把它交给发布阶段。
 
-`delivery-commands.jsonl` 和 task 的 `delivery` 字段保存执行、PR、HEAD、合并证据及逐条关闭回读。创建命令成功返回 URL 时立即保存 `pr_created_receipt` 并计入本轮新建 PR，后续状态回读超时不抹掉创建事实。每次关闭先持久化 `close_requests`，再发送 PATCH；响应丢失时先 GET，已有请求首次确认为 closed 时计入确认关闭，已确认条目不重复计数或 PATCH。中途失败保留已完成步骤，续跑复用分支/PR。模型判断“已修复”“不能复现”的历史条目仍只输出关闭建议，不能进入这条自动关闭路径。
+`delivery-commands.jsonl` 和 task 的 `delivery` 字段保存执行、PR、HEAD 与合并证据。创建命令成功返回 URL 时立即保存 `pr_created_receipt` 并计入本轮新建 PR，后续状态回读超时不抹掉创建事实。中途失败保留已完成步骤，续跑复用分支/PR。
+
+### 已完成修复的 issue 收尾
+
+2026-11-22 的流程修改把“整个问题是否已解决”交回现有 issue 独立复核。`already_fixed` 须给出非空实际验证日志及成功命令、已合并关联 PR 的精确合并 SHA；`resolution_scope=full` 表示原问题及后续纠正均解决，`partial` 保持开放。有限范围只有用户明确接受时才用 `accepted_scope`，并附 `acceptance_comment_id` 和原文 `acceptance_quote`。当前自动核验限于个人仓库 owner 的普通用户评论；loop 自发评论、机器人或其他人的同意不算接受。组织仓库或无法核实用户身份的有限收口仍需人工处理。不把修复了一个 finding 当作整个 issue 已解决。
+
+交付阶段只消费上述经证据校验的结论，重新读取同仓库 issue、讨论与关联 PR 指纹；核对 PR 精确 HEAD、base=main、合并 SHA、必需 CI，以及验证目标和修复提交确在 main。实际验证日志必须仍与复核时摘要一致，并将所列命令逐字匹配到 work 外宿主保存的 agent.jsonl 成功 command_execution 事件（含退出码与输出），不能只信模型自行填写的日志；仅建议、未合并、验证或 CI 失败、讨论变化、已有归属及范围未完成均不关单。`not_reproduced` 不进入此路径；旧 `already_fixed` 记录缺完成范围证据时由既有复核重审，不补造批准。合并发生在本轮 issue 阶段之后时，等下一次既有 issue 复核，不增加模型调用或日程。
+
+满足条件后先发布含 PR、合并 SHA、解决范围和验证结论的收口说明，确认评论回读，再持久记录关闭请求并以 completed 关闭、GET 回读。沿用 `comment-state.json` 的账号及 marker 对账；响应未知时先读取，已存在的说明不重发、已关闭问题不再写。新讨论使旧证据失效时停止恢复写入。关闭状态、说明链接、合并证据或阻塞原因保存在 issue 的 `completion_receipt`，汇入 delivery receipt、`daily-summary.json` 和 `report.md`；外部已关闭只记观察结果，只有本流程请求首次确认才计入 `closed`。`comments_enabled=false` 时不能发送说明，问题保持开放。
+
+解释确认后、关单前再次核对讨论、归属及解释正文；正文被删除或修改则阻塞。已确认关闭的历史项不逐轮请求 GitHub；intake 再次看到开放项时沿现有复核处理，同一身份的已关闭回执在缓存回灌和失败重试中保留，防止用旧证据反复关闭重开 issue。响应不明时先查远端；只有 completed 原因、请求账号及请求时间相符才归入本轮恢复确认，归属不明只记外部关闭观察。GitHub 查询与关闭不是原子操作，这些检查不声称排除最后一次读取后的并发变化。
+
+本轮安装态只同步这条已完成修复收尾路径；不启用 #1187 的 `not_worthwhile` 自动关闭，不改变自动合并、发布或生产权限。源码中已有的其他交付功能仍以实际安装副本及其授权为准。
 
 这些是代码入口和权限边界；开发或测试通过不表示本机已安装、日程已调整或远端交付已启用。日程使用的脚本、参数与安装回执须另行核对，本轮不修改本机配置实际值。smoke、dry-run、status 和 issues-backfill 不进入 PR 发布或合并路径，配置启用也不改变这一点。
 
@@ -162,7 +174,7 @@ GitHub issue 是已有问题与使用反馈的统一持久待办。对话或其�
 
 每条关闭建议记录 issue 编号、冻结 SHA、输入指纹、关闭理由、可选的修复提交、实际验证日志及命令与整数退出码。日志必须在本条 work 内、非空，使用 JSON Lines 逐条记录 `command`、整数 `exit_code` 和实际 `output`。每条建议中的命令必须与自身日志记录对应，匹配记录的退出码均为 0；其他命令的成功码不能掩盖它的失败。提供修复提交时还校验完整 SHA 是冻结目标的祖先。结构性检查不替代人工判断日志是否覆盖原缺陷；不合格证据降为 `needs_decision`。
 
-每轮 `issues/summary.json` 和 `issues/report.md` 汇总五类计数与清单：建议关闭、转 repair、reply、needs_decision、超时或其他待续（附具体原因）。`issues/close-recommendations.json` 按最多 10 条一批输出关闭建议，供用户明确整批确认。复核阶段及补扫不关闭 issue，日常评论和 `not_worthwhile` 的自动关闭由后续交付阶段独立执行；交付后将确认关闭的编号回写 `github_closed`、issue 回执和上述报告，评论或关闭失败时记录错误并留待重试。补扫仍不发布评论或关闭 issue。建议关闭不表示 GitHub 已关闭。这些建议仍须由人明确确认并另行关闭；本地入队也不表示已经修复。上文已验证修复合并后的自动关闭独立记录在 repair 交付回执中，不消费或冒用关闭建议。
+每轮 `issues/summary.json` 和 `issues/report.md` 汇总五类计数与清单：建议关闭、转 repair、reply、needs_decision、超时或其他待续（附具体原因）。`issues/close-recommendations.json` 按最多 10 条一批输出关闭建议，供用户明确整批确认。复核阶段及补扫不关闭 issue，日常评论和符合授权的自动关闭由后续交付阶段独立执行；交付后将确认关闭的编号回写 `github_closed`、issue 回执和上述报告，评论或关闭失败时记录错误并留待重试。补扫仍不发布评论或关闭 issue。建议关闭不表示 GitHub 已关闭。其中带完整 completion 证据的 already_fixed 由日常交付按上述已完成修复流程收尾，其余建议仍须由人明确确认并另行关闭；本地入队也不表示已经修复。关单证据记入 issue-state 的 completion_receipt 和日常交付报告，repair 的合并回执本身不再直接关单。
 
 ## 手动全量补扫
 
