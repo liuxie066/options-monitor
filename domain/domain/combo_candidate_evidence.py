@@ -122,6 +122,7 @@ def derive_combo_candidate_exposures(
         }
     )
     out: list[dict[str, Any]] = []
+    unique_rows = None
     for item in indexed:
         representative = item.get("representative")
         if not isinstance(representative, Mapping):
@@ -129,10 +130,21 @@ def derive_combo_candidate_exposures(
         representative_key = _brief_combo_key(representative)
         if representative_key is None:
             continue
-        matches = [row for row in rows if _brief_combo_key(row) == representative_key]
-        if len(matches) != 1:
+        if len(indexed) == 1:
+            matches = [row for row in rows if _brief_combo_key(row) == representative_key]
+            row = matches[0] if len(matches) == 1 else None
+        else:
+            if unique_rows is None:
+                unique_rows = {}
+                for candidate in rows:
+                    key = _brief_combo_key(candidate)
+                    if key is not None:
+                        token = _combo_key_token(key)
+                        # Ambiguity survives any further duplicates, even if an occurrence is invalid.
+                        unique_rows[token] = None if token in unique_rows else candidate
+            row = unique_rows.get(_combo_key_token(representative_key))
+        if row is None:
             continue
-        row = matches[0]
         if not _valid_occurrence_row(
             row,
             account=account,
@@ -297,6 +309,13 @@ def _brief_combo_key(
     if not currency or not multiplier:
         return None
     return put_key, call_key, currency, multiplier
+
+
+def _combo_key_token(
+    key: tuple[dict[str, str], dict[str, str], str, str],
+) -> tuple[tuple[tuple[str, str], ...], tuple[tuple[str, str], ...], str, str]:
+    put, call, currency, multiplier = key
+    return tuple(sorted(put.items())), tuple(sorted(call.items())), currency, multiplier
 
 
 def _candidate_contract_key(row: Mapping[str, Any], *, option_type: str) -> dict[str, str]:
