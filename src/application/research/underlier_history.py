@@ -210,7 +210,8 @@ def validate_corporate_action_response(response):
         date.fromisoformat(row["ex_div_date"])
 
 
-def _write_once(path, content):
+def _publish_bytes_once(path: Path, content: bytes) -> None:
+    # Keep publication here so collector_sha256 still covers its implementation.
     temporary = path.with_name(f".{path.name}.tmp.{uuid.uuid4().hex}")
     try:
         with temporary.open("xb") as stream:
@@ -221,6 +222,10 @@ def _write_once(path, content):
         os.link(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _write_once(path, content):
+    _publish_bytes_once(path, content)
     return _sha(content)
 
 

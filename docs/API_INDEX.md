@@ -1,5 +1,7 @@
 # 共享能力与 API 索引
 
+研究不可覆盖文件发布：`research.underlier_history._publish_bytes_once` 维护同目录独占临时文件、0600 权限、flush/fsync、硬链接发布及 finally 清理；目标已存在时失败。两个采集器继续通过各自 `_write_once` 包装计算摘要，上层 `observation_series._put` 保留同内容采纳策略。发布实现留在 underlier 源文件内，使 `collector_sha256` 保持单文件原始字节摘要且继续覆盖发布代码；quote 的 `IMPLEMENTATION_SOURCES` 包含该文件，series 自动继承。因此 underlier 的其它源码变化也会改变 quote 实现指纹，不增加 manifest 字段、不重写历史产物。契约测试：`tests/test_research_file_publication.py`。
+
 2026-10-31 研究部署状态：固定研发包 `f0d46fbf…` 已在 `liuxie-incus` 独立安装并完成两市场Linux隔离、正式启动和独立回读，部署验收时timer均enabled/active，计划11月2日起持续采集，验收时新增真实观察0；这不是当前采集量或运行态的回读。总应用请求预算301次/日、研究占用/余量2GiB/2GiB；旧包原件保留，生产OM未改。下文各入口的“本地开发/未部署”是原切片记录，当前部署边界与真实数据待验项以[研究合同文首](RESEARCH_WATCHLIST_SCOPE.md)为准；不能当作正式OM版本已发布。
 
 研究附属原件输入：`watchlist_series.build_watchlist_series` 可选消费外部摘要绑定的
