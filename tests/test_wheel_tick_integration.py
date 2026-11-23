@@ -52,9 +52,11 @@ def test_wheel_disabled_without_scope_preserves_candidate_config() -> None:
     assert all("_wheel_call" not in item for item in merged["symbols"])
 
 
+@pytest.mark.parametrize("pending_settlement", [False, True])
 def test_prepared_context_uses_generation_fence_for_active_wheel(
     monkeypatch,
     tmp_path: Path,
+    pending_settlement: bool,
 ) -> None:
     from src.application import prepared_option_positions_context as prepared
 
@@ -108,6 +110,66 @@ def test_prepared_context_uses_generation_fence_for_active_wheel(
             )
         ],
     )
+    if pending_settlement:
+        from src.application.wheel.read_model import build_wheel_read_model
+        from src.application.trades.resolver import resolve_trade_deal
+        from tests.test_trades_resolver_close import _deal
+
+        branch = build_wheel_read_model(
+            repo, "acct_a", 3_000, monitoring_readiness={"monitoring_gate": "enabled"}, market="us",
+        )["wheel_branches"][0]
+        persist_trade_event_objects_atomically(repo, [TradeEvent(
+            event_id="linked-call-open", event_type="open", event_time_ms=3_000, lot_id="linked-call-lot",
+            contract_key=ContractKey.from_values(
+                broker="富途", account="acct_a", underlying_symbol="NVDA", option_type="call",
+                strike=110, expiration_ymd="2026-11-20",
+            ),
+            contracts=1, price=2, currency="USD", source="test", multiplier=100,
+            raw_payload={
+                "side": "sell", "strategy": "wheel", "leg_role": "wheel_call",
+                "source_stock_lot_id": branch["stock_lot_id"],
+                "source_wheel_branch_id": branch["wheel_branch_id"],
+                "source_type": "broker_trade_event", "source_deal_id": "linked-call-open",
+                "external_event_key": "futu:linked-call-open", "multiplier_source": "payload",
+            },
+        )])
+        result = resolve_trade_deal(_deal(
+            internal_account="acct_a", futu_account_id="TEST-acct_a", deal_id="linked-call-zero",
+            order_id="linked-call-zero-order", symbol="NVDA", option_type="call", strike=110,
+            contracts=1, price=0, currency="USD", expiration_ymd="2026-11-20",
+            trade_time_ms=int(datetime(2026, 11, 20, 21, tzinfo=timezone.utc).timestamp() * 1000),
+            raw_payload={"code": "US.NVDA261120C110000", "remark": "",
+                         "fees": 0, "fee_provenance": {"basis": "actual", "source": "test"},
+                         "_trade_intake_source": {
+                "received_at_utc": "2026-11-20T21:00:10+00:00",
+            }},
+        ), repo=repo, state={}, apply_changes=True)
+        assert result.status == "applied", result
+        from src.application.ledger import api
+        from src.application.trades.close_reason_evidence import build_lifecycle_timing_policy
+
+        case = repo.list_trade_lifecycle_cases(account="acct_a")[0]
+        event_ms = int(datetime(2026, 11, 20, 21, tzinfo=timezone.utc).timestamp() * 1000)
+        repo.insert_trade_lifecycle_timing_policy_once(build_lifecycle_timing_policy(
+            case_id=case["case_id"], market="US", expiration_ymd="2026-11-20",
+            contract_metadata={"settlement_style": "physical", "underlying_security_type": "equity",
+                               "last_trade_cutoff_ms": event_ms,
+                               "last_trade_cutoff_source": "instrument_policy_registry"},
+            trading_days=[{"date": "2026-11-20", "type": "WHOLE"}, {"date": "2026-11-23", "type": "WHOLE"}],
+            calendar_source="fixture", calendar_observed_at_ms=event_ms,
+        ))
+        manifest = api.build_current_decision_projection_migration_inventory(
+            repo.db_path, now_ms=int(datetime.now(timezone.utc).timestamp() * 1000),
+        )
+        api.apply_current_decision_projection_migration(repo.db_path, manifest)
+        from contextlib import closing
+        from src.application.trades.inbox import _connect, _ensure_schema
+
+        # The production intake owns this sidecar; create its isolated test schema.
+        with closing(_connect(repo.db_path.with_name(repo.db_path.name + ".trade_intake_inbox.sqlite3"))) as conn:
+            _ensure_schema(conn)
+            conn.commit()
+
     run_id = "wheel-tick-integration"
     authority = publish_account_run_config(base=tmp_path, run_id=run_id, account="acct_a", config=config)
     monkeypatch.setattr(
@@ -149,6 +211,10 @@ def test_prepared_context_uses_generation_fence_for_active_wheel(
     )
     assert context["wheel_read_model"]["batches"][0]["projection_hash"] == (
         wheel_model["batches"][0]["projection_hash"]
+    )
+
+    assert context["locked_shares_unavailable_by_symbol"] == (
+        {"NVDA": "option_close_settlement_pending"} if pending_settlement else {}
     )
 
     merged = merge_wheel_requirements_into_prefetch_config(
@@ -205,9 +271,6 @@ def test_prepared_context_uses_generation_fence_for_active_wheel(
                 {
                     **prepared_context,
                     "exchange_rates": {"rates": {"USDCNY": 7.2, "HKDCNY": 0.92}},
-                    "locked_shares_status": "available",
-                    "locked_shares_by_symbol": {},
-                    "locked_shares_unavailable_by_symbol": {},
                 },
                 1 / 7.2,
                 0.92,
@@ -239,8 +302,12 @@ def test_prepared_context_uses_generation_fence_for_active_wheel(
     open_snapshot = capture(batch, config, run_id, authority)
     assert open_snapshot["opening_status"] == "candidates_found"
     assert open_snapshot["scope_results"][0]["candidate_count"] == 1
-    assert open_snapshot["batches"][0]["granted_contracts"] == 1
-    assert open_snapshot["batches"][0]["final_candidate"] is not None
+    assert open_snapshot["batches"][0]["granted_contracts"] == (0 if pending_settlement else 1)
+    if pending_settlement:
+        assert open_snapshot["batches"][0]["final_candidate"] is None
+        assert open_snapshot["batches"][0]["raw_candidates"][0]["settlement_status"] == "pending_confirmation"
+    else:
+        assert open_snapshot["batches"][0]["final_candidate"] is not None
 
     removed_snapshot = capture(removed_batch, removed, removed_run_id, removed_authority)
     assert removed_snapshot["opening_status"] == "not_applicable"

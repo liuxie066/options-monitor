@@ -1584,6 +1584,57 @@ def test_covered_wheel_contracts_reach_sealed_snapshot_and_brief(tmp_path: Path)
     assert "建议：卖出" not in message
 
 
+@pytest.mark.parametrize("holding_shares", [0, 100])
+def test_pending_settlement_candidates_are_observations_not_executable(tmp_path: Path, holding_shares: int) -> None:
+    model = _read_model()
+    scan = _scan_eligibility_model(model, "call")
+    assert scan["raw_candidates"]["stock-1"]
+    facts = build_shared_coverage_facts(
+        account="lx", wheel_read_model=model,
+        portfolio_context=cash_portfolio({"stocks_by_symbol": {
+            "NVDA": {"shares": holding_shares, "can_sell_qty": holding_shares},
+        }}),
+        option_context={"decision_snapshot_status": "trusted", "locked_shares_status": "available",
+                        "locked_shares_by_symbol": {},
+                        "locked_shares_unavailable_by_symbol": {"NVDA": "option_close_settlement_pending"}},
+    )
+    assert facts[0]["status"] == "unavailable"
+    assert facts[0]["shares_available_for_cover"] == 0
+    captured = finalize_wheel_capacity(account="lx", wheel_read_model=model, wheel_scan=scan,
+                                      opening_call_candidates=[], coverage_facts=facts)
+    batch = captured["batches"][0]
+    assert batch["granted_contracts"] == 0 and batch["final_candidate"] is None
+    assert (batch["raw_candidates"][0].get("settlement_status") == "pending_confirmation") == bool(holding_shares)
+    payload = seal_wheel_candidate_snapshot(
+        base=tmp_path, run_id="pending", account="lx", market="us",
+        account_config_sha256="a"*64, strategy_policy_sha256="b"*64,
+        dependencies=_seal_dependencies(), scope_results=captured["scope_results"],
+        run_mode={"scan_mode": "standard", "executable": True},
+        batches=captured["batches"], capacity_allocations=captured["allocations"], sealed_at=AS_OF,
+    )
+    payload = load_wheel_candidate_snapshot(base=tmp_path, run_id="pending", account="lx")
+    views, candidates, available = _load_wheel_snapshot_family(
+        run_id="pending", account="lx", market="US", source_artifacts=[], data_gaps=[], snapshot=payload)
+    assert available and not candidates
+    assert views[0]["recommended_contracts"] == 0 and not views[0]["has_final_candidate"]
+    assert bool(views[0]["observation_candidate"]) == bool(holding_shares)
+    from src.application.daily_decision_brief_renderer import render_fixed_report
+    message = render_fixed_report({"account": "lx", "market": "US", "wheel_batches": views, "status": "ready"})
+    assert ("观察候选" in message) == bool(holding_shares), message
+    if holding_shares:
+        assert "待交收确认，额度确认前不可执行" in message
+        assert "本轮无符合条件的候选" not in message
+    assert "建议：卖出" not in message
+    from src.application.ledger.wheel_commands import _snapshot_final_candidate
+    with pytest.raises(ValueError, match="final candidate changed"):
+        _snapshot_final_candidate(
+            payload, current_strategy_policy_sha256="b"*64, account="lx", lot_id="stock-1",
+            final_candidate_id=batch["raw_candidates"][0]["candidate_id"],
+            expected_snapshot_hash=payload["snapshot_hash"],
+            expected_batch_generation_hash=batch["batch_generation_hash"],
+        )
+
+
 @pytest.mark.parametrize("failure_at", ["symbol", "branch"])
 @pytest.mark.parametrize("direction", ["put", "call"])
 def test_wheel_internal_failure_preserves_healthy_sibling(monkeypatch, direction, failure_at):

@@ -341,6 +341,15 @@ Intent 有效截止时间是每次创建操作的显式输入，不是 Wheel 配
 
 关键行情、Delta、IV/RV、价差、multiplier 或费用证据缺失时 fail closed，不生成候选。
 
+旧 Call 零价平仓、原因仍待交收确认时，机会扫描与账户可执行容量分开：可信 Wheel
+分支继续复用原扫描门槛。账户有对应持股、容量唯一阻塞为
+`option_close_settlement_pending` 时，原始候选标记 `settlement_status: pending_confirmation`，
+固定简报展示「观察候选」「待交收确认」。没有持股、持仓证据不完整或其他容量问题时，
+不按这个例外展示。相关股票继续不计入共享可覆盖额度；`granted_contracts` 为 0，
+`final_candidate` 为空，不进入可执行候选索引或 intent 创建流程。交收与额度确认后，
+由后续正常扫描重新核定候选。复查和最终归属规则见
+[零价平仓设计](OPTION_CLOSE_REALTIME_DESIGN.md#11-到期交易截止提前复核与最终负证据门槛)。
+
 ### 5.2 Strike 底线
 
 Put 权利金和之前收到的 Call 权利金不得降低正股卖出底线。对每个候选，必须同时满足：

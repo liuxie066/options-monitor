@@ -1,5 +1,6 @@
 from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -94,10 +95,18 @@ def test_replay_and_withdrawal_of_adjustment():
     assert context["cash_by_currency"]["USD"] == base
 
 
-def test_live_facade_fetches_new_whole_balance_and_reports_inference(monkeypatch):
+@pytest.mark.parametrize("observed_at", ["2026-11-23T16:30:00+00:00", "2026-11-24T07:30:00+00:00"])
+def test_live_facade_fetches_new_whole_balance_and_reports_inference(monkeypatch, observed_at):
     from src.application import futu_portfolio_context as fc
     from src.application.daily_decision_brief_renderer import _fund_views
-    balance, orders, terms = sample(day=date.today().isoformat())
+    observed = datetime.fromisoformat(observed_at)
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return observed.astimezone(tz) if tz is not None else observed.replace(tzinfo=None)
+    monkeypatch.setattr(ap, "datetime", Clock)
+    market_day = observed.astimezone(ZoneInfo("America/New_York")).date().isoformat()
+    balance, orders, terms = sample(day=market_day)
     monkeypatch.setattr(ap, "_account_terms", lambda *_: terms)
     class Gateway:
         def __init__(self): self.calls = []; self.closed = False
@@ -108,6 +117,7 @@ def test_live_facade_fetches_new_whole_balance_and_reports_inference(monkeypatch
             return [balance]
         def get_history_orders(self, **kwargs):
             assert kwargs["acc_id"] == 123 and kwargs["order_market"] == "US"
+            assert kwargs["end"] == market_day
             return {"retcode": 0, "coverage_complete": True, "pagination_complete": True, "rows": orders}
         def get_positions(self, **kwargs): return []
         def close(self): self.closed = True

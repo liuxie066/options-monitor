@@ -319,6 +319,7 @@ def build_shared_coverage_facts(
         stock = stocks.get(symbol)
         status = "available"
         reason = None
+        settlement_observation_eligible = False
         try:
             if position_errors:
                 raise ValueError("position_snapshot_unavailable:" + ",".join(position_errors))
@@ -341,6 +342,8 @@ def build_shared_coverage_facts(
                     or not locked_unavailable_valid):
                 raise ValueError("short_call_coverage_unavailable")
             if symbol in locked_unavailable:
+                if locked_unavailable[symbol] == "option_close_settlement_pending":
+                    settlement_observation_eligible = shares_total > 0
                 raise ValueError(str(locked_unavailable[symbol]))
         except (TypeError, ValueError) as exc:
             shares_total = shares_can_sell = shares_locked = shares_reserved = 0
@@ -383,6 +386,7 @@ def build_shared_coverage_facts(
                 "shares_available_for_cover": max(
                     0, eligible - shares_locked - shares_reserved
                 ),
+                "settlement_observation_eligible": settlement_observation_eligible,
                 "capacity_identity_hash": identity,
                 "position_evidence": position_evidence,
                 "source_observed_at": stock.get("source_observed_at") or portfolio_context.get("source_observed_at"),
@@ -542,6 +546,17 @@ def finalize_wheel_capacity(
             {key: value for key, value in item.items() if key != "_grant_evaluations"}
             for item in internal_candidates
         ]
+        pending_settlement = any(
+            fact.get("account") == account
+            and fact.get("symbol") == batch.get("symbol")
+            and fact.get("status") == "unavailable"
+            and fact.get("reason") == "option_close_settlement_pending"
+            and fact.get("settlement_observation_eligible") is True
+            for fact in coverage_facts
+        )
+        if pending_settlement:
+            for candidate in raw_candidates:
+                candidate["settlement_status"] = "pending_confirmation"
         branch_id = str(batch.get("wheel_branch_id") or lot_id)
         allocation = by_claim.get(f"wheel:call:{branch_id}") or by_claim.get(
             f"wheel:{lot_id}"
@@ -602,10 +617,14 @@ def finalize_wheel_capacity(
                 "coverage": dict(batch.get("coverage") or project_wheel_coverage(batch)),
                 "active_option_contracts": list(batch.get("active_option_contracts") or []),
                 "phase": batch.get("phase"),
-                "reason_codes": list(batch.get("reason_codes") or []),
+                "reason_codes": sorted(set(batch.get("reason_codes") or []) | (
+                    {"option_close_settlement_pending"} if pending_settlement else set()
+                )),
                 "candidate_status": source_scope.get("status"),
                 "reason_code": (
-                    (allocation or {}).get("allocation_reason")
+                    "option_close_settlement_pending"
+                    if raw_candidates and pending_settlement
+                    else (allocation or {}).get("allocation_reason")
                     if raw_candidates and granted <= 0
                     else "wheel_capacity_grant_candidate_rejected"
                     if raw_candidates and granted > 0 and final is None

@@ -9,6 +9,10 @@ from typing import Any, Callable, Iterable, Mapping
 from zoneinfo import ZoneInfo
 
 from domain.domain.lifecycle_allocation import resolve_allocations
+from domain.domain.lifecycle_timing import (
+    EARLY_LIFECYCLE_STOCK_OPTION_WINDOW_MS,
+    stock_trade_near_option_event,
+)
 from domain.domain.option_lifecycle import pending_close_quantities
 from domain.domain.symbol_identity import canonical_symbol, looks_like_option_contract_label
 from src.application.ledger.api import (
@@ -306,7 +310,7 @@ def collect_broker_settlement_observation(
         int(now_ms) / 1000,
         tz=timezone,
     )
-    start_ymd = anchor_local.date().isoformat()
+    start_ymd = (anchor_local - timedelta(milliseconds=EARLY_LIFECYCLE_STOCK_OPTION_WINDOW_MS)).date().isoformat()
     end_ymd = observed_local.date().isoformat()
     market = str(timing_policy.get("market") or "").strip().upper()
     contract_code = _extract_option_contract_code(anchor)
@@ -599,6 +603,7 @@ def collect_broker_settlement_observation(
             futu_account_id=account_id,
             timezone=timezone,
             settlement_deadline_ms=deadline_ms,
+            option_event_time_ms=anchor_execution_ms,
         )
         if candidate is None:
             continue
@@ -1084,6 +1089,7 @@ def _stock_settlement_candidate(
     futu_account_id: str,
     timezone: ZoneInfo,
     settlement_deadline_ms: int,
+    option_event_time_ms: int = 0,
 ) -> dict[str, Any] | None:
     code = next(
         (value for key in ("code", "stock_code", "symbol")
@@ -1154,6 +1160,7 @@ def _stock_settlement_candidate(
         and (
             observation_start_ms <= 0
             or trade_time_ms >= observation_start_ms
+            or stock_trade_near_option_event(option_event_time_ms, trade_time_ms)
         )
         and trade_time_ms <= int(settlement_deadline_ms)
     ):

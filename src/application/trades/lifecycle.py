@@ -23,6 +23,10 @@ from domain.domain.option_lifecycle import (
     FINAL_STATUSES,
     PENDING_STATUSES,
 )
+from domain.domain.lifecycle_timing import (
+    EARLY_LIFECYCLE_STOCK_OPTION_WINDOW_MS,
+    stock_trade_near_option_event,
+)
 from domain.domain.trade_contract_identity import (
     require_option_multiplier,
     canonical_contract_symbol,
@@ -53,9 +57,6 @@ from src.application.trades.lifecycle_reconciliation import (
 )
 from src.application.trades.normalizer import NormalizedTradeDeal
 from src.application.trades.inbox import TradePayloadClaimLost
-
-
-EARLY_LIFECYCLE_STOCK_OPTION_WINDOW_MS = 5 * 60 * 1000
 
 
 class LifecycleContextReadError(Exception):
@@ -1903,12 +1904,7 @@ def _stock_trade_time_ms(stock_evidence: dict[str, Any] | None) -> int:
 
 
 def _stock_trade_near_option_event(case: dict[str, Any], stock_trade_time_ms: int) -> bool:
-    if stock_trade_time_ms <= 0:
-        return False
-    option_trade_time_ms = _lifecycle_case_event_time_ms(case)
-    if option_trade_time_ms <= 0:
-        return False
-    return abs(stock_trade_time_ms - option_trade_time_ms) <= EARLY_LIFECYCLE_STOCK_OPTION_WINDOW_MS
+    return stock_trade_near_option_event(_lifecycle_case_event_time_ms(case), stock_trade_time_ms)
 
 
 def _lifecycle_case_event_time_ms(case: dict[str, Any]) -> int:

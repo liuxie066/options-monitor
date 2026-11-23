@@ -1211,6 +1211,10 @@ def _load_wheel_snapshot_family(
             data_gaps.append({**gap_scope, "reason": batch.get("reason_code") or "wheel_scan_failed"})
         final = batch.get("final_candidate")
         final = dict(final) if isinstance(final, Mapping) else None
+        observation_candidate = next((
+            dict(item) for item in batch.get("raw_candidates") or []
+            if isinstance(item, Mapping) and item.get("settlement_status") == "pending_confirmation"
+        ), None) if final is None and batch.get("reason_code") == "option_close_settlement_pending" else None
         price_available = bool(final and (_number(final.get("sell_limit")) or 0) > 0
             and _parse_datetime(final.get("quote_observed_at_utc")) is not None)
         if final is not None and not price_available:
@@ -1228,6 +1232,7 @@ def _load_wheel_snapshot_family(
             "assignment_price": batch.get("assignment_price"),
             "assigned_at_ms": batch.get("assigned_at_ms"),
             "has_final_candidate": final is not None,
+            "observation_candidate": observation_candidate,
             "remaining_contracts": int(batch.get("remaining_contracts") or 0),
             "principal_anchor": batch.get("principal_anchor"),
             "currency": _text((final or {}).get("currency") or batch.get("currency")).upper(),

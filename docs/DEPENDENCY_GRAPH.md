@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1605 (`src`: 639, `domain`: 100, `scripts`: 36, `tests`: 826)
-- Internal import edges: 14473 total, 4778 production/script edges excluding tests
+- Python files scanned: 1606 (`src`: 639, `domain`: 100, `scripts`: 36, `tests`: 827)
+- Internal import edges: 14497 total, 4780 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|751| domain
+  application -->|753| domain
   application -->|4| domain_services
   application -->|240| infrastructure
   application -->|2| om_strategy_core
@@ -51,8 +51,8 @@ flowchart LR
   scripts -->|2| tests
   src -->|1| application
   storage -->|1| domain
-  tests -->|7276| application
-  tests -->|828| domain
+  tests -->|7294| application
+  tests -->|829| domain
   tests -->|2| domain_services
   tests -->|511| infrastructure
   tests -->|539| interfaces
@@ -65,7 +65,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 751 |
+| application | domain | 753 |
 | interfaces | application | 264 |
 | application | infrastructure | 240 |
 | scripts | application | 103 |
@@ -90,8 +90,8 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 7276 |
-| tests | domain | 828 |
+| tests | application | 7294 |
+| tests | domain | 829 |
 | tests | interfaces | 539 |
 | tests | infrastructure | 511 |
 | tests | scripts | 103 |
@@ -111,7 +111,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application | src.infrastructure | 171 |
 | scripts | src.application | 83 |
 | src.application.ledger | domain.domain.ledger | 80 |
-| src.application.trades | domain.domain | 68 |
+| src.application.trades | domain.domain | 70 |
 | src.application.research | src.application | 64 |
 | src.application.trades | src.application | 53 |
 | src.application | domain.storage | 51 |

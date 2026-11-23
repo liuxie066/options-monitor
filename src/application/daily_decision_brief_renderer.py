@@ -1799,6 +1799,7 @@ def _group_fixed_wheel_batches(rows: list[dict[str, Any]]) -> list[dict[str, Any
         if (
             len(signatures) != 1 or len(set(branch_ids)) != len(branch_ids)
             or len(quantities) != len(members)
+            or any(row.get("observation_candidate") for row in members)
             or any(row.get("has_final_candidate") is not False or
                    type(row.get("recommended_contracts")) is not int or
                    row["recommended_contracts"] != 0 for row in members)
@@ -1969,6 +1970,14 @@ def _wheel_batch_views(
                 )
         else:
             reasons = list(row.get("reason_codes") or [])
+            observation = row.get("observation_candidate")
+            if isinstance(observation, Mapping) and direction == "call":
+                contract = _human_contract(
+                    expiration=str(observation.get("expiration") or observation.get("expiration_ymd") or ""),
+                    strike=_number(observation.get("strike")),
+                    option_type="call", market=market,
+                )
+                details.append(f"观察候选：{contract}；待交收确认，额度确认前不可执行")
             if row.get("reason_code"):
                 reasons.append(row["reason_code"])
             if grouped_count:
@@ -2032,6 +2041,7 @@ def _wheel_reason_text(value: Any) -> str:
     reason = _lower(value)
     return {
         "wheel_disabled": "策略已关闭，现有生命周期继续监控",
+        "option_close_settlement_pending": "待交收确认，股份暂不计入可覆盖额度",
         "wheel_capacity_fully_committed_or_reserved": "分支额度已覆盖或预留，无新增建议",
         "coverage_quantity_unavailable": "覆盖数量待核实",
         "coverage_overallocated": "覆盖或预留超过分支额度，待核实",
@@ -3599,7 +3609,8 @@ def _fixed_scan_status(brief: Mapping[str, Any], diff: Mapping[str, Any]) -> str
     candidates = brief.get("candidates") if isinstance(brief.get("candidates"), Mapping) else {}
     if (not any(candidates.values())
             and not any(_position_has_advice(row) for row in brief.get("positions") or [] if isinstance(row, Mapping))
-            and not any(_whole_number(row.get("recommended_contracts")) for row in brief.get("wheel_batches") or []
+            and not any(_whole_number(row.get("recommended_contracts")) or row.get("observation_candidate")
+                        for row in brief.get("wheel_batches") or []
                         if isinstance(row, Mapping))):
         parts.append("本轮无符合条件的候选、平仓或移仓动作")
     return "；".join(parts) + "。"

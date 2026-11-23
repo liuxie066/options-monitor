@@ -8,8 +8,16 @@ from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
 TIMING_POLICY_SCHEMA = "lifecycle_timing_policy.v1"
-EFFECTIVE_TIMING_SCHEMA = "effective_lifecycle_timing.v2"
+EFFECTIVE_TIMING_SCHEMA = "effective_lifecycle_timing.v3"
 PAIRING_WINDOW_MS = 15 * 60 * 1000
+EARLY_LIFECYCLE_STOCK_OPTION_WINDOW_MS = 5 * 60 * 1000
+
+
+def stock_trade_near_option_event(option_trade_time_ms: int, stock_trade_time_ms: int) -> bool:
+    return (
+        option_trade_time_ms > 0 and stock_trade_time_ms > 0
+        and abs(stock_trade_time_ms - option_trade_time_ms) <= EARLY_LIFECYCLE_STOCK_OPTION_WINDOW_MS
+    )
 
 INSTRUMENT_POLICY_SCHEMA = "lifecycle_instrument_policy.v1"
 INSTRUMENT_POLICY_REGISTRY: dict[str, dict[str, Any]] = {
@@ -116,7 +124,8 @@ def derive_effective_lifecycle_timing(
         "case_id": str(timing.get("case_id") or "").strip(),
         "last_trade_cutoff_ms": cutoff,
         "pairing_until_ms": pairing_until,
-        "review_after_ms": max(cutoff, pairing_until),
+        # Early assignment can precede expiration; querying is not a negative-evidence decision.
+        "review_after_ms": pairing_until,
         # This persisted boundary remains the final negative-evidence gate and
         # stock-leg matching upper bound, not the first time we may query evidence.
         "settlement_deadline_ms": int(timing.get("settlement_deadline_ms") or 0),
