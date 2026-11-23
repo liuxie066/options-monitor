@@ -1,0 +1,92 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.59",
+  "base": {
+    "tag": "v4.6.58",
+    "commit": "79f33056e45646ed60c1e8d226d1dce770df7ced"
+  },
+  "reviewed_head": "67ef179b264f162e64f9f2d7508203ce69a86843",
+  "commits": [
+    {
+      "sha": "3f5a77025112cdc8bbefb2ae0c13f252581229c4",
+      "subject": "fix(wheel): scan covered calls using shared net share capacity"
+    },
+    {
+      "sha": "a3e58b75c45f1fd7287dba97f7e64654a1f112b8",
+      "subject": "Merge pull request #1257 from liuxie066/cindy/wheel-cc-net-cover"
+    },
+    {
+      "sha": "460325ddedd02e5470b7607e4e2bddb17db433be",
+      "subject": "fix: recheck zero-price settlements early and show pending CC candidates"
+    },
+    {
+      "sha": "c1d7c773256db6705f9ea5dd834ffc535dc91aa9",
+      "subject": "merge(wheel): integrate shared net coverage with pending settlement observations"
+    },
+    {
+      "sha": "67ef179b264f162e64f9f2d7508203ce69a86843",
+      "subject": "Merge pull request #1258 from liuxie066/cindy/early-settlement"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Wheel CC 扫描按账户净持股覆盖额度核定候选，已有 Call 或意图占用继续阻止执行，避免未关联持仓导致漏扫或重复覆盖；旧的未归属 Call 不再抢占匹配新成交的有效意图预留。",
+      "commits": [
+        "3f5a77025112cdc8bbefb2ae0c13f252581229c4",
+        "a3e58b75c45f1fd7287dba97f7e64654a1f112b8",
+        "c1d7c773256db6705f9ea5dd834ffc535dc91aa9"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "零价期权平仓按首次接收时间提前复查交收；仅交收未决时可展示待确认 CC 观察候选，相关股份仍不计入可覆盖额度，最终归属继续依据凭证与原有完整性规则。",
+      "commits": [
+        "460325ddedd02e5470b7607e4e2bddb17db433be",
+        "c1d7c773256db6705f9ea5dd834ffc535dc91aa9",
+        "67ef179b264f162e64f9f2d7508203ce69a86843"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "3f5a77025112cdc8bbefb2ae0c13f252581229c4",
+      "references": [
+        "docs/WHEEL_STRATEGY_PRD.md",
+        "https://github.com/liuxie066/options-monitor/pull/1257"
+      ]
+    },
+    {
+      "commit": "a3e58b75c45f1fd7287dba97f7e64654a1f112b8",
+      "references": [
+        "docs/WHEEL_STRATEGY_PRD.md",
+        "https://github.com/liuxie066/options-monitor/pull/1257"
+      ]
+    },
+    {
+      "commit": "460325ddedd02e5470b7607e4e2bddb17db433be",
+      "references": [
+        "docs/WHEEL_STRATEGY_PRD.md",
+        "https://github.com/liuxie066/options-monitor/pull/1258",
+        "docs/OPTION_CLOSE_REALTIME_DESIGN.md"
+      ]
+    },
+    {
+      "commit": "c1d7c773256db6705f9ea5dd834ffc535dc91aa9",
+      "references": [
+        "docs/WHEEL_STRATEGY_PRD.md",
+        "https://github.com/liuxie066/options-monitor/pull/1258",
+        "docs/OPTION_CLOSE_REALTIME_DESIGN.md"
+      ]
+    },
+    {
+      "commit": "67ef179b264f162e64f9f2d7508203ce69a86843",
+      "references": [
+        "docs/WHEEL_STRATEGY_PRD.md",
+        "https://github.com/liuxie066/options-monitor/pull/1258",
+        "docs/OPTION_CLOSE_REALTIME_DESIGN.md"
+      ]
+    }
+  ]
+}
