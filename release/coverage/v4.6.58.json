@@ -1,0 +1,177 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.58",
+  "base": {
+    "tag": "v4.6.57",
+    "commit": "b88ca597f2fe237332180492e6412f1929e38432"
+  },
+  "reviewed_head": "f50d117e9596c3876b28fb18a5ab627da901e114",
+  "commits": [
+    {
+      "sha": "37d205e8f2d85520e9cf59b84e7dff3a5bcaaf6b",
+      "subject": "refactor(evidence): reuse receipt scope and canonical JSON helpers"
+    },
+    {
+      "sha": "f3cba1434ac3f81147742ae84188c933173fc039",
+      "subject": "Merge pull request #1252 from liuxie066/cindy/radiant-ritchie"
+    },
+    {
+      "sha": "2de822f2020c96e0d7cdd97e15ac6dd549f687eb",
+      "subject": "refactor(research): share immutable publication with provenance coverage"
+    },
+    {
+      "sha": "b79d3738e7f545456bb011d1a70e9af5e87298db",
+      "subject": "Merge pull request #1253 from liuxie066/cindy/sharp-euclid"
+    },
+    {
+      "sha": "409b45ad5210d4f322a96fddfa3b6ca67c35020c",
+      "subject": "fix(code-health): close resolved issues after independent verification"
+    },
+    {
+      "sha": "85b0b583808ff2729d487afc0f208920246c7f9a",
+      "subject": "docs: refresh dependency graph for code health regressions"
+    },
+    {
+      "sha": "db0c32ef97041fcfe214f8729351c00ba37621b3",
+      "subject": "Merge remote-tracking branch 'origin/main' into HEAD"
+    },
+    {
+      "sha": "d5c425ea33814b439893887fe359d3c9eedebc1d",
+      "subject": "Merge pull request #1254 from liuxie066/cindy/stoic-hertz"
+    },
+    {
+      "sha": "3071b4642dfba7340c06fb4ebd170e114fbce2a7",
+      "subject": "fix: reconcile assignment pending assets in opening funds"
+    },
+    {
+      "sha": "a0750e15de3cbea109f0a223dc8d7b2f6d5ee837",
+      "subject": "test: align pending asset fixtures and ledger query boundary"
+    },
+    {
+      "sha": "f50d117e9596c3876b28fb18a5ab627da901e114",
+      "subject": "Merge pull request #1255 from liuxie066/cindy/silly-lederberg"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "富途在途资产与同账户指派、币种及现金缺口匹配时补计开仓额度；未匹配时保留缺口并在日报提示，避免与已核实货基资金重复计算。",
+      "commits": [
+        "3071b4642dfba7340c06fb4ebd170e114fbce2a7"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "代码巡检仅在独立核验修复、CI 和问题范围后关闭已解决问题，并保留关闭结果的读回证据。",
+      "commits": [
+        "409b45ad5210d4f322a96fddfa3b6ca67c35020c"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "37d205e8f2d85520e9cf59b84e7dff3a5bcaaf6b",
+      "reason": "纯内部复用既有凭据账户解析及 JSON 编码，保留原行为和外部契约。"
+    },
+    {
+      "commit": "f3cba1434ac3f81147742ae84188c933173fc039",
+      "reason": "合并提交；对应实现已在发布说明或内部变更处置中登记。"
+    },
+    {
+      "commit": "2de822f2020c96e0d7cdd97e15ac6dd549f687eb",
+      "reason": "纯内部复用研究文件发布实现并补充回归，保留原发布与来源验证行为。"
+    },
+    {
+      "commit": "b79d3738e7f545456bb011d1a70e9af5e87298db",
+      "reason": "合并提交；对应实现已在发布说明或内部变更处置中登记。"
+    },
+    {
+      "commit": "85b0b583808ff2729d487afc0f208920246c7f9a",
+      "reason": "仅更新测试或生成的开发依赖图，没有独立运行行为变化。"
+    },
+    {
+      "commit": "db0c32ef97041fcfe214f8729351c00ba37621b3",
+      "reason": "合并提交；对应实现已在发布说明或内部变更处置中登记。"
+    },
+    {
+      "commit": "d5c425ea33814b439893887fe359d3c9eedebc1d",
+      "reason": "合并提交；对应实现已在发布说明或内部变更处置中登记。"
+    },
+    {
+      "commit": "a0750e15de3cbea109f0a223dc8d7b2f6d5ee837",
+      "reason": "仅更新测试或生成的开发依赖图，没有独立运行行为变化。"
+    },
+    {
+      "commit": "f50d117e9596c3876b28fb18a5ab627da901e114",
+      "reason": "合并提交；对应实现已在发布说明或内部变更处置中登记。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "37d205e8f2d85520e9cf59b84e7dff3a5bcaaf6b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1252"
+      ]
+    },
+    {
+      "commit": "f3cba1434ac3f81147742ae84188c933173fc039",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1252"
+      ]
+    },
+    {
+      "commit": "2de822f2020c96e0d7cdd97e15ac6dd549f687eb",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1253"
+      ]
+    },
+    {
+      "commit": "b79d3738e7f545456bb011d1a70e9af5e87298db",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1253"
+      ]
+    },
+    {
+      "commit": "409b45ad5210d4f322a96fddfa3b6ca67c35020c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1254"
+      ]
+    },
+    {
+      "commit": "85b0b583808ff2729d487afc0f208920246c7f9a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1254"
+      ]
+    },
+    {
+      "commit": "db0c32ef97041fcfe214f8729351c00ba37621b3",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1254"
+      ]
+    },
+    {
+      "commit": "d5c425ea33814b439893887fe359d3c9eedebc1d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1254"
+      ]
+    },
+    {
+      "commit": "3071b4642dfba7340c06fb4ebd170e114fbce2a7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1255"
+      ]
+    },
+    {
+      "commit": "a0750e15de3cbea109f0a223dc8d7b2f6d5ee837",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1255"
+      ]
+    },
+    {
+      "commit": "f50d117e9596c3876b28fb18a5ab627da901e114",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1255"
+      ]
+    }
+  ]
+}
