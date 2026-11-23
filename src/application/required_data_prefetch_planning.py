@@ -329,8 +329,8 @@ def merge_wheel_requirements_into_prefetch_config(
                 (
                     branch.get("lifecycle_status") != "active",
                     branch.get("integrity_status") != "trusted",
-                    (branch.get("coverage") or project_wheel_coverage(branch))["status"] not in {"none", "partial"},
-                    not (branch.get("coverage") or project_wheel_coverage(branch))["available_shares"],
+                    project_wheel_coverage(branch, for_scan=True)["status"] not in {"none", "partial"},
+                    not project_wheel_coverage(branch, for_scan=True)["available_shares"],
                     str(
                         branch.get("monitoring_gate")
                         or model.get("monitoring_gate")

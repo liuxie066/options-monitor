@@ -344,7 +344,7 @@ def _direction_policy(wheel_config: Mapping[str, Any], direction: str) -> dict[s
 
 
 def _branch_capacity_reason(branch: Mapping[str, Any]) -> str | None:
-    coverage = branch.get("coverage") or project_wheel_coverage(branch)
+    coverage = project_wheel_coverage(branch, for_scan=True)
     if coverage["status"] in {"unavailable", "overallocated"}:
         return next(iter(coverage["reason_codes"]), "coverage_quantity_unavailable")
     if not coverage["available_shares"]:
@@ -411,12 +411,27 @@ def run_wheel_call_scan(
         return {"account": account, "scope_results": [], "raw_candidates": {}, "capacity_claims": []}
     policy = _direction_policy(wheel_config, "call")
     stocks = _stock_rows(wheel_read_model)
+
+    def account_capacity(branch: Mapping[str, Any]) -> Mapping[str, Any]:
+        symbol = str(branch.get("symbol") or "").strip().upper()
+        fact = coverage_fact.get(symbol)
+        return fact if isinstance(fact, Mapping) and fact.get("account") == account and fact.get("symbol") == symbol else {}
+
+    def capacity_reason(branch: Mapping[str, Any]) -> str | None:
+        reason = _branch_capacity_reason(branch)
+        if reason:
+            return reason
+        fact = account_capacity(branch)
+        if fact.get("status") == "available" and int(fact["shares_available_for_cover"]) <= 0:
+            return fact.get("reason") or "share_capacity_insufficient"
+        return None
+
     scan_batches = [
         row
         for row in batches
         if row.get("lifecycle_status") == "active"
         and row.get("integrity_status") == "trusted"
-        and _branch_capacity_reason(row) is None
+        and capacity_reason(row) is None
         and _branch_gate_reason(row) is None
         and _branch_evidence_reason(row) is None
     ]
@@ -470,8 +485,8 @@ def run_wheel_call_scan(
         if gate_reason is not None:
             scopes.append({**base_scope, "status": "not_applicable", "reason_code": gate_reason})
             continue
-        if _branch_capacity_reason(raw_batch) is not None:
-            scopes.append({**base_scope, "status": "not_applicable", "reason_code": _branch_capacity_reason(raw_batch)})
+        if capacity_reason(raw_batch) is not None:
+            scopes.append({**base_scope, "status": "not_applicable", "reason_code": capacity_reason(raw_batch)})
             continue
         evidence_reason = _branch_evidence_reason(raw_batch)
         if evidence_reason is not None:
@@ -496,7 +511,11 @@ def run_wheel_call_scan(
                 multiplier = 0
                 try:
                     multiplier = int(float(candidate.get("multiplier") or 0))
-                    contracts = int((batch.get("coverage") or project_wheel_coverage(batch))["available_shares"]) // multiplier
+                    shares = int(project_wheel_coverage(batch, for_scan=True)["available_shares"])
+                    fact = account_capacity(raw_batch)
+                    if fact.get("status") == "available":
+                        shares = min(shares, int(fact["shares_available_for_cover"]))
+                    contracts = shares // multiplier
                 except (TypeError, ValueError, ZeroDivisionError):
                     contracts = 0
                 grant_evaluations: dict[str, dict[str, Any]] = {}
@@ -523,6 +542,7 @@ def run_wheel_call_scan(
                 item["stock_lot_id"] = lot_id
                 item["wheel_branch_id"] = wheel_branch_id
                 item["direction"] = "call"
+                item["capacity_status"] = "verified" if account_capacity(raw_batch).get("status") == "available" else "unverified"
                 item["candidate_id"] = "wheel:" + canonical_sha256(
                     {
                         "wheel_branch_id": wheel_branch_id,

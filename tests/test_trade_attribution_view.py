@@ -550,6 +550,54 @@ def test_two_booked_intent_fills_are_linked_and_consumed_atomically(tmp_path, mo
     assert len(repo.list_trade_events()) == len(before) + 2
 
 
+def test_reserved_call_fill_is_not_blocked_by_old_unattributed_call(tmp_path, monkeypatch):
+    from domain.domain.ledger import TradeEvent
+    from domain.domain.trade_execution import execution_identity_from_input
+    from src.application.ledger.writer import persist_trade_event_objects_atomically
+    from src.application.trades.attribution import apply_trade_attribution
+    from test_wheel_workflows import _wheel_repo, _create_call_intent
+
+    repo, config = _writable_call_scope(tmp_path, monkeypatch, contracts=1, fill_time=2500)
+    seed = tmp_path / "intent-seed"
+    seed.mkdir()
+    source, lot_id = _wheel_repo(seed)
+    _create_call_intent(source, lot_id)
+    with repo._writer_connection(begin_immediate=True) as conn:
+        for event in source.list_wheel_events(account="lx"):
+            if event["event_type"] == "wheel_call_intent_created":
+                repo.append_wheel_event_once(event, conn=conn)
+    second = deepcopy(next(row for row in repo.list_trade_events() if row["event_id"] == "unlinked-call-open-1"))
+    second.update(event_id="second-fill", lot_id="second-lot", event_time_ms=5000)
+    second["raw_payload"]["execution_input"]["external_execution_id"] = "second-fill"
+    second["raw_payload"]["execution_id"] = execution_identity_from_input(second["raw_payload"]["execution_input"])
+    persist_trade_event_objects_atomically(repo, [TradeEvent.from_dict(second)])
+    monkeypatch.setattr("time.time", lambda: 6)
+    monkeypatch.setattr("src.application.ledger.trade_attribution.trade_attribution_capacity_check", trade_attribution_capacity_check)
+    observation = _call_capacity_observation(contracts=2, now_ms=6000)
+    evidence = {"complete": True, "exposures": []}
+    view = build_trade_attribution_view(read_trade_attribution_snapshot(repo, account="lx", market="us"),
+        config=config, account="lx", market="us", now_ms=6000,
+        combo_evidence=evidence, capacity_observation=observation)
+    old = next(row for row in view["rows"] if row["open_event_id"] == "unlinked-call-open-1")
+    new = next(row for row in view["rows"] if row["open_event_id"] == "second-fill")
+    assert old["selected_candidate_id"] is None
+    assert new["selected_candidate_id"], new
+    before = repo.list_trade_events()
+    args = dict(account="lx", market="us", config=config, execution_key=new["execution_key"],
+        candidate_id=new["selected_candidate_id"], expected_input_hash=new["input_hash"], request_id="reserved-fill",
+        actor="trade_intake:rule", combo_evidence=evidence, capacity_observation=observation, combo_mode="confirm")
+    assert apply_trade_attribution(repo, **args)["origin"] == "intent"
+    assert not apply_trade_attribution(repo, **args)["write_applied"]
+    consumes = [row for row in repo.list_wheel_events(account="lx") if row["event_type"] == "wheel_call_intent_consumed"]
+    assert len(consumes) == 1 and consumes[0]["source_trade_event_id"] == "second-fill"
+    assert repo.list_trade_events()[:len(before)] == before
+    reread = build_trade_attribution_view(read_trade_attribution_snapshot(repo, account="lx", market="us"),
+        config=config, account="lx", market="us", now_ms=6000,
+        combo_evidence=evidence, capacity_observation=observation)
+    assert next(row for row in reread["rows"] if row["open_event_id"] == "second-fill")["status"] == "linked"
+    assert next(row for row in reread["rows"] if row["open_event_id"] == "unlinked-call-open-1")["status"] == "pending"
+
+
 def test_late_exact_intent_fill_after_wheel_close_is_linked_once(tmp_path, monkeypatch):
     from test_wheel_workflows import _wheel_repo, _create_call_intent
     from src.application.trades.attribution import apply_trade_attribution
