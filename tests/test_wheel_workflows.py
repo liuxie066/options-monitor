@@ -545,6 +545,7 @@ def _create_call_intent(
     broker_observed_at: str | None = None,
     include_decision_identity: bool = True,
     include_capacity_identity: bool = True,
+    account_shares: int | None = None,
 ) -> tuple[dict, dict]:
     batch = build_wheel_read_model(repo, "lx", 3_000)["batches"][0]
     snapshot = {
@@ -585,7 +586,7 @@ def _create_call_intent(
            if include_decision_identity else {}),
         "capacity_identity_hash": "capacity-1",
         "status": "available",
-        "shares_eligible": contracts * 100,
+        "shares_eligible": account_shares if account_shares is not None else contracts * 100,
         "shares_locked": 0,
         "shares_reserved": 0,
         "shares_available_for_cover": contracts * 100,
@@ -621,6 +622,28 @@ def _create_call_intent(
         as_of_ms=4_000,
     )
     return created, coverage
+
+
+@pytest.mark.parametrize("account_shares", [100, 200])
+def test_unresolved_call_intent_rechecks_net_capacity_without_attributing_old_call(tmp_path, account_shares):
+    repo, lot_id = _wheel_repo(tmp_path)
+    _open_unlinked_call(repo, event_time_ms=2_500)
+    before = repo.list_trade_events()
+    branch = build_wheel_read_model(repo, "lx", 3_000)["batches"][0]
+    assert branch["phase"] == "linkage_unresolved"
+    if account_shares == 100:
+        before_wheel = repo.list_wheel_events(account="lx")
+        with pytest.raises(ValueError, match="coverage is insufficient"):
+            _create_call_intent(repo, lot_id, account_shares=account_shares)
+        assert repo.list_trade_events() == before
+        assert repo.list_wheel_events(account="lx") == before_wheel
+        return
+    created, _ = _create_call_intent(repo, lot_id, account_shares=account_shares)
+    after = build_wheel_read_model(repo, "lx", 5_000)["batches"][0]
+    assert created["status"] == "created"
+    assert after["phase"] == "linkage_unresolved"
+    assert after["active_intent_reserved_shares"] == 100
+    assert repo.list_trade_events() == before
 
 
 def test_call_intent_rejects_stale_broker_fact_and_unbound_decision(

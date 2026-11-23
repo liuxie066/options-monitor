@@ -9,13 +9,36 @@ from src.application.daily_decision_brief_service import _load_wheel_snapshot_fa
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.ledger.writer import persist_trade_event_objects_atomically
 from src.application.wheel.candidate_snapshot import seal_wheel_candidate_snapshot
-from src.application.wheel.capacity import finalize_wheel_capacity, finalize_wheel_put_capacity
+from src.application.wheel.capacity import build_shared_coverage_facts, finalize_wheel_capacity, finalize_wheel_put_capacity
 from src.application.wheel.read_model import build_wheel_read_model
 from src.application.wheel.scanning import run_wheel_call_scan, run_wheel_put_scan
 from tests.test_daily_decision_brief_renderer import _brief, _scheduled_context
 from tests.test_wheel_assignment_companions import _assignment_payload, _open_activation, _put_event
 from tests.test_wheel_candidate_snapshot import _dependencies
 from tests.test_wheel_scanning import AS_OF, _call_row, _converter, _policy
+
+
+@pytest.mark.parametrize('shares,expected', [(200, 1), (100, 0)])
+def test_ledger_unresolved_call_scans_account_remainder_without_rewriting_events(tmp_path, shares, expected):
+    from tests.test_wheel_workflows import _wheel_repo, _open_unlinked_call
+    repo, _ = _wheel_repo(tmp_path)
+    _open_unlinked_call(repo, event_time_ms=2500)
+    before = (repo.list_trade_events(), repo.list_wheel_events(account='lx'))
+    model = build_wheel_read_model(repo, 'lx', 3000, market='us',
+        monitoring_readiness={'monitoring_gate': 'enabled'})
+    assert model['wheel_branches'][0]['phase'] == 'linkage_unresolved'
+    facts = build_shared_coverage_facts(account='lx', wheel_read_model=model,
+        portfolio_context=cash_portfolio({'stocks_by_symbol': {'NVDA': {'shares': shares, 'can_sell_qty': shares}}}),
+        option_context={'decision_snapshot_status': 'trusted', 'locked_shares_status': 'available',
+            'locked_shares_by_symbol': {'NVDA': 100}})
+    scan = run_wheel_call_scan(model, _policy(), {'frames': {'NVDA': pd.DataFrame([phase2_opening_row(_call_row())])}},
+        {fact['symbol']: fact for fact in facts}, {'exchange_rate_converter': _converter()},
+        decision_time_ms=int(AS_OF.timestamp() * 1000))
+    captured = finalize_wheel_capacity(account='lx', wheel_read_model=model, wheel_scan=scan,
+        opening_call_candidates=[], coverage_facts=facts)
+    assert sum(row['granted_contracts'] for row in captured['batches']) == expected, captured
+    assert (repo.list_trade_events(), repo.list_wheel_events(account='lx')) == before
+    assert not build_wheel_read_model(repo, 'sy', 3000, market='us')['wheel_branches']
 
 
 @pytest.mark.parametrize('symbol_count', [170, 200])
@@ -216,6 +239,10 @@ def test_assignment_evidence_gates_real_scan_finalizer_and_brief(tmp_path, direc
         )
     expected = 1 if kind in {'known', 'option_open_known', 'mixed_siblings'} else 0
     assert len(scan['capacity_claims']) == expected
+    if direction == 'call' and kind == 'option_open_known':
+        assert finalized['batches'][0]['raw_candidates']
+        assert finalized['batches'][0]['reason_code'] == 'wheel_call_open'
+        expected = 0  # Remaining stock is observable; an active Call blocks another intent.
     assert sum(b['final_candidate'] is not None for b in finalized['batches']) == expected, finalized
     for branch in blocked:
         branch_id = branch['wheel_branch_id']

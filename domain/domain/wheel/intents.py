@@ -522,7 +522,9 @@ def _plan_intent_create(
         raise ValueError(f"Wheel {source_label} integrity is not trusted")
     if source.get(active_lot_field) or source.get("active_intent_ids"):
         raise ValueError(f"Wheel {active_label} already has an active {direction_label} or intent")
-    if source.get("phase") != "ready":
+    if source.get("phase") != "ready" and not (
+        direction == "call" and source.get("phase") == "linkage_unresolved"
+    ):
         raise ValueError(f"Wheel {active_label} is not ready for a {direction_label} intent")
     account = _required_text(source.get("account"), "account").lower()
     symbol = _required_text(source.get("symbol"), "symbol").upper()

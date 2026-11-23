@@ -1158,7 +1158,7 @@ def run_watchlist_pipeline_default(
                             wheel_read_model,
                             wheel_policy,
                             required_data_snapshot_batch,
-                            {},
+                            {fact["symbol"]: fact for fact in coverage_facts},
                             fee_context,
                             decision_time_ms=int(captured_at.timestamp() * 1000),
                         )

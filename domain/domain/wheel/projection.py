@@ -1983,8 +1983,8 @@ def project_wheel_branches(
     )
 
 
-def project_wheel_coverage(branch: Mapping[str, Any]) -> dict[str, Any]:
-    """Quantity coverage; reservations never count as committed option exposure."""
+def project_wheel_coverage(branch: Mapping[str, Any], *, for_scan: bool = False) -> dict[str, Any]:
+    """Quantity coverage; Call scan eligibility is separate from attribution."""
     def quantity(value: Any) -> int | None:
         try:
             number = Decimal(str(value))
@@ -2007,7 +2007,7 @@ def project_wheel_coverage(branch: Mapping[str, Any]) -> dict[str, Any]:
     reasons = []
     if target is None or committed is None or reserved is None or not multiplier:
         reasons.append("coverage_quantity_unavailable")
-    if branch.get("phase") == "linkage_unresolved":
+    if branch.get("phase") == "linkage_unresolved" and not (for_scan and direction == "call"):
         reasons.append("linkage_unresolved")
     if branch.get("integrity_status") != "trusted":
         reasons.extend(branch.get("reason_codes") or ["wheel_integrity_conflict"])

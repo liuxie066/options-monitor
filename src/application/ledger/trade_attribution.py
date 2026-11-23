@@ -694,6 +694,11 @@ def build_trade_attribution_view(
     blocked_executions = {execution for event in wheel_events if event["event_type"] == "wheel_attribution_conflict"
         and not conflict_statuses[event["event_id"]]["resolved"]
         for execution in event["payload"]["execution_keys"]}
+    trusted_call_branches = {branch["wheel_branch_id"] for branch in branches
+                            if branch["direction"] == "call" and branch["integrity_status"] == "trusted"}
+    consumed_call_fills = {(event.get("wheel_branch_id") or event.get("stock_lot_id"), event["source_trade_event_id"])
+                          for event in wheel_events if event["event_type"] == "wheel_call_intent_consumed"
+                          and (event.get("wheel_branch_id") or event.get("stock_lot_id")) in trusted_call_branches}
     exposures = list(combo_evidence.get("exposures") or [])
     combos = combo_attribution_candidates_from_rows(rows, account=account, runtime_environment="",
         exposures=exposures, effective_now_ms=now_ms, include_claimed=True,
@@ -875,6 +880,7 @@ def build_trade_attribution_view(
         for proposal in proposals:
             proposal.pop("capacity_reason_codes", None)
     demands: dict[str, int] = {}
+    reserved_call_demands: dict[tuple[str, str], int] = {}
     for fact in facts:
         if fact["status"] != "pending":
             continue
@@ -882,6 +888,10 @@ def build_trade_attribution_view(
             if candidate["strategy"] == "wheel" and candidate["capacity_evidence_complete"]:
                 key = candidate["candidate_id"]
                 demands[key] = demands.get(key, 0) + fact["contracts"] * int(fact["multiplier"])
+                if (fact["contract_key"]["option_type"] == "call" and candidate.get("intent_id")
+                        and (candidate.get("consumed_reservation") or {}).get("contracts", 0) > 0):
+                    intent_key = (key, candidate["intent_id"])
+                    reserved_call_demands[intent_key] = reserved_call_demands.get(intent_key, 0) + fact["contracts"] * int(fact["multiplier"])
     portfolio = (capacity_observation or {}).get("portfolio") or {}
     snapshot = portfolio.get("position_snapshot_input") or {}
     from src.application.portfolio_context_service import cash_snapshot_evidence
@@ -906,9 +916,18 @@ def build_trade_attribution_view(
     for fact in facts:
         proposals = sorted(candidates[fact["lot_id"]], key=lambda row: row["candidate_id"])
         for proposal in proposals:
+            demand = demands.get(proposal["candidate_id"], 0)
+            # An active reservation belongs to its matching fills, not older unbound Calls.
+            if (fact["contract_key"]["option_type"] == "call" and proposal.get("intent_id")
+                    and (proposal.get("consumed_reservation") or {}).get("contracts", 0) > 0):
+                demand = reserved_call_demands.get((proposal["candidate_id"], proposal["intent_id"]), 0)
+            elif (fact["status"] == "linked" and fact.get("wheel_branch_id") == proposal.get("wheel_branch_id")
+                    and (fact.get("wheel_branch_id"), fact["open_event_id"]) in consumed_call_fills):
+                # Consumption releases the reservation, not the proven ownership of its fill.
+                demand = 0
             if (proposal["strategy"] == "wheel" and proposal["capacity_evidence_complete"]
                     and proposal["available_shares"] is not None
-                    and demands.get(proposal["candidate_id"], 0) > proposal["competition_available_shares"]):
+                    and demand > proposal["competition_available_shares"]):
                 proposal["reason_codes"] = sorted(set(proposal["reason_codes"]) | {"competing_fills_exceed_capacity"})
                 proposal["eligible"] = False
         existing = {**fact, "candidate_id": "wheel:" + fact["wheel_branch_id"] if fact["wheel_branch_id"]
