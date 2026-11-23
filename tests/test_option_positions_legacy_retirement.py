@@ -715,7 +715,11 @@ def _private_ledger_accesses(source: str, *, package: str) -> list[str]:
     imports, accesses = _ledger_source_references(source, package=package)
     references = imports | accesses
     prefix = "src.application.ledger."
+    query_exports = {prefix + "query_api",
+                     prefix + "query_api.list_canonical_position_lot_snapshots",
+                     prefix + "query_api.open_position_query_ledger_from_data_config"}
     return sorted(value for value in references if value.startswith(prefix)
+                  and value not in query_exports
                   and value != prefix + "api" and not value.startswith(prefix + "api."))
 
 
@@ -730,6 +734,7 @@ def test_ledger_import_guard_rejects_alias_and_relative_bypasses() -> None:
         "from .. import ledger as store; store.repository.open()",
         "from src.application import ledger as store; alias = store; alias.writer.write()",
         "from src.application.ledger import *",
+        "from src.application.ledger.query_api import repository",
     )
     for source in examples:
         assert _private_ledger_accesses(source, package="src.application.trades"), source
@@ -740,6 +745,8 @@ def test_ledger_import_guard_rejects_alias_and_relative_bypasses() -> None:
         "from ..ledger.api import read_trade_attribution_snapshot",
         "from src.application import ledger as store; store.api.trade_event_log()",
         "repo = fixture(); repo.repository.read()",
+        "from src.application.ledger.query_api import list_canonical_position_lot_snapshots",
+        "from src.application.ledger import query_api as ledger; ledger.open_position_query_ledger_from_data_config()",
     ):
         assert not _private_ledger_accesses(source, package="src.application.trades"), source
 

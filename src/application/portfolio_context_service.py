@@ -175,6 +175,7 @@ def cash_snapshot_evidence(context: Mapping[str, Any]) -> dict[str, Any]:
         "cash_balance_reliable", "cash_balance_unavailable_by_row",
         "cash_source_observed_at", "cash_source_observation_status",
         "source_observation_status", "cash_provider_error",
+        "assignment_pending",
     )
     snapshot = context.get("cash_snapshot")
     return {**{key: deepcopy(context[key]) for key in keys if key in context},
@@ -292,13 +293,11 @@ def load_account_portfolio_context(
         raise
     except Exception:
         cached = None
-    from src.application.futu_mmf_shared import mmf_shared_configured
-
-    needs_current_mmf_evidence = (
-        source_plan.primary_source == "futu" and mmf_shared_configured()
-    )
+    pending = cached.get("assignment_pending") if isinstance(cached, dict) else None
+    needs_current_pending_evidence = (source_plan.primary_source == "futu"
+                                      and isinstance(pending, dict) and pending.get("status") != "none")
     if (
-        isinstance(cached, dict) and not needs_current_mmf_evidence
+        isinstance(cached, dict) and not needs_current_pending_evidence
         and cached.get("cash_source") != "futu_cash_like_assets_with_pm_mmf"
     ):
         cached_snapshot = cached.get("position_snapshot_input")

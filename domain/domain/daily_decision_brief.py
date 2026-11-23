@@ -787,6 +787,31 @@ def _normalize_daily_brief_funds(value: Any) -> dict[str, Any]:
         "available": available,
         "reason": str(funds.get("reason") or ("ok" if available else "unavailable")).strip(),
     }
+    if funds.get("assignment_pending") is not None:
+        pending = _mapping(funds["assignment_pending"], field="funds.assignment_pending")
+        status = str(pending.get("status") or "").strip()
+        if status not in {"none", "matched", "unmatched", "verified_mmf"}:
+            raise ValueError("funds.assignment_pending has invalid status")
+        normalized_pending = {
+            "status": status,
+            "reason": str(pending.get("reason") or "").strip(),
+            "currency": _upper(pending.get("currency")),
+        }
+        for key in ("pending_amount", "adjustment"):
+            raw = pending.get(key)
+            if raw is None:
+                normalized_pending[key] = None
+            else:
+                if isinstance(raw, bool):
+                    raise ValueError(f"funds.assignment_pending.{key} must be finite")
+                try:
+                    amount = float(raw)
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise ValueError(f"funds.assignment_pending.{key} must be finite") from exc
+                if not math.isfinite(amount) or amount < 0:
+                    raise ValueError(f"funds.assignment_pending.{key} must be nonnegative and finite")
+                normalized_pending[key] = amount
+        out["assignment_pending"] = normalized_pending
     if "cash_secured_unavailable_by_symbol" in funds:
         out["cash_secured_unavailable_by_symbol"] = {
             str(symbol): str(reason or "").strip()

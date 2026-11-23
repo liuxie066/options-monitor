@@ -157,7 +157,7 @@ Bind the host, effective config/runtime root, market, account scope, and evidenc
 | Notification text | `src/application/daily_decision_brief_renderer.py`; compatibility formatting in `src/application/notify_symbols.py` | Keep Markdown-friendly Chinese text; Daily Brief owns ordinary scheduled delivery |
 | Close-advice policy | `domain/domain/close_advice.py` | Runner assembles I/O; scoring policy stays in domain |
 | Option-position projection | `domain/domain/ledger/projection.py` | `trade_events -> projection -> position_lots` is canonical |
-| Ledger application boundary | `src/application/ledger/api.py` | Non-ledger modules must not import ledger internals directly |
+| Ledger application boundary | `src/application/ledger/api.py` | Read-only snapshot consumers may use the narrow public ledger/query_api.py facade; non-ledger modules must not import ledger internals directly |
 | Position workflows | `src/application/positions/` | Feishu `option_positions` mirror/sync is retired; SQLite ledger is authoritative |
 | Trade intake/review | `src/application/trades/` | Preserve idempotency, review, void, and repair semantics |
 | Tick orchestration | `src/application/multi_account_tick.py`, `src/application/multi_tick/` | Keep helper modules narrow |

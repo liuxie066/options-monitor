@@ -141,6 +141,30 @@ def test_refresh_failure_never_returns_stale_money(tmp_path):
     assert "CASH_PROVIDER_UNAVAILABLE" in result["cash_snapshot"]["reason_codes"]
 
 
+@pytest.mark.parametrize("status", ["matched", "unmatched"])
+def test_pending_cash_always_refreshes_even_inside_ttl(tmp_path, status):
+    import json
+    cached = cash_context(assignment_pending={"status": status, "pending_amount": 9745, "adjustment": 9745})
+    (tmp_path / "portfolio_context.json").write_text(json.dumps(cached))
+    calls = []
+    def fresh(**kwargs):
+        calls.append(kwargs)
+        return cash_context(assignment_pending={"status": "none", "pending_amount": 0, "adjustment": 0})
+    out = load(tmp_path, fresh)
+    assert len(calls) == 1
+    assert out["assignment_pending"]["status"] == "none"
+
+
+def test_pending_refresh_failure_cannot_reuse_an_old_adjustment(tmp_path):
+    cached = cash_context(assignment_pending={"status": "matched", "adjustment": 9745})
+    (tmp_path / "portfolio_context.json").write_text(json.dumps(cached))
+    def failed(**kwargs):
+        raise ValueError("provider unavailable")
+    out = load(tmp_path, failed)
+    assert "cash_by_currency" not in out
+    assert not cash_snapshot_is_usable(out)
+
+
 @pytest.mark.parametrize("error", [TimeoutError, CancelledError])
 def test_cancel_and_timeout_propagate_without_retry(tmp_path, error):
     calls = []

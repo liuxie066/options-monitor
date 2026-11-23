@@ -179,7 +179,8 @@ class Harness:
         self.hit("sdk_accinfo_substitute", str(kwargs["acc_id"]))
         if self.mode == "balance_failure":
             raise OSError("offline balance failure")
-        return 0, [{"acc_id": kwargs["acc_id"], "trd_env": "REAL", "cn_cash": 1000}]
+        return 0, [{"acc_id": kwargs["acc_id"], "trd_env": "REAL", "cn_cash": 1000,
+                    "pending_asset": 0}]
 
     def stock(self, **kwargs):
         self.hit("sdk_positions_substitute", str(kwargs["acc_id"]))
