@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from .query_api import (
+    list_canonical_position_lot_snapshots,
+    open_position_query_ledger_from_data_config,
+)
+
 from src.application.ledger.repository_core import read_position_projection_inputs
 
 from domain.domain.ledger.events import lot_id_for_open_event
@@ -125,7 +130,6 @@ from src.application.ledger.queries import (
     attach_event_strategy_metadata,
     format_position_cash_secured,
     format_position_money,
-    list_canonical_position_lot_snapshots,
     list_open_short_assignment_rows,
     list_position_lot_snapshots,
     list_position_lot_sync_snapshots,
@@ -148,7 +152,6 @@ from src.application.ledger.queries import (
     open_performance_evidence_repository,
     open_position_ledger,
     open_position_ledger_from_data_config,
-    open_position_query_ledger_from_data_config,
     open_performance_query_ledger_from_data_config,
     open_position_ledger_from_runtime_config,
     position_lot_context_view,

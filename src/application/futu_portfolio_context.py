@@ -913,6 +913,28 @@ def build_futu_portfolio_context(
     }
 
 
+def verified_shared_funding(balance_rows, *, account, account_id, environment, observed_at):
+    """Preserve existing confirmed transfers, without making their file a new gate."""
+    from src.application.futu_mmf_shared import mmf_shared_configured, read_mmf_shared
+    from src.application.futu_mmf_funding import apply_mmf_funding
+    from domain.domain.assignment_pending import number
+
+    if not mmf_shared_configured():
+        return None
+    try:
+        funding = read_mmf_shared(account)
+        if funding["status"] != "verified" or not any(number(v) for v in funding["adjustments"].values()):
+            return None
+        context = build_futu_portfolio_context(
+            balance_rows=balance_rows, position_rows=[], account=account,
+            cash_source_observed_at=observed_at, futu_account_id=account_id, trd_env=environment,
+        )
+        apply_mmf_funding(context, funding, account=account, physical_account_id=account_id, environment=environment)
+        return funding
+    except (ValueError, TypeError, KeyError, RuntimeError, OSError, OverflowError):
+        return None
+
+
 def fetch_futu_portfolio_context(
     *,
     cfg: Mapping[str, Any] | Any,
@@ -963,8 +985,23 @@ def fetch_futu_portfolio_context(
             gateway, "get_account_balance", account_ids, trd_env=trd_env,
             currency="CNH", refresh_cache=True, **controls,
         )
-        check_fetch_control(deadline, cancelled)
+        from src.application.futu_assignment_pending import observe_assignment_pending
+
+        balance_rows = _filter_rows_for_account_ids(balance_rows, account_ids, trd_env=trd_env)
         cash_observed_at = datetime.now(timezone.utc).isoformat()
+        shared_funding = verified_shared_funding(
+            balance_rows, account=account, account_id=physical_account_id,
+            environment=trd_env, observed_at=cash_observed_at,
+        )
+        if shared_funding is None:
+            balance_rows, assignment_pending = observe_assignment_pending(
+                gateway, balance_rows, query_rows=_query_rows_for_account_ids, cfg=cfg, account=account,
+                account_id=physical_account_id, environment=trd_env, **controls,
+            )
+            cash_observed_at = assignment_pending.get("funds_observed_at", cash_observed_at)
+        else:
+            assignment_pending = {"status": "verified_mmf", "adjustment": 0.0}
+        check_fetch_control(deadline, cancelled)
         if exchange_rate_observation is _FX_NOT_PROVIDED:
             try:
                 exchange_rate_observation = _fetch_market_exchange_rate_observation(
@@ -1047,21 +1084,16 @@ def fetch_futu_portfolio_context(
         exchange_rate_observation=exchange_rate_observation,
         position_snapshot_input=snapshot_input,
     )
-    from src.application.futu_mmf_shared import mmf_shared_configured, read_mmf_shared
+    from src.application.futu_assignment_pending import apply_assignment_pending
 
-    if mmf_shared_configured():
+    if shared_funding is not None:
         from src.application.futu_mmf_funding import apply_mmf_funding
 
-        check_fetch_control(deadline, cancelled)
-        try:
-            apply_mmf_funding(
-                context, read_mmf_shared(account), account=account,
-                physical_account_id=physical_account_id, environment=trd_env,
-            )
-        except (ValueError, TypeError, KeyError, RuntimeError, OSError, OverflowError):
-            check_fetch_control(deadline, cancelled)
-            context["cash_balance_reliable"] = False
-            context["cash_balance_unavailable_by_row"]["shared_mmf_funding"] = "shared_mmf_funding_unverified"
+        apply_mmf_funding(context, shared_funding, account=account,
+                          physical_account_id=physical_account_id, environment=trd_env)
+        context["assignment_pending"] = assignment_pending
+    else:
+        apply_assignment_pending(context, assignment_pending)
     check_fetch_control(deadline, cancelled)
     return context
 

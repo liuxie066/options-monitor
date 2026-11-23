@@ -1782,6 +1782,7 @@ def _build_funds(
             "as_of_utc": max(as_of_values).astimezone(timezone.utc).isoformat() if as_of_values else "",
             "cash_total_by_currency": (cash_total or {}) if cash_total_reliable else {},
             "cash_snapshot": portfolio_context.get("cash_snapshot"),
+            "assignment_pending": portfolio_context.get("assignment_pending"),
             **({"cash_secured_unavailable_by_symbol": dict(unavailable)}
                if isinstance(unavailable, Mapping) and unavailable else {}),
             "cash_secured_unavailable_by_ccy": dict(unavailable_by_ccy) if isinstance(unavailable_by_ccy, Mapping) else {},
