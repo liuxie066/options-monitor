@@ -347,6 +347,8 @@ def build_shared_coverage_facts(
             status = "unavailable"
             reason = str(exc)
         eligible = min(shares_total, shares_can_sell)
+        if status == "available" and shares_locked + shares_reserved > eligible:
+            reason = "share_capacity_oversubscribed"
         identity = canonical_sha256(
             {
                 "account": account,
@@ -392,6 +394,14 @@ def build_shared_coverage_facts(
     return facts
 
 
+def _call_intent_wait_reason(batch: Mapping[str, Any]) -> str | None:
+    if batch.get("active_call_lot_ids") or batch.get("active_option_lot_ids"):
+        return "wheel_call_open"
+    if batch.get("active_intent_ids"):
+        return "wheel_call_pending"
+    return None
+
+
 def _final_wheel_candidate(
     *,
     account: str,
@@ -401,7 +411,7 @@ def _final_wheel_candidate(
     coverage_facts: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
     granted = int((allocation or {}).get("granted_contracts") or 0)
-    if not internal_candidates or granted <= 0:
+    if not internal_candidates or granted <= 0 or _call_intent_wait_reason(batch):
         return None
     top = internal_candidates[0]
     grant_evaluations = top.get("_grant_evaluations")
@@ -421,6 +431,7 @@ def _final_wheel_candidate(
         ),
         "direction": "call",
         "final_candidate_id": top["candidate_id"],
+        "capacity_status": "verified",
         "requested_contracts": int((allocation or {}).get("requested_contracts") or 0),
         "granted_contracts": granted,
         "granted_shares": int((allocation or {}).get("granted_shares") or 0),
@@ -476,11 +487,6 @@ def finalize_wheel_capacity(
         for item in wheel_scan.get("capacity_claims") or []
         if isinstance(item, Mapping)
     ]
-    allocations = allocate_opening_share_capacity(
-        coverage_facts,
-        ordinary_claims + wheel_claims,
-    )
-    by_claim = {str(row.get("claim_id") or ""): row for row in allocations}
     branch_rows = wheel_read_model.get("wheel_branches") or wheel_read_model.get("batches") or []
     batches_by_id = {
         str(row.get("stock_lot_id") or ""): dict(row)
@@ -488,6 +494,10 @@ def finalize_wheel_capacity(
         if isinstance(row, Mapping)
         and str(row.get("direction") or "call").strip().lower() == "call"
     }
+    wheel_claims = [claim for claim in wheel_claims
+                    if not _call_intent_wait_reason(batches_by_id.get(str(claim.get("stock_lot_id") or ""), {}))]
+    allocations = allocate_opening_share_capacity(coverage_facts, ordinary_claims + wheel_claims)
+    by_claim = {str(row.get("claim_id") or ""): row for row in allocations}
     assigned_stock = wheel_read_model.get("assigned_stock_projection")
     assigned_stock = assigned_stock if isinstance(assigned_stock, Mapping) else {}
     stock_by_id: dict[str, list[Mapping[str, Any]]] = {}
@@ -585,6 +595,19 @@ def finalize_wheel_capacity(
                     key: stock[key]
                     for key in ("broker", "currency", "assignment_price", "assigned_at_ms")
                 }
+        candidate_status = source_scope.get("status")
+        candidate_reason = (
+            (allocation or {}).get("allocation_reason")
+            if raw_candidates and granted <= 0
+            else "wheel_capacity_grant_candidate_rejected"
+            if raw_candidates and granted > 0 and final is None
+            else source_scope.get("reason_code")
+        )
+        if candidate_reason == "share_capacity_fact_unavailable":
+            candidate_status = "unavailable"
+        elif raw_candidates and _call_intent_wait_reason(batch):
+            candidate_status = "not_applicable"
+            candidate_reason = _call_intent_wait_reason(batch)
         snapshot_batches.append(
             {
                 "account": account,
@@ -603,14 +626,8 @@ def finalize_wheel_capacity(
                 "active_option_contracts": list(batch.get("active_option_contracts") or []),
                 "phase": batch.get("phase"),
                 "reason_codes": list(batch.get("reason_codes") or []),
-                "candidate_status": source_scope.get("status"),
-                "reason_code": (
-                    (allocation or {}).get("allocation_reason")
-                    if raw_candidates and granted <= 0
-                    else "wheel_capacity_grant_candidate_rejected"
-                    if raw_candidates and granted > 0 and final is None
-                    else source_scope.get("reason_code")
-                ),
+                "candidate_status": candidate_status,
+                "reason_code": candidate_reason,
                 "raw_candidates": raw_candidates,
                 "allocation": allocation,
                 "granted_contracts": granted,
@@ -625,8 +642,9 @@ def finalize_wheel_capacity(
             for row in wheel_scan.get("scope_results") or []
             if isinstance(row, Mapping) and str(row.get("symbol") or "").upper() == symbol
         ]
-        raw_count = sum(len(row.get("raw_candidates") or []) for row in symbol_batches)
-        statuses = {str(row.get("status") or "") for row in source_scopes}
+        raw_count = sum(len(row.get("raw_candidates") or []) for row in symbol_batches
+                        if row.get("candidate_status") == "completed")
+        statuses = {str(row.get("candidate_status") or "") for row in symbol_batches}
         partial_data = any(
             str(row.get("reason_code") or "") == "partial_data"
             for row in source_scopes
@@ -642,7 +660,7 @@ def finalize_wheel_capacity(
             reason = "partial_data" if partial_data else None if raw_count else "no_candidate"
         elif statuses == {"not_applicable"}:
             status = "not_applicable"
-            reason = str(source_scopes[0].get("reason_code") or "wheel_not_applicable")
+            reason = str(symbol_batches[0].get("reason_code") or "wheel_not_applicable")
         elif "completed" in statuses:
             status = "completed"
             reason = "partial_data"
@@ -655,6 +673,9 @@ def finalize_wheel_capacity(
             )
         else:
             status, reason = "unavailable", "wheel_candidate_data_unavailable"
+            unavailable_reasons = {row.get("reason_code") for row in symbol_batches}
+            if len(unavailable_reasons) == 1 and "share_capacity_fact_unavailable" in unavailable_reasons:
+                reason = "share_capacity_fact_unavailable"
         scopes.append(
             {
                 "scope": "strategy",

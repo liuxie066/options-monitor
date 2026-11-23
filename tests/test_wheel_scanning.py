@@ -35,6 +35,111 @@ from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 AS_OF = datetime(2026, 4, 1, 15, 0, tzinfo=timezone.utc)
 
 
+@pytest.mark.parametrize("shares,branches,expected", [(300, 1, 1), (200, 1, 0), (300, 2, 1)])
+@pytest.mark.parametrize("branch_multiplier", [100, 500])
+def test_unresolved_call_scans_account_net_capacity_without_changing_attribution(shares, branches, expected, branch_multiplier):
+    from copy import deepcopy
+    from domain.domain.wheel import project_wheel_coverage
+
+    model = _read_model()
+    branch = model["batches"][0]
+    branch.update(phase="linkage_unresolved", multiplier=branch_multiplier, unresolved_call_lot_ids=["old-1", "old-2"])
+    branch["coverage"] = project_wheel_coverage(branch)
+    if branches == 2:
+        model["batches"].append({**deepcopy(branch), "stock_lot_id": "stock-2"})
+        model["assigned_stock_projection"]["_all_assigned_stock_lots"].append({
+            **deepcopy(model["assigned_stock_projection"]["_all_assigned_stock_lots"][0]),
+            "stock_lot_id": "stock-2",
+        })
+    before = deepcopy(model)
+    facts = build_shared_coverage_facts(
+        account="lx", wheel_read_model=model,
+        portfolio_context=cash_portfolio({"stocks_by_symbol": {"NVDA": {"shares": shares, "can_sell_qty": shares}}}),
+        option_context={"decision_snapshot_status": "trusted", "locked_shares_status": "available",
+                        "locked_shares_by_symbol": {"NVDA": 200}},
+    )
+    scan = run_wheel_call_scan(model, _policy(), {"frames": {"NVDA": pd.DataFrame([phase2_opening_row(_call_row())])}},
+        {fact["symbol"]: fact for fact in facts}, {"exchange_rate_converter": _converter()},
+        decision_time_ms=int(AS_OF.timestamp() * 1000))
+    captured = finalize_wheel_capacity(account="lx", wheel_read_model=model, wheel_scan=scan,
+        opening_call_candidates=[], coverage_facts=facts)
+    assert sum(row["granted_contracts"] for row in captured["batches"]) == expected
+    assert sum(row["final_candidate"] is not None for row in captured["batches"]) == expected
+    assert model == before
+
+
+@pytest.mark.parametrize("kind", ["missing", "stale", "other_account", "reserved", "settlement"])
+def test_unresolved_call_does_not_turn_unknown_or_occupied_capacity_into_executable_candidate(kind, tmp_path):
+    model = _read_model()
+    model["batches"][0]["phase"] = "linkage_unresolved"
+    if kind == "reserved":
+        model["batches"].append({"account": "lx", "symbol": "NVDA", "stock_lot_id": "reserved",
+            "lifecycle_status": "active", "active_intent_reserved_shares": 100})
+    account = "sy" if kind == "other_account" else "lx"
+    facts = build_shared_coverage_facts(account=account, wheel_read_model=model,
+        portfolio_context=cash_portfolio({"source_observed_at": AS_OF.isoformat(),
+            "stocks_by_symbol": {"NVDA": {"shares": 300, "can_sell_qty": 300}}}, account=account,
+            evaluated_at=AS_OF + timedelta(seconds=301 if kind == "stale" else 0)),
+        option_context={"decision_snapshot_status": "trusted", "locked_shares_status": "available",
+            "locked_shares_by_symbol": {"NVDA": 200},
+            "locked_shares_unavailable_by_symbol": {"NVDA": "option_close_settlement_pending"} if kind == "settlement" else {}},
+    ) if kind != "missing" else []
+    scan = run_wheel_call_scan(model, _policy(), {"frames": {"NVDA": pd.DataFrame([phase2_opening_row(_call_row())])}},
+        {fact["symbol"]: fact for fact in facts}, {"exchange_rate_converter": _converter()},
+        decision_time_ms=int(AS_OF.timestamp() * 1000))
+    captured = finalize_wheel_capacity(account="lx", wheel_read_model=model, wheel_scan=scan,
+        opening_call_candidates=[], coverage_facts=facts)
+    assert not any(row["final_candidate"] for row in captured["batches"])
+    if kind != "reserved":
+        assert scan["raw_candidates"]["stock-1"][0]["capacity_status"] == "unverified"
+        assert captured["batches"][0]["reason_code"] == "share_capacity_fact_unavailable"
+        from src.application.daily_decision_brief_renderer import _wheel_reason_text
+        assert _wheel_reason_text(captured["batches"][0]["reason_code"]) == "账户净覆盖额度未核实，仅供观察"
+        assert captured["batches"][0]["candidate_status"] == "unavailable"
+        assert captured["scope_results"][0]["status"] == "unavailable"
+        snapshot = seal_wheel_candidate_snapshot(base=tmp_path, run_id="observe", account="lx", market="us",
+            account_config_sha256="a" * 64, strategy_policy_sha256="b" * 64, dependencies=_seal_dependencies(),
+            scope_results=captured["scope_results"], batches=captured["batches"],
+            run_mode={"scan_mode": "standard", "executable": True})
+        assert snapshot["opening_status"] == "data_unavailable"
+        gaps = []
+        views, candidates, _ = _load_wheel_snapshot_family(run_id="observe", account="lx", market="US",
+            source_artifacts=[], data_gaps=gaps, snapshot=snapshot)
+        assert not candidates
+        assert any(gap["reason"] == "share_capacity_fact_unavailable" for gap in gaps)
+        from src.application.daily_decision_brief_renderer import _wheel_gap_reminders
+        assert any("账户净覆盖额度未核实" in text for text in _wheel_gap_reminders({"wheel_batches": views}))
+
+
+@pytest.mark.parametrize("state", ["oversubscribed", "own_call", "own_intent"])
+def test_unresolved_call_finalization_preserves_risk_and_intent_readiness(state):
+    model = _read_model()
+    branch = model["batches"][0]
+    branch.update(phase="linkage_unresolved", shares_remaining=300)
+    if state == "own_call":
+        branch.update(active_call_lot_ids=["linked"], active_option_committed_shares=100)
+    if state == "own_intent":
+        branch.update(active_intent_ids=["pending"], active_intent_reserved_shares=100)
+    shares = 100 if state == "oversubscribed" else 300
+    facts = build_shared_coverage_facts(account="lx", wheel_read_model=model,
+        portfolio_context=cash_portfolio({"stocks_by_symbol": {"NVDA": {"shares": shares, "can_sell_qty": shares}}}),
+        option_context={"decision_snapshot_status": "trusted", "locked_shares_status": "available",
+            "locked_shares_by_symbol": {"NVDA": 200 if state != "own_intent" else 100}})
+    scan = run_wheel_call_scan(model, _policy(), {"frames": {"NVDA": pd.DataFrame([phase2_opening_row(_call_row())])}},
+        {fact["symbol"]: fact for fact in facts}, {"exchange_rate_converter": _converter()},
+        decision_time_ms=int(AS_OF.timestamp() * 1000))
+    captured = finalize_wheel_capacity(account="lx", wheel_read_model=model, wheel_scan=scan,
+        opening_call_candidates=[{"symbol": "NVDA", "multiplier": 100, "max_new_contracts": 1}], coverage_facts=facts)
+    batch = captured["batches"][0]
+    assert batch["final_candidate"] is None
+    assert batch["reason_code"] == {"oversubscribed": "share_capacity_oversubscribed",
+        "own_call": "wheel_call_open", "own_intent": "wheel_call_pending"}[state]
+    if state != "oversubscribed":
+        assert scan["raw_candidates"]["stock-1"]
+        assert batch["granted_contracts"] == 0
+        assert next(row for row in captured["allocations"] if row["claim_id"] == "covered_call:NVDA")["granted_contracts"] == 1
+
+
 def _read_model() -> dict:
     return {
         "account": "lx",

@@ -2000,7 +2000,7 @@ def _wheel_gap_reminders(brief: Mapping[str, Any]) -> list[str]:
     # cannot fit the account quota. Reuse the source reasons; never infer capacity.
     gap_reasons = {
         "coverage_quantity_unavailable", "coverage_overallocated", "strategy_attribution_conflict",
-        "share_capacity_oversubscribed", "partial_data", "wheel_scan_failed",
+        "share_capacity_oversubscribed", "share_capacity_fact_unavailable", "partial_data", "wheel_scan_failed",
         "wheel_scan_prerequisite_unavailable", "wheel_coverage_facts_unavailable",
         "wheel_cash_capacity_unavailable", "data_unavailable", "wheel_candidate_data_unavailable",
         "multiplier_unproven", "multiplier_conflict", "assignment_cash_facts_unavailable",
@@ -2050,6 +2050,7 @@ def _wheel_reason_text(value: Any) -> str:
         "manual_ended": "本分支已人工结束",
         "cash_capacity_insufficient": "可用现金不足",
         "share_capacity_insufficient": "可覆盖股份不足",
+        "share_capacity_fact_unavailable": "账户净覆盖额度未核实，仅供观察",
         "share_capacity_oversubscribed": "Short Call 覆盖超过持股，高风险",
         "no_candidate": "暂无合适合约",
         "partial_data": "候选数据不完整，暂停建议",

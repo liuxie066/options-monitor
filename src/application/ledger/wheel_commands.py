@@ -1996,7 +1996,7 @@ def _create_wheel_call_intent(
             event["payload"]["multiplier"]
         )
         if (
-            projected["phase"] != "call_pending"
+            projected["phase"] not in {"call_pending", "linkage_unresolved"}
             or event["intent_id"] not in projected["active_intent_ids"]
             or projected["active_intent_reserved_shares"] != expected_reserved
         ):

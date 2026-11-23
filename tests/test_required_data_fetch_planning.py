@@ -412,7 +412,8 @@ def test_wheel_put_fetch_uses_spot_cap_and_rv(monkeypatch, tmp_path: Path) -> No
     assert plan.require_realized_volatility is True
 
 
-def test_wheel_prefetch_demand_is_added_only_for_enabled_ready_branches() -> None:
+@pytest.mark.parametrize("call_phase", ["ready", "linkage_unresolved"])
+def test_wheel_prefetch_demand_is_added_only_for_enabled_ready_branches(call_phase) -> None:
     from src.application.required_data_prefetch_planning import (
         merge_wheel_requirements_into_prefetch_config,
     )
@@ -444,7 +445,7 @@ def test_wheel_prefetch_demand_is_added_only_for_enabled_ready_branches() -> Non
                         "direction": "call",
                         "lifecycle_status": "active",
                         "integrity_status": "trusted",
-                        "phase": "ready",
+                        "phase": call_phase,
                         "multiplier": 100, "shares_remaining": 100, "remaining_contracts": 1,
                         "monitoring_gate": "enabled",
                     },
