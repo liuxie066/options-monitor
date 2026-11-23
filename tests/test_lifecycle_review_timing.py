@@ -76,7 +76,7 @@ def test_expiration_morning_session_corrects_new_and_immutable_legacy_cutoff(
     original = deepcopy(legacy)
     effective = _effective(legacy, _ms(cutoff) - 60 * 60_000)
     assert effective["last_trade_cutoff_ms"] == _ms(cutoff)
-    assert effective["review_after_ms"] == _ms(cutoff)
+    assert effective["review_after_ms"] == _ms(cutoff) - 45 * 60_000
     assert effective["settlement_deadline_ms"] == legacy["settlement_deadline_ms"]
     assert legacy == original
 
@@ -87,6 +87,32 @@ def test_closed_expiration_day_is_a_metadata_conflict_not_silently_rolled() -> N
             {"date": "2026-04-03", "type": "REST"},
             {"date": "2026-04-06", "type": "WHOLE"},
         ])
+
+
+def test_early_assignment_review_does_not_wait_for_expiration() -> None:
+    policy = _policy("US", "2026-11-20", [
+        {"date": "2026-11-20", "type": "WHOLE"},
+        {"date": "2026-11-23", "type": "WHOLE"},
+    ])
+    received = _ms("2026-11-19T08:00:00+08:00")
+    effective = _effective(policy, received)
+    assert received < effective["review_after_ms"] < received + 2 * 60 * 60_000
+    assert effective["settlement_deadline_ms"] == policy["settlement_deadline_ms"]
+
+
+@pytest.mark.parametrize("offset_ms", [-300_001, -300_000, 550, 300_000, 300_001])
+def test_polled_early_stock_uses_existing_pair_window(offset_ms: int) -> None:
+    from src.application.trades.settlement_observation import _stock_settlement_candidate
+
+    anchor = _ms("2026-11-19T00:02:00-05:00")
+    candidate = _stock_settlement_candidate(
+        fixtures._stock_settlement_deal("early", trade_time_ms=anchor + offset_ms),
+        lifecycle_case={"symbol": "NVDA", "option_type": "put", "position_side": "short",
+                        "strike": 100, "multiplier": 100, "observation_start_ms": anchor + 86400_000},
+        account="lx", futu_account_id="1001", timezone=ZoneInfo("America/New_York"),
+        settlement_deadline_ms=anchor + 2 * 86400_000, option_event_time_ms=anchor,
+    )
+    assert (candidate is not None) == (abs(offset_ms) <= 300_000)
 
 
 def test_holiday_adjusted_contract_date_keeps_local_expiration_and_dst() -> None:
