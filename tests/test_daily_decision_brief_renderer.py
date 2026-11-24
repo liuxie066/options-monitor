@@ -520,7 +520,8 @@ def test_fixed_report_groups_same_assignment_without_hiding_warning() -> None:
         assert "3 批" in grouped["title"]
         assert "1,500 股" in " ".join(grouped["details"])
         assert "成交归属待人工确认" in " ".join(grouped["details"])
-        assert "可开数量以账户容量检查为准" in " ".join(grouped["details"])
+        assert "分支合计剩余：1,500 股" in grouped["details"]
+        assert "可开数量以账户容量检查为准" not in " ".join(grouped["details"])
         assert all(f"{index:08d}" not in " ".join(grouped["details"]) for index in (1, 2, 3))
         for render in (render_fixed_report, render_fixed_report_card_markdown):
             message = render(current, limits={"max_items_per_account": 0}, context=_scheduled_context())
@@ -2380,7 +2381,8 @@ def test_wheel_quantity_and_same_candidate_limit_price(direction,status,label):
     rendered=render_fixed_report(brief,limits={"max_items_per_account": 0},context=_scheduled_context())
     assert label in rendered and "100 / 300 股" in rendered
     assert "建议限价｜USD 2.15" in rendered and "2.125" not in rendered
-    assert "意图预留｜100 股" in rendered and "以账户容量检查为准" in rendered
+    assert "意图预留｜100 股" in rendered and "分支剩余｜100 股" in rendered
+    assert "以账户容量检查为准" not in rendered
     brief["wheel_batches"][0].pop("sell_limit")
     unavailable=render_fixed_report(brief,limits={"max_items_per_account": 0},context=_scheduled_context())
     assert "建议价格暂不可用" in unavailable and "建议｜卖出 1 张 08-21 $110" not in unavailable

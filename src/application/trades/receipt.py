@@ -1033,7 +1033,7 @@ def build_trade_intake_receipt_message(
             amount = f"{coverage['committed_shares']} / {coverage['target_shares']} 股，" if coverage.get("committed_shares") is not None and coverage.get("target_shares") is not None else ""
             fields.append(("CSP 安排" if put else "CC 覆盖", amount + label))
             if coverage.get("available_shares") is not None:
-                fields.append(("分支剩余", f"{coverage['available_shares']} 股；可开数量以账户容量检查为准"))
+                fields.append(("分支剩余", f"{coverage['available_shares']} 股"))
     elif (result.get("combo_reconciliation") or {}).get("ok") is False:
         fields.append(("组合", "组合核对未完成；请检查组合核对服务。"))
     elif applied and result.get("action") in {"open", "open_close"}:
