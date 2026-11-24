@@ -1,0 +1,72 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.63",
+  "base": {
+    "tag": "v4.6.62",
+    "commit": "59f4557eccf19d039554b1a03a9648f39235cd9c"
+  },
+  "reviewed_head": "153d0657e77d26b932c708fb16c3e7ca17c1665c",
+  "commits": [
+    {
+      "sha": "d45b225e95e3c0f500c8dcbcc86f8eedf76dea5f",
+      "subject": "fix(wheel): remove redundant capacity disclaimer"
+    },
+    {
+      "sha": "37eb580c4386ff904952c2a62f9220d62afbe1c0",
+      "subject": "Merge pull request #1265 from liuxie066/cindy/jolly-kepler"
+    },
+    {
+      "sha": "45df95e9ed000e781140059e630dc766e131de9e",
+      "subject": "fix(wheel): group identical call recommendations in briefs"
+    },
+    {
+      "sha": "153d0657e77d26b932c708fb16c3e7ca17c1665c",
+      "subject": "Merge pull request #1266 from liuxie066/fix/wheel-call-display-grouping"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "简报和成交回执删除分支剩余股数后的固定容量提示，保留股数及实际状态说明。",
+      "commits": [
+        "d45b225e95e3c0f500c8dcbcc86f8eedf76dea5f",
+        "37eb580c4386ff904952c2a62f9220d62afbe1c0"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "同账户相同合约与价格的 Wheel Call 推荐合并展示，汇总股数、张数和收益，并在展示名额分配前合并，避免同一推荐按批次重复出现。",
+      "commits": [
+        "45df95e9ed000e781140059e630dc766e131de9e",
+        "153d0657e77d26b932c708fb16c3e7ca17c1665c"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "d45b225e95e3c0f500c8dcbcc86f8eedf76dea5f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1265"
+      ]
+    },
+    {
+      "commit": "37eb580c4386ff904952c2a62f9220d62afbe1c0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1265"
+      ]
+    },
+    {
+      "commit": "45df95e9ed000e781140059e630dc766e131de9e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1266"
+      ]
+    },
+    {
+      "commit": "153d0657e77d26b932c708fb16c3e7ca17c1665c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1266"
+      ]
+    }
+  ]
+}
