@@ -1,0 +1,33 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.62",
+  "base": {
+    "tag": "v4.6.61",
+    "commit": "b61470c5c7330da5f11640d730488427742982a5"
+  },
+  "reviewed_head": "c379f4124290ed651ad071de3969d635849575d6",
+  "commits": [
+    {
+      "sha": "c379f4124290ed651ad071de3969d635849575d6",
+      "subject": "fix(funds): reconcile buyback pending cash before restoring capacity"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "富途期权买入平仓产生的负现金，在成交款、实际费用、在途金额及独立资产分项核对一致后补回开仓额度；重复刷新不累加，到账后撤销补计，避免遗漏或重复计算货基资金。",
+      "commits": [
+        "c379f4124290ed651ad071de3969d635849575d6"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "c379f4124290ed651ad071de3969d635849575d6",
+      "references": [
+        "docs/candidate_strategy.md#53-现金担保能力"
+      ]
+    }
+  ]
+}
