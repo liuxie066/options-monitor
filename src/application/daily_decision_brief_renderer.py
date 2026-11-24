@@ -1536,14 +1536,29 @@ def _selection_plan(
     opening: list[dict[str, Any]] = []
     candidate_counts: dict[str, int] = {}
     wheel_batches = [dict(row) for row in brief.get("wheel_batches") or [] if isinstance(row, Mapping)]
+    wheel_batches = _group_wheel_batches(wheel_batches, recommendations=True)
     if delivery_kind == "fixed_report":
-        wheel_batches = _group_fixed_wheel_batches(wheel_batches)
+        wheel_batches = _group_wheel_batches(wheel_batches)
     wheel_by_branch = {str(row.get("wheel_branch_id") or row.get("position_lot_id") or ""): row
                        for row in wheel_batches}
     selected_wheel_branches: set[str] = set()
     for family_index, family in enumerate(families):
         rows = [row for row in candidates.get(family) or [] if isinstance(row, Mapping)]
         if family == "wheel":
+            # Fold original candidates into their display group before applying card limits.
+            grouped_members = {branch: batch for batch in wheel_batches
+                               if batch.get("display_recommendation_group")
+                               for branch in batch["display_branch_ids"]}
+            combined = []
+            seen_groups: set[str] = set()
+            for row in sorted(rows, key=lambda row: (_sort_number(row.get("rank")), _selection_identity(row))):
+                batch = grouped_members.get(str(row.get("wheel_branch_id") or row.get("position_lot_id") or ""))
+                if batch is None:
+                    combined.append(row)
+                elif batch["wheel_branch_id"] not in seen_groups:
+                    combined.append({**row, **batch})
+                    seen_groups.add(batch["wheel_branch_id"])
+            rows = combined
             represented = {str(row.get("wheel_branch_id") or row.get("position_lot_id") or "") for row in rows}
             rows = [*rows, *(row for key, row in wheel_by_branch.items()
                             if key not in represented and (_whole_number(row.get("recommended_contracts")) or 0) > 0)]
@@ -1749,12 +1764,36 @@ def _wheel_assignment_group_key(row: Mapping[str, Any]) -> tuple[Any, ...] | Non
     return (identity[0].lower(), identity[1].upper(), identity[2], identity[3].upper(), price, assigned_at_ms)
 
 
-def _group_fixed_wheel_batches(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    keys = [_wheel_assignment_group_key(row) for row in rows]
+def _wheel_recommendation_group_key(row: Mapping[str, Any]) -> tuple[Any, ...] | None:
+    if (_lower(row.get("direction")) != "call" or row.get("has_final_candidate") is not True
+            or type(row.get("recommended_contracts")) is not int or row["recommended_contracts"] <= 0
+            or not row.get("wheel_branch_id") or not row.get("position_lot_id")):
+        return None
+    identity = tuple(str(row.get(field) or "").strip()
+                     for field in ("account", "symbol", "broker", "currency", "expiration", "quote_observed_at_utc"))
+    numbers = tuple(_decimal(row.get(field)) for field in ("strike", "sell_limit", "multiplier"))
+    if (not all(identity) or not _expiration_label(identity[4])
+            or any(value is None or value <= 0 for value in numbers)
+            or numbers[2] != numbers[2].to_integral_value()
+            or any(_decimal(row.get(field)) is None for field in
+                   ("candidate_call_net_premium", "projected_lifecycle_net_pnl_if_called"))
+            or row.get("projected_lifecycle_pnl_scope") not in
+                   {"final_total_if_called", "cumulative_after_this_call"}):
+        return None
+    return (identity[0].lower(), identity[1].upper(), identity[2], identity[3].upper(),
+            *identity[4:], *numbers, row.get("quote_update_time"), row["projected_lifecycle_pnl_scope"],
+            tuple(_candidate_required_data_details(row)))
+
+
+def _group_wheel_batches(
+    rows: list[dict[str, Any]], *, recommendations: bool = False,
+) -> list[dict[str, Any]]:
+    key_for = _wheel_recommendation_group_key if recommendations else _wheel_assignment_group_key
+    keys = [key_for(row) for row in rows]
     unsafe_symbols = {
         _upper(row.get("symbol"))
         for row, key in zip(rows, keys)
-        if _lower(row.get("direction") or "call") == "call" and key is None
+        if not recommendations and _lower(row.get("direction") or "call") == "call" and key is None
     }
     cohorts: dict[tuple[Any, ...], list[int]] = {}
     for index, key in enumerate(keys):
@@ -1802,11 +1841,17 @@ def _group_fixed_wheel_batches(rows: list[dict[str, Any]]) -> list[dict[str, Any
             len(signatures) != 1 or len(set(branch_ids)) != len(branch_ids)
             or len(quantities) != len(members)
             or any(row.get("observation_candidate") for row in members)
-            or any(row.get("has_final_candidate") is not False or
+            or (not recommendations and any(row.get("has_final_candidate") is not False or
                    type(row.get("recommended_contracts")) is not int or
-                   row["recommended_contracts"] != 0 for row in members)
+                   row["recommended_contracts"] != 0 for row in members))
         ):
             continue
+        if recommendations:
+            # Historical P&L belongs to a stock lot; never add the same lot twice.
+            if (len({row["position_lot_id"] for row in members}) != len(members)
+                    or any(row["recommended_contracts"] * _decimal(row["multiplier"])
+                           > row["coverage"]["available_shares"] for row in members)):
+                continue
         grouped = dict(members[0])
         grouped["shares_remaining"] = sum(values[0] for values in quantities)
         grouped["coverage"] = {
@@ -1822,7 +1867,14 @@ def _group_fixed_wheel_batches(rows: list[dict[str, Any]]) -> list[dict[str, Any
                              ([{}] if member["coverage"]["committed_shares"] > 0 else []))
         ]
         grouped["display_batch_count"] = len(members)
-        grouped["display_assignment_price"] = key[4]
+        if recommendations:
+            grouped["display_recommendation_group"] = True
+            grouped["recommended_contracts"] = sum(row["recommended_contracts"] for row in members)
+            grouped["granted_contracts"] = grouped["recommended_contracts"]
+            for field in ("candidate_call_net_premium", "projected_lifecycle_net_pnl_if_called"):
+                grouped[field] = sum((_decimal(row[field]) for row in members), Decimal(0))
+        else:
+            grouped["display_assignment_price"] = key[4]
         grouped["display_branch_ids"] = branch_ids
         replacements[indices[0]] = grouped
         skipped.update(indices[1:])
@@ -1855,6 +1907,7 @@ def _wheel_batch_views(
         ).strip()
         grouped_count = row.get("display_batch_count")
         suffix = (
+            f" · {grouped_count} 批合计" if row.get("display_recommendation_group") else
             f" · {row['display_assignment_price']:g}P · {grouped_count} 批"
             if grouped_count else
             f" · 分支 {branch_id[-8:]}" if symbol_counts.get(symbol, 0) > 1 else ""
