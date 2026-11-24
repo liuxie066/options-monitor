@@ -456,6 +456,103 @@ def test_fixed_report_renders_wheel_put_branch() -> None:
     assert "暂未形成推荐" not in message
 
 
+def _same_wheel_call_recommendations() -> dict:
+    brief = _brief()
+    brief.update(account="sy", positions=[], candidates={}, wheel_batches=[])
+    for index in range(3):
+        brief["wheel_batches"].append({
+            "account": "sy", "symbol": "FUTU", "broker": "futu", "currency": "USD",
+            "wheel_branch_id": f"call-{index}", "position_lot_id": f"stock-{index}",
+            "direction": "call", "shares_remaining": 100,
+            "assignment_price": 95 + index, "assigned_at_ms": 1000 + index,
+            "has_final_candidate": True, "recommended_contracts": 1, "granted_contracts": 1,
+            "status": "ready", "phase": "ready", "reason_codes": [],
+            "coverage": {"status": "none", "target_shares": 100, "committed_shares": 0,
+                         "reserved_shares": 0, "available_shares": 100, "reason_codes": []},
+            "expiration": "2027-02-19", "strike": 110, "multiplier": 100,
+            "sell_limit": 3.2, "quote_observed_at_utc": "2026-11-24T15:02:15.188698+00:00",
+            "candidate_call_net_premium": 317.18,
+            "projected_lifecycle_net_pnl_if_called": 1747.12 + index,
+            "projected_lifecycle_pnl_scope": "final_total_if_called",
+        })
+    brief["candidates"]["wheel"] = [
+        {**row, "rank": index + 1} for index, row in enumerate(brief["wheel_batches"])
+    ]
+    return brief
+
+
+@pytest.mark.parametrize("render", [render_fixed_report, render_fixed_report_card_markdown,
+                                     render_fixed_report_text, render_query_brief])
+def test_same_wheel_call_recommendations_share_one_item(render) -> None:
+    brief = _same_wheel_call_recommendations()
+    original = deepcopy(brief)
+    message = render(brief, context=_scheduled_context(),
+                     limits={"max_total_items": 1, "max_candidates_per_strategy": 1})
+    assert message.count("FUTU｜Wheel Call") == 1
+    assert "3 批" in message and "分支 call-" not in message
+    assert "CC 覆盖｜未覆盖 · 300 股" in message
+    assert "建议｜卖出 3 张 02-19 $110 Call" in message
+    assert "建议限价｜USD 3.2" in message
+    assert "本轮预计净权利金｜$951.54" in message
+    assert "最终全部叫走后预计总收益｜$5,244.36" in message
+    assert "未展开" not in message
+    assert brief == original
+
+
+@pytest.mark.parametrize("field,value", [
+    ("account", "lx"), ("symbol", "NVDA"), ("broker", "other"), ("currency", "HKD"),
+    ("expiration", "2027-03-19"), ("strike", 115), ("sell_limit", 3.3), ("multiplier", 50),
+    ("quote_observed_at_utc", "2026-11-24T15:03:15+00:00"), ("quote_update_time", "different"),
+    ("projected_lifecycle_pnl_scope", "cumulative_after_this_call"),
+    ("reason_codes", ["partial_data"]), ("candidate_call_net_premium", None),
+    ("projected_lifecycle_net_pnl_if_called", None), ("position_lot_id", "stock-0"),
+])
+def test_wheel_recommendation_group_preserves_distinctions(field, value) -> None:
+    brief = _same_wheel_call_recommendations()
+    brief["wheel_batches"] = brief["wheel_batches"][:2]
+    brief["wheel_batches"][1][field] = value
+    brief["candidates"] = {}
+    view = build_daily_brief_user_view(brief, delivery_kind="fixed_report",
+        limits={"max_items_per_account": 0}, context=_scheduled_context())
+    assert len(view["wheel_batches"]) == 2
+
+
+def test_duplicate_wheel_branch_is_not_added_twice() -> None:
+    brief = _same_wheel_call_recommendations()
+    brief["wheel_batches"] = brief["wheel_batches"][:2]
+    brief["wheel_batches"][1]["wheel_branch_id"] = "call-0"
+    brief["candidates"] = {}
+    message = render_fixed_report(brief, context=_scheduled_context())
+    assert "批合计" not in message
+    assert "建议｜卖出 1 张" in message
+    assert "建议｜卖出 2 张" not in message
+
+
+def test_wheel_recommendation_alert_groups_only_selected_branches() -> None:
+    brief = _same_wheel_call_recommendations()
+    identities = []
+    brief["candidate_index"] = []
+    for row in brief["wheel_batches"]:
+        identity = build_daily_brief_candidate_identity(account="sy", market="US", symbol="FUTU",
+            strategy_family="wheel", wheel_branch_id=row["wheel_branch_id"])
+        identities.append(identity)
+        brief["candidate_index"].append({"identity": identity, "symbol": "FUTU",
+            "strategy_family": "wheel", "representative": row, "contract_count": 1})
+    for render in (render_candidate_alert, render_candidate_alert_card_markdown, render_candidate_alert_text):
+        message = render(brief, identities[:2], context=_scheduled_context())
+        assert message.count("FUTU｜Wheel Call") == 1
+        assert "2 批合计" in message
+        assert "建议｜卖出 2 张" in message
+        assert "本轮预计净权利金｜$634.36" in message
+        assert "最终全部叫走后预计总收益｜$3,495.24" in message
+
+
+def test_wheel_recommendation_group_retains_member_ids() -> None:
+    brief = _same_wheel_call_recommendations()
+    view = build_daily_brief_user_view(brief, delivery_kind="fixed_report", context=_scheduled_context())
+    assert view["wheel_batches"][0]["display_branch_ids"] == ["call-0", "call-1", "call-2"]
+
+
 def _hk_assigned_wheel_brief() -> dict:
     brief = _brief()
     brief["market"] = "HK"
