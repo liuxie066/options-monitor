@@ -21,7 +21,7 @@ import zipfile
 from src.application import runtime_bundle
 from src.application.plugin_runtime import (
     PLUGINS, code_root, expected_plugin_version, plugin_store, read_managed_plugin,
-    read_source_plugin, source_plugin_store,
+    read_source_plugin, source_plugin_store, _validate_inventory,
 )
 from src.infrastructure.private_storage import ensure_private_directory, exclusive_private_file_lock
 
@@ -145,12 +145,14 @@ def _extract_wheel(wheel: Path, site: Path, *, module: str) -> dict[str, str]:
     return files
 
 
-def _prepare_feishu_sdk(root: Path, staged: Path, *, python_executable: Path | None = None) -> dict[str, str]:
+def _prepare_feishu_sdk(root: Path, staged: Path, *, python_executable: Path | None = None,
+                       previous_repo_root: Path | None = None) -> dict[str, str]:
     python = str(python_executable or sys.executable)
     probe = (
         "import importlib.util,sys\n"
         "sys.dont_write_bytecode=True\n"
         "sys.path.insert(0,sys.argv[1])\n"
+        "if len(sys.argv)>2: sys.path.append(sys.argv[2])\n"
         "if importlib.util.find_spec('lark_oapi') is None: sys.exit(42)\n"
         "from src.application.plugin_runtime import validate_feishu_sdk\n"
         "validate_feishu_sdk()\n"
@@ -163,10 +165,26 @@ def _prepare_feishu_sdk(root: Path, staged: Path, *, python_executable: Path | N
             raise ValueError("existing Feishu SDK is incompatible; installation was not changed")
         if (root / "om.runtime.json").exists():
             raise ValueError("bundled Feishu SDK is unavailable; repair the runtime bundle before installing")
+        dependencies = staged / "dependencies"
+        if previous_repo_root is not None:
+            previous = read_managed_plugin(previous_repo_root, "feishu")
+            files = previous.get("dependency_files", {}) if previous else {}
+            if files:
+                source = plugin_store(previous_repo_root) / "feishu" / "dependencies"
+                # Copy verified files so retiring the old release cannot break this one.
+                for name in files:
+                    destination = dependencies / name
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source / name, destination)
+                _validate_inventory(dependencies, files, dependency_tree=True)
+                result = subprocess.run([python, "-I", "-c", probe, str(root), str(dependencies)],
+                                        capture_output=True, text=True, timeout=30)
+                if result.returncode == 0:
+                    return files
+                shutil.rmtree(dependencies)
         constraints = root / "constraints/runtime-bundle.txt"
         if not constraints.is_file():
             raise ValueError("Feishu SDK installation requires the release dependency constraints")
-        dependencies = staged / "dependencies"
         env = dict(os.environ, PYTHONNOUSERSITE="1", PYTHONDONTWRITEBYTECODE="1")
         for name in list(env):
             if name in {"PYTHONPATH", "PYTHONHOME"} or name.startswith(("PIP_", "UV_")):
@@ -230,7 +248,8 @@ def _validate_import(root: Path, staged: Path, plugin_id: str, *, python_executa
 
 
 def install_plugin(plugin_id: str, *, repo_root: Path | None = None, confirm: bool = False,
-                   python_executable: Path | None = None, asset_dir: Path | None = None) -> dict:
+                   python_executable: Path | None = None, asset_dir: Path | None = None,
+                   previous_repo_root: Path | None = None) -> dict:
     from src.application.plugin_release import validate_wheel
 
     if plugin_id not in PLUGINS:
@@ -282,7 +301,8 @@ def install_plugin(plugin_id: str, *, repo_root: Path | None = None, confirm: bo
                 site = staged / "site"
                 site.mkdir(parents=True)
                 files = _extract_wheel(work / entry["asset"], site, module=entry["module"])
-                dependency_files = (_prepare_feishu_sdk(root, staged, python_executable=python_executable)
+                dependency_files = (_prepare_feishu_sdk(root, staged, python_executable=python_executable,
+                                                       previous_repo_root=previous_repo_root)
                                     if plugin_id == "feishu" else {})
                 record = {"schema_version": 1, "plugin_id": plugin_id, "repo_root": str(root),
                           "om_version": version, "version": entry["version"], "distribution": entry["distribution"],

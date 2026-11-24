@@ -506,6 +506,58 @@ def test_fresh_target_missing_sdk_stages_dependencies_without_source_install(
         assert ctx.events.index("managed_validate") < ctx.events.index("configs") < ctx.events.index("switch")
 
 
+@pytest.mark.parametrize("managed_transition", ["source"], indirect=True)
+def test_upgrade_reuses_previous_managed_sdk_without_download_or_old_release_dependency(
+    managed_transition, managed_python, monkeypatch, tmp_path,
+):
+    ctx = managed_transition
+    environment = tmp_path / "runtime-without-sdk"
+    venv.EnvBuilder(with_pip=False).create(environment)
+    python = environment / "bin/python"
+    site = next((environment / "lib").glob("python*/site-packages"))
+    shutil.copytree(Path(importlib.util.find_spec("packaging").origin).parent, site / "packaging")
+    provider_test_dependencies(site)
+    _python_proxy(upgrade._release_python(ctx.previous), python)
+    ctx.target_interpreter["python"] = python
+    sdk_site = next((managed_python.parent.parent / "lib").glob("python*/site-packages"))
+    original = distribution.subprocess.run
+    downloads = []
+
+    def offline_install(command, **kwargs):
+        if "--target" in command:
+            downloads.append(command)
+            assert len(downloads) == 1, "upgrade must reuse the previous SDK without downloading it again"
+            shutil.copytree(sdk_site, Path(command[command.index("--target") + 1]),
+                            ignore=shutil.ignore_patterns("__pycache__"))
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return original(command, **kwargs)
+
+    monkeypatch.setattr(distribution, "subprocess", SimpleNamespace(
+        run=offline_install, TimeoutExpired=subprocess.TimeoutExpired,
+    ))
+    ctx.install("feishu")
+    previous_receipt = read_managed_plugin(ctx.previous, "feishu")
+    before = _inventory(plugin_store(ctx.previous))
+
+    result = ctx.run()
+
+    assert len(downloads) == 1
+    assert result["ok"], result.get("error", result)
+    assert _inventory(plugin_store(ctx.previous)) == before
+    target_receipt = read_managed_plugin(ctx.target, "feishu")
+    assert target_receipt["dependency_files"] == previous_receipt["dependency_files"]
+    assert target_receipt["version"] == "1.0.1"
+    assert target_receipt["repo_root"] == str(ctx.target)
+    assert ctx.events.index("managed_validate") < ctx.events.index("configs") < ctx.events.index("switch")
+    shutil.rmtree(plugin_store(ctx.previous))
+    operations = []
+    upgrade._validate_target_managed_plugins(
+        target_dir=ctx.target, selected=["market-opend", "feishu"],
+        run_cmd=ctx.runner, operations=operations,
+    )
+    assert operations and all(operation["ok"] for operation in operations)
+
+
 @pytest.mark.parametrize("failure", ["receipt", "missing_wheel", "digest", "import", "target_loader", "target_version"])
 @pytest.mark.parametrize("plugin_id", ["pm", "feishu", "wechat"])
 def test_managed_failures_leave_previous_store_config_and_services_untouched(managed_transition, failure, plugin_id):

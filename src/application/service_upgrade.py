@@ -2759,7 +2759,8 @@ def _managed_plugin_selection(release_dir: Path) -> list[str]:
 
 
 def _preserve_managed_plugins(
-    *, target_dir: Path, selected: list[str], run_cmd: Callable[..., Any], operations: list[dict[str, Any]],
+    *, target_dir: Path, previous_dir: Path, selected: list[str],
+    run_cmd: Callable[..., Any], operations: list[dict[str, Any]],
     asset_dir: Path | None = None,
 ) -> None:
     # A failed earlier attempt must not resurrect a subsequently removed plugin.
@@ -2774,6 +2775,7 @@ def _preserve_managed_plugins(
     for plugin_id in selected:
         result = plugin_distribution.install_plugin(
             plugin_id, repo_root=target_dir, confirm=True, python_executable=_release_python(target_dir), **options,
+            **({"previous_repo_root": previous_dir} if plugin_id == "feishu" else {}),
         )
         operations.append({"operation": "preserve_managed_plugin", **result})
     _validate_target_managed_plugins(
@@ -4083,7 +4085,8 @@ def service_upgrade(
                 provider_plugins=provider_plugins,
             )
             _preserve_managed_plugins(
-                target_dir=target_dir, selected=managed_plugins, run_cmd=run_cmd, operations=operations,
+                target_dir=target_dir, previous_dir=previous_dir, selected=managed_plugins,
+                run_cmd=run_cmd, operations=operations,
                 asset_dir=asset_dir,
             )
             write_upgrade_status(
