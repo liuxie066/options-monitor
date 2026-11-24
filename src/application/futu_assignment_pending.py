@@ -1,4 +1,4 @@
-"""Read-only assignment evidence for the default Futu pending-cash policy."""
+"""Read-only assignment and buyback evidence for the Futu pending-cash policy."""
 from concurrent.futures import CancelledError
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -19,7 +19,7 @@ def _account_terms(cfg, account):
     return [row["fields"] for row in list_canonical_position_lot_snapshots(repo)
             if row.get("fields", {}).get("account") == account
             and row["fields"].get("broker") == "富途"
-            and row["fields"].get("option_type") == "put"
+            and row["fields"].get("option_type") in {"put", "call"}
             and row["fields"].get("side") == "short"]
 
 
@@ -73,6 +73,19 @@ def observe_assignment_pending(gateway, balance_rows, *, query_rows, cfg, accoun
         result = match_assignment_pending(balance=fresh[0], orders=receipt["rows"], terms=terms,
                                           account_id=account_id, environment=environment, today=today)
         result["funds_observed_at"] = datetime.now(timezone.utc).isoformat()
+        balance_rows = fresh
+        if result["reason"] == "close_fees_unavailable":
+            if len(result["order_ids"]) > 400:
+                return fresh, result
+            check_fetch_control(deadline, cancelled)
+            fees = query_rows(gateway, "get_order_fees", {account_id}, trd_env=environment,
+                              order_id_list=result["order_ids"])
+            check_fetch_control(deadline, cancelled)
+            matched = match_assignment_pending(
+                balance=fresh[0], orders=receipt["rows"], terms=terms, order_fees=fees,
+                account_id=account_id, environment=environment, today=today,
+            )
+            result = {**matched, "funds_observed_at": result["funds_observed_at"]}
         return fresh, result
     except (TimeoutError, CancelledError):
         raise

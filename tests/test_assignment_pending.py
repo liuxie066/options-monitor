@@ -32,6 +32,112 @@ def match(balance, orders, terms):
                                     account_id="123", environment="REAL", today=date(2026, 11, 23))
 
 
+def close_sample(cp="P"):
+    balance = {"currency": "USD", "us_cash": -10.51, "hk_cash": 0, "cn_cash": 0,
+               "pending_asset": 10.51, "fund_assets": 1000, "cash": -10.51,
+               "total_assets": 1200.0004, "market_val": 200.0008}
+    orders = [{"order_id": "close", "code": f"US.PDD261204{cp}75000", "currency": "USD",
+               "create_time": "2026-11-23 12:11:54.994", "order_status": "FILLED_ALL",
+               "trd_side": "BUY_BACK", "qty": 1, "dealt_qty": 1, "dealt_avg_price": .08}]
+    terms = [{"symbol": "PDD", "expiration_ymd": "2026-12-04", "strike": 75,
+              "option_type": "put" if cp == "P" else "call", "multiplier": 100}]
+    return balance, orders, terms
+
+
+def match_close(balance, orders, terms, fees=None):
+    return match_assignment_pending(
+        balance=balance, orders=orders, terms=terms, account_id="123", environment="REAL",
+        today=date(2026, 11, 24), order_fees=fees if fees is not None else [{"order_id": "close", "fee_amount": 2.51}],
+    )
+
+
+@pytest.mark.parametrize("cp", ["P", "C"])
+def test_close_cash_includes_actual_fees_and_independent_pending_asset(cp):
+    from src.application.futu_portfolio_context import build_futu_portfolio_context
+    balance, orders, terms = close_sample(cp)
+    result = match_close(balance, orders, terms)
+    assert result["reason"] == "close_pending_reconciled"
+    assert result["adjustment"] == 10.51
+    context = build_futu_portfolio_context(balance_rows=[balance], position_rows=[], account="sy")
+    ap.apply_assignment_pending(context, result)
+    ap.apply_assignment_pending(context, result)
+    assert context["cash_by_currency"]["USD"] == pytest.approx(1000)
+    balance.update(us_cash=0, cash=0, pending_asset=0)
+    cleared = match_close(balance, orders, terms)
+    assert cleared["status"] == "none"
+    ap.apply_assignment_pending(context, cleared)
+    assert context["cash_by_currency"]["USD"] == pytest.approx(989.49)
+
+
+@pytest.mark.parametrize("change", ["included_in_fund", "missing_total", "missing_cash", "other_assets",
+    "missing_terms", "wrong_type", "wrong_multiplier", "fees_missing", "fees_wrong", "duplicate_fee",
+    "fee_account", "partial", "old", "wrong_account", "second_close", "pending_mismatch"])
+def test_close_never_credits_unreconciled_or_incomplete_evidence(change):
+    balance, orders, terms = close_sample()
+    fees = [{"order_id": "close", "fee_amount": 2.51}]
+    if change == "included_in_fund": balance["fund_assets"] += 10.51
+    if change == "missing_total": del balance["total_assets"]
+    if change == "missing_cash": del balance["cash"]
+    if change == "other_assets": balance["total_assets"] += 25
+    if change == "missing_terms": terms.clear()
+    if change == "wrong_type": terms[0]["option_type"] = "call"
+    if change == "wrong_multiplier": terms[0]["multiplier"] = 10
+    if change == "fees_missing": fees.clear()
+    if change == "fees_wrong": fees[0]["fee_amount"] = 2.5
+    if change == "duplicate_fee": fees *= 2
+    if change == "fee_account": fees[0]["acc_id"] = "456"
+    if change == "partial": orders[0]["order_status"] = "FILLED_PART"
+    if change == "old": orders[0]["create_time"] = "2026-11-01 12:11:54"
+    if change == "wrong_account": orders[0]["acc_id"] = "456"
+    if change == "second_close": orders.append({**orders[0], "order_id": "close2"})
+    if change == "pending_mismatch": balance["pending_asset"] = 10.5
+    assert match_close(balance, orders, terms, fees)["adjustment"] == 0
+
+
+@pytest.mark.parametrize("fee_failure", [False, True])
+def test_close_live_facade_queries_fees_and_preserves_whole_balance(monkeypatch, fee_failure):
+    from src.application import futu_portfolio_context as fc
+    from src.application.daily_decision_brief_renderer import _fund_views
+    balance, orders, terms = close_sample()
+    today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+    orders[0]["create_time"] = today + " 01:00:00"
+    monkeypatch.setattr(ap, "_account_terms", lambda *_: terms)
+    monkeypatch.delenv("FUTU_MMF_FUNDING_DIR", raising=False)
+    class Gateway:
+        closed = False
+        fee_calls = 0
+        def get_account_balance(self, **kwargs):
+            if kwargs["currency"] == "CNH":
+                return [{**balance, "currency": "CNH", "fund_assets": 7000, "pending_asset": 70}]
+            return [balance]
+        def get_history_orders(self, **kwargs):
+            return {"retcode": 0, "coverage_complete": True, "pagination_complete": True, "rows": orders}
+        def get_order_fees(self, **kwargs):
+            self.fee_calls += 1
+            assert kwargs == {"acc_id": 123, "trd_env": "REAL", "order_id_list": ["close"]}
+            if fee_failure:
+                raise RuntimeError("unavailable")
+            return [{"order_id": "close", "fee_amount": 2.51}]
+        def get_positions(self, **kwargs): return []
+        def close(self): self.closed = True
+    gateway = Gateway()
+    monkeypatch.setattr(fc, "build_ready_futu_broker_gateway", lambda **_: gateway)
+    context = fc.fetch_futu_portfolio_context(
+        cfg={"portfolio": {"futu": {"host": "test", "port": 1, "trd_env": "REAL"}},
+             "account_settings": {"sy": {"futu": {"account_id": "123"}}}},
+        account="sy", exchange_rate_observation=None,
+    )
+    assert gateway.closed and gateway.fee_calls == 1
+    if fee_failure:
+        assert context["assignment_pending"]["adjustment"] == 0
+        assert context["cash_by_currency"]["CNY"] == 0
+        assert context["cash_by_currency"]["USD"] == pytest.approx(989.49)
+    else:
+        assert context["cash_by_currency"]["USD"] == pytest.approx(1000)
+        assert context["cash_by_currency"]["CNY"] == 0
+        assert "平仓匹配在途" in "".join(_fund_views({"funds": {"assignment_pending": context["assignment_pending"]}}))
+
+
 @pytest.mark.parametrize("contracts", [1, 3])
 def test_actual_assignment_shapes_match_without_fund_redemption_receipt(contracts):
     result = match(*sample(contracts))

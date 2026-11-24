@@ -3050,7 +3050,10 @@ def _fund_views(brief: Mapping[str, Any]) -> list[str]:
         if transit.get("status") == "verified_mmf":
             out.append("货基在途已按现有核实凭证补计，未重复叠加指派推断金额。")
         elif transit.get("status") == "matched":
-            out.append(f"指派匹配在途：{money} 已补入开仓资金（按匹配规则推断）")
+            if transit.get("reason") == "close_pending_reconciled":
+                out.append(f"平仓匹配在途：{money} 已补入开仓资金（已核对资产分项及成交费用）")
+            else:
+                out.append(f"指派匹配在途：{money} 已补入开仓资金（按匹配规则推断）")
         else:
             out.append(f"提醒：在途资金 {money} 未纳入开仓额度；指派、欠款或取数证据未匹配。")
     pending = funds.get("cash_secured_pending_by_symbol_by_ccy")
