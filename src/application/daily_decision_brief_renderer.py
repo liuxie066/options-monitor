@@ -1925,7 +1925,7 @@ def _wheel_batch_views(
             available = coverage["available_shares"]
             available_text = f"{available:,}" if grouped_count else str(available)
             label = "分支合计剩余" if grouped_count else "分支剩余"
-            details.append(f"{label}：{available_text} 股；可开数量以账户容量检查为准")
+            details.append(f"{label}：{available_text} 股")
         price = _number(row.get("sell_limit"))
         observed = str(row.get("quote_observed_at_utc") or "").strip()
         if contracts > 0 and (price is None or price <= 0 or not observed):

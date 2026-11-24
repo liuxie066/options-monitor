@@ -836,7 +836,8 @@ def test_receipt_distinguishes_recording_attribution_and_coverage():
         "coverage":{"status":"partial","target_shares":300,"committed_shares":100,"available_shares":200}}}
     message=build_trade_intake_receipt_message(deal=None,result=result,payload={})
     assert "按规则关联 Wheel" in message and "100 / 300 股，部分覆盖" in message
-    assert "200 股；可开数量以账户容量检查为准" in message
+    assert "分支剩余｜200 股" in message
+    assert "可开数量以账户容量检查为准" not in message
     result["attribution_result"]={"status":"pending"}
     message=build_trade_intake_receipt_message(deal=None,result=result,payload={})
     assert "归属待核对" in message and "按规则关联" not in message and "状态｜✅ 已完成" in message
