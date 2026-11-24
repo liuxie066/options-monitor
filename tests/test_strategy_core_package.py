@@ -94,7 +94,11 @@ for c in baseline['cases']:
     except CandidateCalculationError as exc:
         assert exc.to_payload() == c['error']
     else:
-        assert result == {**c['metrics'], **c['cny_fields']}
+        expected_metrics = {**c['metrics'], **c['cny_fields']}
+        if c['mode'] == 'call':
+            expected_metrics['net_sale_price'] = round(
+                c['row']['strike'] + c['metrics']['net_income'] / c['row']['multiplier'], 6)
+        assert result == expected_metrics
         recorded = {**c['row'], 'decision_now_utc': c['now_utc']}
         assert calculate_metrics(recorded, mode=c['mode'], avg_cost=c['avg_cost'],
             exchange_rates=ExchangeRates(**c['rates'])) == result

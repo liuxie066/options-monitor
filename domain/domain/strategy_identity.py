@@ -39,8 +39,12 @@ def validate_strategy_identity(
             raise ValueError("invalid strategy policy identity")
         if "max_abs_delta" in identity["effective_parameters"]:
             validate_max_abs_delta(identity["effective_parameters"]["max_abs_delta"])
-        elif identity.get("template_version") == "0.2.0":
+        elif identity.get("template_version") in ("0.2.0", "0.2.1"):
             raise ValueError("missing max_abs_delta in current strategy identity")
+        if identity.get("template_version") == "0.2.1":
+            step = identity["effective_parameters"]["min_net_delivery_step_pct"]
+            if isinstance(step, bool) or not isinstance(step, (int, float)) or not math.isfinite(step) or not 0 < step < 1:
+                raise ValueError("min_net_delivery_step_pct must be within (0, 1)")
         multiplier = identity["effective_parameters"]["min_strike_cost_multiplier"]
         if (isinstance(multiplier, bool) or not isinstance(multiplier, (int, float))
                 or not math.isfinite(multiplier) or multiplier <= 0):

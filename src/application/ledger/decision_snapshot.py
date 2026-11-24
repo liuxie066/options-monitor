@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from domain.domain.ledger.economics import opening_lot_net_delivery_price
 from domain.domain.decision_state_fingerprint import (
     CURRENT_DECISION_READ_SCHEMA as CURRENT_DECISION_READ_SCHEMA,
     DECISION_STATE_FINGERPRINT_SCHEMA,
@@ -237,6 +238,14 @@ class _GlobalSnapshotProjection:
         self.stored_lots = stored_lots
         self.projection = project_stored_trade_events_to_position_lots(events)
         self.projected_lots = [item.to_dict() for item in self.projection.lots]
+        economic_projection = self.projection.ledger_projection
+        effective_opens = {event.event_id: event for event in economic_projection.effective_open_events}
+        self.opening_prices_by_account: dict[str, list[dict[str, Any]]] = {}
+        for lot in economic_projection.lots:
+            if lot.asset_type == "option" and lot.position_side == "short" and lot.contracts_open > 0:
+                self.opening_prices_by_account.setdefault(lot.contract_key.account, []).append(
+                    opening_lot_net_delivery_price(lot, effective_opens.get(lot.open_event_id))
+                )
         self.comparison = compare_projection_lots(
             projected_lots=self.projected_lots,
             current_lots=stored_lots,
@@ -382,6 +391,9 @@ def _decision_state_snapshot_from_rows(
             "stored_position_lots_fingerprint": global_fingerprints[1],
             "reprojected_position_lots_fingerprint": global_fingerprints[2],
             "account_position_lots": rows["account_position_lots"],
+            "account_opening_net_prices": deepcopy(sorted(
+                shared.opening_prices_by_account.get(account_value, []), key=lambda item: item["lot_id"],
+            )),
             "account_reprojected_position_lots": reprojected_account_lots,
             "account_lifecycle_cases": rows["account_lifecycle_cases"],
             "account_lifecycle_evidence": rows["account_lifecycle_evidence"],

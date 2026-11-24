@@ -28,6 +28,9 @@ def test_original_metric_and_policy_contract(case):
         assert exc.value.to_payload() == case["error"]
         return
     metrics = calculate_opening_candidate_metrics(raw, **kwargs)
+    if case["mode"] == "call":
+        assert metrics.pop("net_sale_price") == round(
+            raw["strike"] + case["metrics"]["net_income"] / raw["multiplier"], 6)
     assert metrics == case["metrics"]
     fields = enrich_short_vol_contract_cny_fields(
         {**raw, **metrics}, exchange_rate_converter=CurrencyConverter(RATES),

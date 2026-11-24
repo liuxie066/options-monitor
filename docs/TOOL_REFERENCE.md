@@ -350,6 +350,8 @@ bid/ask、Delta、IV 没有独立源时间，不能宣称为精确收盘价或�
 
 ### 候选解释
 
+`candidate_rank_explain` 的逐行结果及 `ranked_summary` 可包含封存的 `net_delivery_tier`：基准、门槛、币种、单候选 `qualifies`、本组 `applied`、实际 `priority` 与回退原因。不能将单独达标等同于已采用档位优先；缺失组证据保持未知。`top_n` 只裁剪显示，不重算组评价。历史记录没有该字段时不按新默认补造解释。
+
 ```bash
 ./om tools run --tool candidate_rank_explain \
   --input-json '{"run_id":"<run-id>","account":"lx","mode":"put","top_n":5}'

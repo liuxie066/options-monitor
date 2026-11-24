@@ -72,6 +72,8 @@
 
 下表领域入口为**现行纯计算**；应用入口负责组装证据。金额单位、乘数、价格 tick、费用来源、时间窗口、舍入及缺失值处理沿用该 owner 的契约，不在索引复制数值或公式。
 
+普通 CSP/CC 的完整同标的排序由 `domain/domain/engine/same_symbol_ranking.py::rank_same_symbol_candidates` 持有；核心内部 `strategy_core.py::explain_ranked_candidates` 消费截断前完整accepted集合，复用同一组级评价。批次净价由 `ledger/economics.py::opening_lot_net_delivery_price` 从实际开仓费用和生效lot计算；应用账本 decision snapshot 复用已有投影提供价格事实，position context选择普通开放批次，扫描冻结到normalized_input。跨标的、Wheel/Combo仍归原owner。合同见 [净价档位](candidate_strategy.md#66-普通-cspcc-同标的净价档位)，回归见 `tests/test_same_symbol_ranking.py`、`tests/test_same_symbol_ranking_integration.py`、`tests/test_position_context_owner.py`。
+
 | 能力 / 检索词 | 推荐源码入口 | 使用边界与计算归属 | 契约与共享测试 |
 | --- | --- | --- | --- |
 | 扫描终态、局部失败、success-empty | `src/application/strategy_scan_status.py::candidate_scope_reason`；`src/application/opening_candidate_snapshot.py::candidate_universe_summary` | 状态 owner 保留策略原因与行情来源原因，快照统一投影；候选与诊断先缓冲，执行失败只影响所属范围，发布完整性错误阻断账户。Brief/history 保留方向、Combo owner、Wheel 分支与合约身份；日志只补充已确认失败。Brief/history 物理范围复用 `account_config.account_decision_scope`，富途保留旧身份，长桥绑定券商、账号、REAL 和已配置的用户凭据指纹；历史查询与导入用 `decision_history.history_scope_is_proven` 检查证明，缺失身份不补成有效范围。长桥不做成交同步，历史成交关联明确不可用。历史结果可用性由 `src/application/agent_tools/project_runs.py::load_run_bundle` 投影已校验的逐范围完成状态；零候选与部分成功可用，无完成范围为 false，仅有尝试指标为 null，Bot 不自行推断。 | [失败范围](candidate_strategy.md#9-运行状态与失败范围)；`tests/test_pipeline_capture_status_routing.py`、`tests/test_symbol_monitoring_fetch_spec_merge.py`、`tests/test_daily_decision_brief_domain.py`、`tests/test_runtime_scan_result_evidence.py`、`tests/test_broker_decision_history.py` |

@@ -566,3 +566,37 @@ def test_premium_restatement_missing_close_prefix_preserves_final_structure() ->
     assert [item.code for item in result.diagnostics] == ["target_contract_mismatch"]
     assert result.diagnostics[0].severity == "error"
     assert result.state is None and not result.eligible
+
+
+def test_opening_net_delivery_uses_actual_fee_original_shares_and_effective_premium():
+    from domain.domain.ledger.economics import opening_lot_net_delivery_price
+    for mode in ("put", "call"):
+        for multiplier in (100, 500):
+            key = replace(_key(), option_type=mode)
+            events = [
+                replace(_event("open", "open", contracts=2, price=2, fees=10, basis="actual", multiplier=multiplier), contract_key=key),
+                replace(_event("close", "close", price=1, fees=50, basis="actual", time_ms=2,
+                               multiplier=multiplier, target_lot_id="lot-1"), contract_key=key),
+                replace(_premium_adjustment(), contract_key=key, multiplier=multiplier),
+            ]
+            result = project_trade_events(events)
+            assert not result.has_errors
+            lot = result.lots[0]
+            assert lot.contracts_open == 1
+            actual = opening_lot_net_delivery_price(lot, result.effective_open_events[0])
+            unit_premium = Decimal(3) - Decimal(10) / (2 * multiplier)
+            expected = Decimal(100) + (-unit_premium if mode == "put" else unit_premium)
+            assert Decimal(actual["net_price"]) == expected
+            assert actual["opening_fee"]["basis"] == "actual"
+
+
+def test_opening_net_delivery_distinguishes_actual_zero_missing_and_estimated():
+    from domain.domain.ledger.economics import opening_lot_net_delivery_price
+    for basis in (None, "actual", "estimated"):
+        result = project_trade_events([_event("open", "open", price=2, fees=0, basis=basis)])
+        actual = opening_lot_net_delivery_price(result.lots[0], result.effective_open_events[0])
+        if basis == "actual":
+            assert Decimal(actual["net_price"]) == 98
+        else:
+            assert actual["net_price"] is None
+            assert actual["reason"] == "actual_opening_fee_unavailable"

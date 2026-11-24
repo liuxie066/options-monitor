@@ -24,7 +24,7 @@ from domain.domain.engine.candidate_engine import (
     REJECT_RISK_EARNINGS_UNAVAILABLE,
     REJECT_RISK_DELTA_UNAVAILABLE,
 )
-from domain.domain.strategy_core import evaluate_candidates, validate_strategy_identity, rank_candidates, explain_rank, decision_time_from_input
+from domain.domain.strategy_core import evaluate_candidates, validate_strategy_identity, rank_candidates, explain_ranked_candidates, decision_time_from_input
 from domain.domain.strategy_identity import candidate_ranking_profile, ranking_profile_from_identities, validate_strategy_identity as validate_stored_identity
 from domain.domain.symbol_identity import symbol_market
 from domain.domain.risk_capacity import broker_capacity_binding
@@ -1285,6 +1285,8 @@ def _ranked_candidates(
                 raise OpeningCandidateSnapshotError("final candidate strategy identity mismatch")
             if final_row.get("decision_now_utc") != normalized.get("decision_now_utc"):
                 raise OpeningCandidateSnapshotError("final candidate decision time mismatch")
+            if final_row.get("same_symbol_ranking_context") != normalized.get("same_symbol_ranking_context"):
+                raise OpeningCandidateSnapshotError("final candidate net delivery context mismatch")
             source_rows.append(normalized)
         profile = _validate_core_scope(source_rows, mode=mode, account=account, market=market)
         ranking_inputs[mode] = {
@@ -1293,6 +1295,7 @@ def _ranked_candidates(
             ],
             "profile": profile,
         }
+        explanations = explain_ranked_candidates(source_rows, mode=mode)
         for mode_rank, ranked_row in enumerate(
             rank_candidates(source_rows, mode=mode),
             start=1,
@@ -1322,7 +1325,7 @@ def _ranked_candidates(
                     "candidate_id": candidate_id,
                     "strategy_mode": mode,
                     "rank": mode_rank,
-                    "ranking": explain_rank(ranked_row, mode=mode),
+                    "ranking": explanations[str(ranked_row.get("contract_symbol") or ranked_row.get("option_symbol") or "")],
                     "decision_hash": decision.get("decision_hash"),
                     "risk_policy_hash": decision.get("risk_policy_hash"),
                     "quote_snapshot_id": decision.get("quote_snapshot_id"),

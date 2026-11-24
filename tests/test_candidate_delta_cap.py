@@ -217,7 +217,7 @@ def test_sealed_baseline_compatibility_does_not_accept_custom_policy_labels(mode
 def test_identity_versions_hash_and_old_read_only():
     identities=[resolve_strategy(mode='put',config=InsuranceUnderwritingConfig(max_abs_delta=cap)).identity for cap in [.4,.35,None]]
     assert len({i['effective_policy_hash'] for i in identities})==3
-    assert all(i['template_version']=='0.2.0' for i in identities)
+    assert all(i['template_version']=='0.2.1' for i in identities)
     old=deepcopy(identities[0]);old['core_version']=old['template_version']='0.1.0'
     del old['effective_parameters']['max_abs_delta']
     old['effective_policy_hash']=implementation_policy_hash(old)

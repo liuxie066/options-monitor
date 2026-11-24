@@ -151,6 +151,10 @@ apply 仍需 `--confirm`、预览的源 SHA 与预览摘要，经现有配置事
 
 `portfolio_management.enabled` 仍控制更广的 PM 集成，不能代替此开关。配置切换不执行交易、指派、账本、PM Holdings 或 Feishu 写入；生产配置发布与部署另行授权。
 
+## 普通 CSP/CC 净价档位
+
+同标的候选默认优先扩展2%的净交割价档位：CSP向最低净接货价以下、CC向最高净卖出价以上。`min_net_delivery_step_pct=0.02` 是领域策略有效参数，纳入策略身份；当前不新增YAML/runtime配置键或启用开关。CC既有 `min_strike_cost_multiplier` 成本底线与此不同，继续作为原准入条件。详细费用、缺失和排序合同见 [候选策略](docs/candidate_strategy.md#66-普通-cspcc-同标的净价档位)。
+
 ## 可选能力与长桥账户
 
 行情和账户资产分别选择。`market_data.provider` 默认 `opend`，对应必需的 `market-opend` 行情插件；

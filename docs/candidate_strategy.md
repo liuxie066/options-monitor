@@ -89,7 +89,7 @@ CC 成本底价倍数 `min_strike_cost_multiplier` 在已有配置合并后冻�
 配置（默认 `1.02`），参与有效参数哈希和 `custom` 判定。扫描与 underwriting
 消费同一冻结值；注入策略优先于旧 CC 配置。身份传输、恢复及重排均校验该参数，
 缺失或非正有限数值的 resolved 身份拒绝消费；不影响无策略身份的 legacy 快照。
-当前内置 `csp_baseline@0.2.0` / `cc_baseline@0.2.0` 委托既有规则；旧身份的读取与执行边界见 §3.5。
+当前内置 `csp_baseline@0.2.1` / `cc_baseline@0.2.1` 使用同标的净价档位优先；旧身份的读取与执行边界见 §3.5。
 冻结的 `StrategyTemplate` 描述符绑定约束、筛选、排序和解释；新增源码模板只需
 实现并加入 core 的有限查找表，OM 消费者无需新增分支。没有公开注册 API、
 外部模块加载器或生产切换配置。参数模式仍是 `InsuranceUnderwritingConfig`。
@@ -204,7 +204,7 @@ CSP（Put）与 CC（Call）默认均为 `max_abs_delta = 0.35`；旧配置省�
 
 超过上限记录 `risk_delta`；不可验证记录 `risk_delta_unavailable` 及具体证据原因。旧 required-data 或快照缺少来源证据时，启用门槛会拒绝这些候选，可能整组无可用候选；不得静默放行或自动采集数据。此规则不改变 Wheel/Combo 自有策略，也不增加 delta 排序，同标的同方向仍允许跨到期日。Put/Call 的 0.35 是用户风险偏好，未经证明为收益或胜率最优值。
 
-新 `csp_baseline` / `cc_baseline` 模板与策略核心版本为 `0.2.0`，effective parameters 将上限（包括显式 `null`）纳入策略身份 hash。已封存的 `0.2.0` / `strategy_identity.v2` 旧默认 `0.30` 或 `0.40` baseline 仍可校验，并按其自身封存参数评估，不按新默认回填。历史 `0.1.0` 身份仍可读取校验，但当前核心不执行旧模板，也不把旧身份重解释为新默认。离线验证需要对应版本和足够冻结证据；OB 的旧源代码锁不能直接作为本版本的一致性证明，更新由 OB 独立任务负责。
+普通模板与策略核心版本为 `0.2.1`，effective parameters 将 delta 上限（包括显式 `null`）和 `min_net_delivery_step_pct` 纳入策略身份 hash。新身份必须携带这些参数及既有成本底价参数，不能缺失后补当前默认。已封存的 `0.2.0` / `strategy_identity.v2` 和历史 `0.1.0` 身份仍可读取校验，但当前核心只执行当前模板，不把旧身份重解释为新默认。离线验证需要对应版本和足够冻结证据；OB 的旧源代码锁不能直接作为本版本的一致性证明，更新由 OB 独立任务负责。
 
 回滚代码不回写已封存记录；旧版本可能拒绝新增配置字段，不能直接将包含新字段的配置交给旧版本。显式 `null` 关闭是新版本的配置能力，仍须通过正常配置预览与授权流程，本功能实现不修改任何生产配置。
 
@@ -321,6 +321,8 @@ max_new_contracts = floor(effective_free_cash / assignment_notional)
 集中度只在跨标的且收益接近时参与排序。
 
 ### 5.5 排序
+
+以下收益分带先形成旧完整顺序，再按 §6.6 的净接货档位条件做稳定分组：达标者在前，各组内部沿用旧顺序。跨标的集中度政策不变。
 
 CSP/CC 共用的收益分档实现先计算每行收益，再降序排列并按最高收益锚点切段；
 分档内仍按原 tie-break 和输入位置排序，缺失收益排在末尾。收益提取每行一次，
@@ -442,6 +444,8 @@ max_new_contracts = floor(shares_available_for_cover / multiplier)
 
 ### 6.5 排序
 
+以下收益分带先形成旧完整顺序，再按 §6.6 的净卖出档位条件做稳定分组；各组内部不按改善幅度重新排序。
+
 1. 仅排序全部硬门槛通过且容量至少一张的候选。
 2. 以最高 `period_net_premium_return` 为锚，将差值不超过 `0.002` 的候选组成收益区间。
 3. 同一标的、同一收益区间内依次比较：
@@ -460,6 +464,21 @@ max_new_contracts = floor(shares_available_for_cover / multiplier)
    - symbol 和合约 ID。
 
 `strike_above_spot_pct` 与 `strike_upside_margin_pct` 均保留 Candidate Engine 计算的相对现价距离；承保底价只参与行权价门槛，不改写这两个字段。
+
+### 6.6 普通 CSP/CC 同标的净价档位
+
+完整同标的排序实现位于 `domain/domain/engine/same_symbol_ranking.py`；Engine facade 继续负责分组、选代表、跨标的政策和尾序，应用层只提供事实。
+
+- CSP：候选 `breakeven` 不高于同账户、同标的普通开放 short Put 批次最低净接货价的98%。
+- CC：候选 `net_sale_price` 不低于对应普通开放 short Call 批次最高净卖出价的102%。CC成本底线倍数仍是独立的原准入条件。
+- 每股净接货价＝strike−每股权利金＋每股开仓费用；净卖出价＝strike＋每股权利金−每股开仓费用。候选复用当前限价和费用估算；已有批次使用生效投影中的实际权利金和actual开仓费用，缺失或estimated不可当0。显式actual零费用有效。
+- 开仓费用分母为原开仓张数×真实乘数；部分平仓不把费用重新摊到剩余数量。不计平仓费、正股成本、历史Call收入或未来交割费。跨到期日比较，不跨账户、券商、币种，不混入Wheel/Combo、正股或已终结批次。归属冲突、结算未明保留不可判断。
+- 2%含边界，无5%上限，不补中间档，不按改善幅度加分。先形成原完整同标的全序，再稳定移动达标者；不能分别重新分带。无仓、无达标者保持旧序。
+- 可信完整空集才表示无仓。任一相关批次成本缺失，或任一accepted候选缺净价，受影响标的/方向整体沿用旧序并说明缺口；原准入不变。无账户合约查询不读取持仓、保留旧序。
+
+`same_symbol_ranking_context` 随同一冻结账本指纹进入候选规范化输入；价格列表来自既有账本投影及生效开仓事件，每个批次保留独立净价。排序不修改行。摘要和快照在选代表/截断之前用完整accepted集合调用核心内部 `explain_ranked_candidates`，结果封存到 `ranking.net_delivery_tier`。其中 `qualifies` 表示单候选达标，`priority` 表示本组实际优先资格；整组缺价时前者仍可true，后者必须false。单行 `explain_rank` 无完整组证明时实际优先为null，不冒称规则已经生效。
+
+Brief/Tool仅投影封存解释，不重新查仓或排序。离线复算校验顺序、实际优先与回退原因；历史记录不补当前规则。新默认2%归策略参数，不新增YAML字段或启用开关。
 
 ## 7. 期限匹配 RV
 

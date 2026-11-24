@@ -190,3 +190,61 @@ def test_wheel_provider_observation_reuses_already_frozen_context(tmp_path, monk
     _, refreshed = original_query(repo, account="lx", broker="富途", as_of_ms=5_000)
     assert refreshed["locked_shares_by_symbol"]["NVDA"] == 100
     assert refreshed["decision_state_fingerprint"] != context["decision_state_fingerprint"]
+
+
+def test_ordinary_opening_prices_use_same_projection_actual_fees_and_lot_extremes(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from decimal import Decimal
+    from domain.domain.ledger.economics import opening_lot_net_delivery_price
+    from src.application.ledger.writer_trade_events import persist_trade_event_objects_atomically
+    from tests.test_ledger_economics import _event, _premium_adjustment
+
+    repo, _ = _wheel_repo(tmp_path)
+    events = [
+        replace(_event("tier-open", "open", contracts=2, price=2, fees=10, basis="actual"), lot_id="tier-lot"),
+        replace(_event("tier-close", "close", time_ms=2, price=1, basis="actual"), target_lot_id="tier-lot"),
+        replace(_premium_adjustment(event_id="tier-adjust"), target_lot_id="tier-lot"),
+    ]
+    events = [replace(event, source="opend_push", raw_payload={**event.raw_payload,
+              "source_type": "broker_trade_event", "futu_account_id": "12345", "order_id": event.event_id})
+              if event.event_type == "open" else event for event in events]
+    persist_trade_event_objects_atomically(repo, events=events)
+    # Freeze a qualified broker-source observation at the acquisition boundary.
+    monkeypatch.setattr("src.application.ledger.decision_snapshot._read_account_trade_source_constraints",
+                        lambda *a, **kw: {"status": "trusted", "reason_codes": []})
+    snapshot = api.decision_state_snapshot(repo, account="lx", portfolio_scope_id=portfolio_scope_id("lx"))
+    assert snapshot["snapshot_status"] == "trusted", snapshot
+    fact = next(f for f in snapshot["account_opening_net_prices"] if f["lot_id"] == "tier-lot")
+    assert fact["reason"] is None, fact
+    assert Decimal(fact["net_price"]) == Decimal("97.05")
+    # Context assembly must not repeat economics/replay/I/O per candidate.
+    calls = []
+    def forbidden(*args, **kwargs):
+        calls.append(1)
+        raise AssertionError("context acquired or recalculated facts")
+    monkeypatch.setattr(sqlite3, "connect", forbidden)
+    monkeypatch.setattr("src.application.ledger.decision_snapshot.opening_lot_net_delivery_price", forbidden)
+    context = api.build_position_risk_context([], broker="富途", account="lx", decision_snapshot=snapshot,
+                                              lifecycle_now_ms=5000)
+    group = context["ordinary_opening_prices"]["by_symbol"]["NVDA"]["put"]
+    assert group["status"] == "available"
+    assert group["prices"] == [fact]  # existing Wheel put/stock do not enter ordinary tiers
+    assert calls == []
+    assert opening_lot_net_delivery_price is not forbidden
+
+
+def test_old_context_and_missing_actual_fee_are_not_no_positions(tmp_path):
+    repo, _ = _wheel_repo(tmp_path)
+    _open_unlinked_call(repo)
+    snapshot = api.decision_state_snapshot(repo, account="lx", portfolio_scope_id=portfolio_scope_id("lx"))
+    context = api.build_position_risk_context([], broker="富途", account="lx", decision_snapshot=snapshot,
+                                              lifecycle_now_ms=5000)
+    group = context["ordinary_opening_prices"]["by_symbol"]["NVDA"]["call"]
+    assert group["status"] == "unavailable"
+    assert group["reason"] == "actual_opening_fee_unavailable"
+    assert len(group["prices"]) == 1
+    old = deepcopy(snapshot)
+    old.pop("account_opening_net_prices")
+    context = api.build_position_risk_context([], broker="富途", account="lx", decision_snapshot=old,
+                                              lifecycle_now_ms=5000)
+    assert context["ordinary_opening_prices"]["status"] == "unavailable"

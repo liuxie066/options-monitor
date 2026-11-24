@@ -108,6 +108,16 @@ def _consumer_outputs(base, snapshot):
         {"runtime_root": str(base), "run_id": "run-1", "account": "lx", "mode": "put"},
         repo_base=lambda: base, resolve_output_root=lambda _: base, mask_path=str,
     )
+    ranked = list(explained["ranked"])
+    cursor = explained.get("next_cursor")
+    while cursor:
+        page, _, _ = candidate_rank_explain_tool(
+            {"runtime_root": str(base), "run_id": "run-1", "account": "lx", "mode": "put", "cursor": cursor},
+            repo_base=lambda: base, resolve_output_root=lambda _: base, mask_path=str,
+        )
+        ranked.extend(page["ranked"])
+        cursor = page.get("next_cursor")
+    explained["ranked"] = ranked
     brief = assemble_daily_decision_brief(
         base=base, run_id="run-1", account="lx", market="US",
         scheduler_decision={"in_run_window": True}, account_result=_result(),
@@ -118,7 +128,9 @@ def _consumer_outputs(base, snapshot):
     return explained, brief, text
 
 
-def test_experiment_survives_snapshot_brief_and_notification_and_reverts(tmp_path):
+def test_experiment_survives_snapshot_brief_and_notification_and_reverts(tmp_path, monkeypatch):
+    from src.application import query_cursor
+    monkeypatch.setattr(query_cursor, "_key", lambda: "isolated-rank-pages")
     outputs = {}
     for label, profile in (("default", "current_tie_break"), ("experiment", "concentration_first"),
                            ("restored", "current_tie_break")):

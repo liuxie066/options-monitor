@@ -23,6 +23,7 @@ from domain.domain.engine.candidate_engine import (
     CandidateCalculationError, calculate_opening_candidate_metrics, rank_candidate_rows, explain_candidate_rank,
     build_candidate_decision, validate_candidate_decision_payload, opening_qualification_rejects, merge_opening_rejects,
 )
+from domain.domain.engine.same_symbol_ranking import evaluate_net_delivery_group
 from domain.domain.insurance_underwriting import (
     INSURANCE_UNDERWRITING_PROFILE, InsuranceUnderwritingConfig, evaluate_underwriting_candidate,
     underwriting_fields, build_underwriting_result,
@@ -39,7 +40,7 @@ from domain.domain.strategy_identity import (
     validate_strategy_identity as _validated_strategy_identity,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 
 def _mode(mode: str) -> str:
@@ -81,13 +82,13 @@ def _baseline_rank(rows, *, mode, ranking_profile):
     return rank_candidate_rows(rows, mode=mode, sell_put_ranking_profile=ranking_profile)
 
 
-def _baseline_explain(row, *, mode, cfg):
-    return explain_candidate_rank(row, mode=mode)
+def _baseline_explain(row, *, mode, cfg, group_evaluation=None):
+    return explain_candidate_rank(row, mode=mode, group_evaluation=group_evaluation)
 
 
 # Source-distributed implementations only; no registration API or serialized callbacks.
 _TEMPLATES = {
-    (name, "0.2.0"): StrategyTemplate(name, "0.2.0", mode, constraints,
+    (name, "0.2.1"): StrategyTemplate(name, "0.2.1", mode, constraints,
                                     _baseline_evaluate, _baseline_rank, _baseline_explain)
     for name, mode, constraints in (("csp_baseline", "put", _no_constraints),
                                     ("cc_baseline", "call", _baseline_call_constraints))
@@ -109,7 +110,7 @@ class ResolvedStrategy:
     account: str | None = None
     market: str | None = None
     template_id: str | None = field(default=None, compare=False)
-    template_version: str = "0.2.0"
+    template_version: str = "0.2.1"
     descriptor: StrategyTemplate = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -143,6 +144,8 @@ class ResolvedStrategy:
                 raise ValueError(f"{name} is out of range")
             if name in ("min_dte", "max_dte") and not isinstance(value, int):
                 raise ValueError(f"{name} must be an integer")
+            if name == "min_net_delivery_step_pct" and not 0 < value < 1:
+                raise ValueError("min_net_delivery_step_pct must be within (0, 1)")
             if name == "min_annualized_return" and value > 1:
                 raise ValueError("min_annualized_return must be within [0, 1]")
         for low, high in ((self.config.min_dte, self.config.max_dte), (self.config.min_strike, self.config.max_strike)):
@@ -181,7 +184,7 @@ class ResolvedStrategy:
 def resolve_strategy(
     *, mode: str, config: InsuranceUnderwritingConfig,
     ranking_profile: str = "current_tie_break", account: str | None = None, market: str | None = None,
-    template_id: str | None = None, template_version: str = "0.2.0",
+    template_id: str | None = None, template_version: str = "0.2.1",
 ) -> ResolvedStrategy:
     """Bind already-merged policy, never read or interpret legacy configuration."""
     return ResolvedStrategy(mode, config, ranking_profile, account, market, template_id, template_version)
@@ -362,7 +365,7 @@ def calculate_constraints(
         max_abs_delta=default_max_abs_delta(mode),
     )
     descriptor = _execution_template(strategy) if strategy else _lookup_template(
-        f"{'csp' if mode == 'put' else 'cc'}_baseline", "0.2.0", mode,
+        f"{'csp' if mode == 'put' else 'cc'}_baseline", "0.2.1", mode,
     )
     annotated = {**out, **underwriting_fields(out, mode=mode, cfg=cfg)}
     fields = _constraint_fields(descriptor, annotated, mode=mode, cfg=cfg)
@@ -577,10 +580,37 @@ def rank_candidates(rows: list[dict[str, Any]], *, mode: str,
 
 
 def explain_rank(row: dict[str, Any], *, mode: str) -> dict[str, Any]:
+    """Single-row diagnostics cannot prove that a complete group applied priority."""
+    return _explain_rank(row, mode=mode)
+
+
+def explain_ranked_candidates(rows: list[dict[str, Any]], *, mode: str) -> dict[str, dict[str, Any]]:
+    """Internal batch path: callers supply the complete, pre-truncation accepted set."""
+    ranking_profile_from_identities([_validated_strategy_identity(row, mode=mode) for row in rows])
+    groups: dict[str, list[dict[str, Any]]] = {}
+    contracts = [_contract_id(row) for row in rows]
+    if len(set(contracts)) != len(rows) or "" in contracts:
+        raise ValueError("duplicate or missing ranking contract identity")
+    for row in rows:
+        groups.setdefault(str(row.get("symbol") or _contract_id(row)), []).append(row)
+    explanations = {}
+    for group in groups.values():
+        evaluation = evaluate_net_delivery_group(group, mode=mode)
+        for row in group:
+            contract = _contract_id(row)
+            # Do not deepcopy the complete group's candidate map once per explanation.
+            row_evaluation = {**evaluation, "candidates": {contract: evaluation["candidates"][contract]}}
+            explanations[contract] = _explain_rank(row, mode=mode, group_evaluation=row_evaluation)
+    return explanations
+
+
+def _explain_rank(row: dict[str, Any], *, mode: str, group_evaluation=None) -> dict[str, Any]:
     strategy = validate_strategy_identity(row, mode=mode)
     if strategy is None:
         return explain_candidate_rank(row, mode=mode)
-    result = _invoke(_execution_template(strategy).explain, row, mode=mode, cfg=strategy.config)
+    operation = _execution_template(strategy).explain
+    extra = {"group_evaluation": group_evaluation} if operation is _baseline_explain else {}
+    result = _invoke(operation, row, mode=mode, cfg=strategy.config, **extra)
     if (not isinstance(result, dict) or not isinstance(result.get("primary_drivers"), list)
             or not all(isinstance(item, str) for item in result["primary_drivers"])
             or not isinstance(result.get("rank_reason"), str)):
