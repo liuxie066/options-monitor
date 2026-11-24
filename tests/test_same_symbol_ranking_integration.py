@@ -14,6 +14,13 @@ from test_strategy_sample_verify import candidate, seal
 from test_same_symbol_ranking import _rows
 
 
+@pytest.mark.parametrize("summarize", [summarize_sell_put, summarize_sell_call])
+def test_legacy_summary_does_not_require_contract_or_strategy_identity(summarize):
+    summary = summarize(pd.DataFrame([{"symbol": "NVDA", "strike": 100, "currency": "USD"}]), "NVDA")
+    assert summary["candidate_count"] == 1
+    assert "ranking" not in summary
+
+
 @pytest.mark.parametrize("mode", ["put", "call"])
 @pytest.mark.parametrize("missing", [False, True])
 def test_full_group_seal_summary_offline_and_brief_agree(tmp_path, mode, missing):

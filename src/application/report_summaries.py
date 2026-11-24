@@ -323,10 +323,10 @@ def summarize_sell_put(
 
     records = df.to_dict("records") if candidate_records is None else candidate_records
     ranked = rank_candidates(records, mode="put")
-    explanations = explain_ranked_candidates(records, mode="put")
+    explanations = explain_ranked_candidates(records, mode="put") if any(r.get("strategy_core") for r in records) else {}
     top = pd.Series(ranked[0]) if ranked else None
     if top is not None:
-        explanation = explanations[str(top.get("contract_symbol") or top.get("option_symbol") or "")]
+        explanation = explanations.get(str(top.get("contract_symbol") or top.get("option_symbol") or ""), {})
         if "net_delivery_tier" in explanation:
             top["ranking"] = explanation
     if top is None:
@@ -353,10 +353,10 @@ def summarize_sell_call(df: pd.DataFrame, symbol: str, *, symbol_cfg: dict | Non
 
     records = df.to_dict("records")
     ranked = rank_candidates(records, mode="call")
-    explanations = explain_ranked_candidates(records, mode="call")
+    explanations = explain_ranked_candidates(records, mode="call") if any(r.get("strategy_core") for r in records) else {}
     top = pd.Series(ranked[0]) if ranked else None
     if top is not None:
-        explanation = explanations[str(top.get("contract_symbol") or top.get("option_symbol") or "")]
+        explanation = explanations.get(str(top.get("contract_symbol") or top.get("option_symbol") or ""), {})
         if "net_delivery_tier" in explanation:
             top["ranking"] = explanation
     if top is None:

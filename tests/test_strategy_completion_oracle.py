@@ -74,6 +74,35 @@ def _checked_current_projection(value, *, clock, delta):
         "policy_max_abs_delta": 0.35,
     }
     if isinstance(value, dict):
+        value = dict(value)
+        if "same_symbol_ranking_context" in value:
+            context = value.pop("same_symbol_ranking_context")
+            assert context == {
+                "status": "unavailable", "reason": "opening_price_account_mismatch",
+                "prices": [], "account": "lx", "market": "us", "symbol": value["symbol"],
+                "mode": "put" if delta < 0 else "call", "currency": "USD",
+                "broker": None, "as_of": None, "decision_state_fingerprint": None,
+            }
+        if "net_sale_price" in value:
+            assert delta > 0
+            assert value.pop("net_sale_price") == round(
+                value["strike"] + value["net_income"] / value["multiplier"], 6)
+        if "net_delivery_tier" in value:
+            tier = value.pop("net_delivery_tier")
+            message = "无法判断档位：持仓成本证据不足，沿用原排序"
+            assert tier == {
+                "mode": "put" if delta < 0 else "call", "min_step_pct": 0.02,
+                "baseline_net_price": None, "threshold_net_price": None, "currency": "USD",
+                "applied": False, "reason": "positions_unavailable",
+                "reason_detail": "opening_price_account_mismatch", "qualifies": None, "priority": False,
+                "candidate_net_price": round(value["strike"] + (-1 if delta < 0 else 1) * value["net_income"] / 100, 6),
+                "price_basis": "current_limit_estimate_opening_fees_only", "message": message,
+            }
+            assert value["rank_reason"].startswith(message + "；")
+            value["rank_reason"] = value["rank_reason"][len(message) + 1:]
+        if "candidate_count" in value and "ranking" in value:
+            # Summary explanations are new; verify their full tier before projecting.
+            _checked_current_projection(value.pop("ranking"), clock=clock, delta=delta)
         if value.get("position_sizing_basis") is not None:
             assert value["position_sizing_basis"] == CANDIDATE_POSITION_SIZING_BASIS
         for key, expected in additions.items():
@@ -157,9 +186,12 @@ def _historical_strike_reject_variant(rejects, *, mode, delta):
     {"delta_reason_code": "delta_source_unverified"}, {"policy_max_abs_delta": None},
     {"policy_max_abs_delta": 0.3}, {"policy_max_abs_delta": 0.4},
     {"position_sizing_basis": "non_option_net_assets_before_assignment_fees.v2"},
+    {"same_symbol_ranking_context": {"status": "available"}},
+    {"net_delivery_tier": {"applied": True}},
 ])
 def test_oracle_projection_does_not_hide_contract_regressions(change):
-    row = {"delta": 0.3, "delta_source": "opend_market_snapshot.option_delta",
+    row = {"symbol": "NVDA", "strike": 100, "net_income": 200,
+           "delta": 0.3, "delta_source": "opend_market_snapshot.option_delta",
            "delta_unit": "fraction", "delta_reason_code": None, "policy_max_abs_delta": 0.35,
            "decision_now_utc": oracle.old.NOW.isoformat(), **change}
     with pytest.raises(AssertionError):
