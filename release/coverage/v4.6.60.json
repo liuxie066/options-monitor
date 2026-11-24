@@ -1,0 +1,34 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.60",
+  "base": {
+    "tag": "v4.6.59",
+    "commit": "7f1b594527b832a7ce20bed613a66fe141d81ecd"
+  },
+  "reviewed_head": "f5ac35b8fdac94797ccad8774b61e9fdc416ecaa",
+  "commits": [
+    {
+      "sha": "f5ac35b8fdac94797ccad8774b61e9fdc416ecaa",
+      "subject": "feat(candidates): prioritize meaningful CSP and CC net price tiers (#1261)"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "普通 CSP/CC 的同标的候选优先扩展至少 2% 的净价档位：CSP 从已有最低净接货价向下、CC 从最高净卖出价向上；组内保留原排序，实际持仓费用或候选净价不完整时明确沿用原排序，并在候选说明中展示依据。",
+      "commits": [
+        "f5ac35b8fdac94797ccad8774b61e9fdc416ecaa"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "f5ac35b8fdac94797ccad8774b61e9fdc416ecaa",
+      "references": [
+        "docs/candidate_strategy.md#66-普通-cspcc-同标的净价档位",
+        "https://github.com/liuxie066/options-monitor/pull/1261"
+      ]
+    }
+  ]
+}
