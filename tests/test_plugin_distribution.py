@@ -473,6 +473,56 @@ def test_feishu_preview_does_not_prepare_sdk_or_change_activation(official, monk
     assert not runtime.plugin_store(root).exists()
 
 
+@pytest.mark.parametrize("case", ["reuse", "incompatible", "corrupt", "bundle"])
+def test_previous_managed_sdk_reuse_keeps_validation_and_download_boundaries(
+    official, plugin_python, monkeypatch, case,
+):
+    previous, _, _, _ = official
+    distribution.install_plugin("feishu", confirm=True)
+    previous_store = runtime.plugin_store(previous) / "feishu"
+    target = previous.parent / "next-release"
+    shutil.copytree(previous, target, symlinks=True, ignore=shutil.ignore_patterns("__pycache__"))
+    if case == "bundle":
+        (target / "om.runtime.json").write_text("{}")
+    if case in {"incompatible", "corrupt"}:
+        sdk = previous_store / "dependencies/lark_oapi/__init__.py"
+        sdk.write_text("# SDK without the required WebSocket APIs\n")
+        if case == "incompatible":
+            receipt_path = previous_store / "receipt.json"
+            receipt = json.loads(receipt_path.read_text())
+            receipt["dependency_files"]["lark_oapi/__init__.py"] = hashlib.sha256(sdk.read_bytes()).hexdigest()
+            receipt_path.write_text(json.dumps(receipt))
+    before = {p.relative_to(previous_store): p.read_bytes() for p in previous_store.rglob("*") if p.is_file()}
+    original = distribution.subprocess.run
+    downloads = []
+
+    def acquire(command, **kwargs):
+        if "--target" in command:
+            downloads.append(command)
+            assert case == "incompatible", "do not download for a valid SDK, invalid inventory or bundle"
+        return original(command, **kwargs)
+
+    monkeypatch.setattr(distribution.subprocess, "run", acquire)
+    if case == "bundle":
+        staged = target.parent / "sdk-staging"
+        with pytest.raises(ValueError, match="bundled Feishu SDK"):
+            distribution._prepare_feishu_sdk(target, staged, python_executable=plugin_python,
+                                             previous_repo_root=previous)
+        assert not staged.exists()
+    elif case == "corrupt":
+        with pytest.raises(ValueError, match="inventory"):
+            distribution.install_plugin("feishu", repo_root=target, confirm=True,
+                                        python_executable=plugin_python, previous_repo_root=previous)
+        assert runtime.read_managed_plugin(target, "feishu") is None
+    else:
+        result = distribution.install_plugin("feishu", repo_root=target, confirm=True,
+                                             python_executable=plugin_python, previous_repo_root=previous)
+        assert result["status"] == "installed"
+        assert runtime.read_managed_plugin(target, "feishu")["dependency_files"]
+    assert len(downloads) == (1 if case == "incompatible" else 0)
+    assert before == {p.relative_to(previous_store): p.read_bytes() for p in previous_store.rglob("*") if p.is_file()}
+
+
 def test_managed_sdk_visible_to_fresh_readiness_and_corruption_rejected(official, plugin_python):
     root, _, _, _ = official
     distribution.install_plugin("feishu", confirm=True)

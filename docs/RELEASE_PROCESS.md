@@ -726,6 +726,7 @@ Provider 首次迁移由下述新控制器驱动：旧固定目录尚无 `market
 `--repo-root <current-symlink>`、`--runtime-root <runtime-root>` 和目标版本，先预览再确认。
 该控制器会从旧实例环境读取安装状态，并从旧有效配置识别内置 PM/Position Advice；不要先切换 `current`
 或先删除旧环境。本变更未回写已发布版本的升级器，也未验证旧自动升级链路的首次迁移。
+飞书托管 SDK 的跨版本复用也由新控制器执行：目标解释器无 SDK 时，复制上一 release 的已验证依赖到目标插件独立目录，再用目标解释器校验；可复用时不重新下载 SDK。首次进入含此逻辑的版本同样需要新控制器，后续升级自动沿用。
 
 源码升级的共享 venv 只缓存依赖，不缓存插件代码。依赖哈希输入包括根 `requirements.txt`、
 `constraints.txt` 和它们的 `-r` / `-c` 引用链；启用服务器依赖时还包括 `requirements/server.txt`、
