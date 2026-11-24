@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from domain.domain.candidate_defaults import DEFAULT_MAX_ABS_DELTA, validate_max_abs_delta
+from domain.domain.candidate_defaults import DEFAULT_MAX_ABS_DELTA, DEFAULT_MIN_NET_DELIVERY_STEP_PCT, validate_max_abs_delta
 
 
 INSURANCE_UNDERWRITING_PROFILE = "insurance_underwriting"
@@ -23,6 +23,7 @@ class InsuranceUnderwritingConfig:
     max_spread_ratio: float = 0.40
     max_abs_delta: float | None = DEFAULT_MAX_ABS_DELTA
     min_strike_cost_multiplier: float = 1.02
+    min_net_delivery_step_pct: float = DEFAULT_MIN_NET_DELIVERY_STEP_PCT
 
     def __post_init__(self) -> None:
         validate_max_abs_delta(self.max_abs_delta)

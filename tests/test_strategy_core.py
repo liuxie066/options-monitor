@@ -33,7 +33,12 @@ def test_independent_old_source_baseline(case):
             calculate_metrics(case["row"], **kwargs)
         assert exc.value.to_payload() == case["error"]
     else:
-        assert calculate_metrics(case["row"], **kwargs) == {**case["metrics"], **case["cny_fields"]}
+        metrics = calculate_metrics(case["row"], **kwargs)
+        if case["mode"] == "call":
+            assert metrics.pop("net_sale_price") == round(
+                case["row"]["strike"] + case["metrics"]["net_income"] / case["row"]["multiplier"], 6,
+            )
+        assert metrics == {**case["metrics"], **case["cny_fields"]}
         strategy = resolve_strategy(mode=case["mode"], config=InsuranceUnderwritingConfig(max_abs_delta=None))
         result = evaluate_candidates([case["policy_row"]], strategy=strategy)
         expected = deepcopy(case["decision"])

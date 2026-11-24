@@ -933,6 +933,7 @@ def _project_opening_candidate_families(
         if _row_market(row) != market:
             continue
         row["candidate_id"] = item.get("candidate_id")
+        row["ranking"] = dict(item.get("ranking") or {})
         row["_opening_snapshot_rank"] = item.get("rank")
         row["_source_path"] = "state/opening_candidate_snapshot.json"
         row["_source_row"] = item.get("rank")
@@ -2374,6 +2375,9 @@ def _candidate_metrics(row: Mapping[str, Any], *, rank: int) -> dict[str, Any]:
     )
     out = {"rank": rank}
     out.update({key: _json_safe(row.get(key)) for key in keys if row.get(key) is not None})
+    tier = (row.get("ranking") or {}).get("net_delivery_tier")
+    if isinstance(tier, Mapping):
+        out["net_delivery_tier"] = _json_safe(tier)
     out.update(required_data_coverage_fields(row))
     return out
 

@@ -215,7 +215,7 @@ def test_real_put_steps_multi_symbol_rank_complete_passes_and_reversion(frozen_s
     for record in exp_decisions:
         assert record["normalized_input"]["strategy_core"] == record["opening_decision"]["normalized_input"]["strategy_core"]
         assert record["opening_decision"]["normalized_input"]["strategy_core"]["runtime"] == {
-            "mode": "source", "core_version": "0.2.0", "build_digest": None,
+            "mode": "source", "core_version": "0.2.1", "build_digest": None,
         }
     assert "先按接货后集中度" in explain_candidate_rank(ranked[0], mode="put")["rank_reason"]
     restored, _, _ = _run_puts(frozen_scan, injected=False, context=context)

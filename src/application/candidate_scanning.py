@@ -63,6 +63,43 @@ def resolve_scan_strategy(
     return resolved_strategy
 
 
+def same_symbol_ranking_context(*, symbol: str, strategy: ResolvedStrategy, portfolio_ctx: dict | None) -> dict:
+    """Adapt frozen ledger facts only; pricing and ranking belong to domain owners."""
+    portfolio = portfolio_ctx or {}
+    option = portfolio.get("option_ctx") or {}
+    filters = option.get("filters") or {}
+    result = {
+        "status": "unavailable", "reason": "opening_price_context_unavailable", "prices": [],
+        "account": strategy.account, "market": strategy.market, "symbol": symbol, "mode": strategy.mode,
+        "currency": "USD" if strategy.market == "us" else "HKD" if strategy.market == "hk" else None,
+        "broker": filters.get("broker"), "as_of": option.get("as_of_utc"),
+        "decision_state_fingerprint": option.get("decision_state_fingerprint"),
+    }
+    if strategy.account is None:
+        return {**result, "status": "not_applicable", "reason": "account_not_provided"}
+    if filters.get("account") != strategy.account:
+        return {**result, "reason": "opening_price_account_mismatch"}
+    source = option.get("ordinary_opening_prices")
+    if (option.get("context_status") != "available" or option.get("decision_snapshot_status") != "trusted"
+            or not result["decision_state_fingerprint"] or not isinstance(source, dict)
+            or source.get("status") != "available"):
+        return result
+    groups = source.get("by_symbol")
+    if not isinstance(groups, dict):
+        return result
+    symbol_groups = groups.get(symbol, {})
+    if not isinstance(symbol_groups, dict):
+        return result
+    group = symbol_groups.get(strategy.mode)
+    if group is None:
+        return {**result, "status": "available", "reason": None}
+    if not isinstance(group, dict):
+        return result
+    if group.get("currency") != result["currency"]:
+        return {**result, "reason": "opening_price_currency_mismatch"}
+    return {**result, **group}
+
+
 def attach_strategy_identity(row: dict[str, Any], strategy: ResolvedStrategy) -> dict[str, Any]:
     previous = validate_strategy_identity(row, mode=strategy.mode)
     if previous is not None and previous != strategy:

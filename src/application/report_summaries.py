@@ -12,7 +12,7 @@ from typing import Any
 import pandas as pd
 
 from domain.domain.engine import rank_combo_yield_rows
-from domain.domain.strategy_core import rank_candidates
+from domain.domain.strategy_core import rank_candidates, explain_ranked_candidates
 from domain.domain.strategy_vocab import STRATEGY_COMBO_YIELD
 from domain.domain.symbol_identity import symbol_currency
 from src.application.numeric_helpers import safe_float as _safe_float
@@ -238,6 +238,8 @@ def _build_ranked_row(
 ) -> dict[str, Any]:
     row = _empty_summary_row(symbol, strategy, extra_fields=extra_fields)
     row['candidate_count'] = len(df)
+    if isinstance(top.get("ranking"), dict):
+        row["ranking"] = top["ranking"]
     if isinstance(top.get("strategy_core"), dict):
         row["strategy_core"] = top["strategy_core"]
     row.update({
@@ -321,7 +323,12 @@ def summarize_sell_put(
 
     records = df.to_dict("records") if candidate_records is None else candidate_records
     ranked = rank_candidates(records, mode="put")
+    explanations = explain_ranked_candidates(records, mode="put")
     top = pd.Series(ranked[0]) if ranked else None
+    if top is not None:
+        explanation = explanations[str(top.get("contract_symbol") or top.get("option_symbol") or "")]
+        if "net_delivery_tier" in explanation:
+            top["ranking"] = explanation
     if top is None:
         row['candidate_count'] = len(df)
         return row
@@ -344,8 +351,14 @@ def summarize_sell_call(df: pd.DataFrame, symbol: str, *, symbol_cfg: dict | Non
     if df.empty:
         return row
 
-    ranked = rank_candidates(df.to_dict("records"), mode="call")
+    records = df.to_dict("records")
+    ranked = rank_candidates(records, mode="call")
+    explanations = explain_ranked_candidates(records, mode="call")
     top = pd.Series(ranked[0]) if ranked else None
+    if top is not None:
+        explanation = explanations[str(top.get("contract_symbol") or top.get("option_symbol") or "")]
+        if "net_delivery_tier" in explanation:
+            top["ranking"] = explanation
     if top is None:
         row['candidate_count'] = len(df)
         return row

@@ -221,7 +221,7 @@ def candidate_rank_explain_tool(
     returned = len(ranked_flat)
     total = sum(int(group["row_count"]) for group in groups)
     provenance_fields = ("expiration", "required_data_expiration_status", "ranking_complete", "ranking_scope", "partial_candidate_policy")
-    model_fields = ("mode", "rank", "symbol", "contract_symbol", "period_net_return", "annualized_return", "net_income", "primary_drivers", *provenance_fields)
+    model_fields = ("mode", "rank", "symbol", "contract_symbol", "period_net_return", "annualized_return", "net_income", "primary_drivers", "rank_reason", "net_delivery_tier", *provenance_fields)
     data = {
         "narrowing_hint": (
             "结果超过证据预算，请指定 mode=put 或 call，并使用 top_n=1。" if mode_filter == "all"

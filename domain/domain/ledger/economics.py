@@ -235,3 +235,31 @@ __all__ = [
     "fee_fact_for_event",
     "fee_fact_from_persisted_evidence",
 ]
+
+
+def opening_lot_net_delivery_price(lot: PositionLot, open_event: TradeEvent | None) -> dict[str, Any]:
+    """Original opening-unit economics, never residual-PnL or closing-fee allocation."""
+    result = {"lot_id": lot.lot_id, "open_event_id": lot.open_event_id, "net_price": None,
+              "currency": lot.currency, "reason": "opening_event_unavailable", "opening_fee": None}
+    if open_event is None:
+        return result
+    if open_event.event_id != lot.open_event_id or open_event.contract_key != lot.contract_key:
+        result["reason"] = "opening_event_identity_conflict"
+        return result
+    fee = fee_fact_for_event(open_event)
+    result["opening_fee"] = fee.to_dict()
+    if fee.basis != FeeBasis.ACTUAL or fee.amount is None:
+        result["reason"] = "actual_opening_fee_unavailable"
+        return result
+    if (lot.position_side != "short" or lot.contract_key.option_type not in ("put", "call")
+            or lot.contracts_opened <= 0 or lot.multiplier <= 0):
+        result["reason"] = "invalid_opening_lot"
+        return result
+    shares = Decimal(str(contract_share_quantity(lot.contracts_opened, lot.multiplier)))
+    unit_premium = lot.premium_open - fee.amount / shares
+    price = lot.contract_key.strike + (-unit_premium if lot.contract_key.option_type == "put" else unit_premium)
+    if not price.is_finite() or price <= 0:
+        result["reason"] = "invalid_opening_net_price"
+        return result
+    result.update(net_price=str(quantize_money(price)), reason=None)
+    return result

@@ -19,6 +19,7 @@ from domain.domain.insurance_underwriting import (
 from domain.domain.sell_call_config import validate_min_strike_cost_multiplier
 from src.application.short_vol_risk_context import build_portfolio_risk_context
 from domain.domain.strategy_core import ResolvedStrategy, calculate_constraints, evaluate_candidates, evaluate_candidate_decision, resolve_strategy, rank_candidates
+from src.application.candidate_scanning import same_symbol_ranking_context
 from src.application.candidate_scanning import attach_strategy_identity, resolve_scan_strategy
 from src.infrastructure.exchange_rates import CurrencyConverter
 from src.application.payload_helpers import config_float_from_sources as _float_setting_from_sources
@@ -93,9 +94,13 @@ def enrich_and_filter_covered_call_underwriting(
         cfg = strategy.config
 
     risk_ctx = build_portfolio_risk_context(portfolio_ctx=portfolio_ctx, exchange_rate_converter=exchange_rate_converter)
+    ranking_context = same_symbol_ranking_context(
+        symbol=symbol, strategy=strategy, portfolio_ctx=portfolio_ctx,
+    ) if strategy is not None else None
     out = df_labeled.copy()
     if strategy is not None:
         out["strategy_core"] = pd.Series([None] * len(out), index=out.index, dtype=object)
+        out["same_symbol_ranking_context"] = pd.Series([None] * len(out), index=out.index, dtype=object)
     keep_mask: list[bool] = []
     decision_records: list[dict[str, Any]] = []
 
@@ -111,6 +116,8 @@ def enrich_and_filter_covered_call_underwriting(
         )
         if strategy is not None:
             row_payload = attach_strategy_identity(row_payload, strategy)
+            row_payload["same_symbol_ranking_context"] = ranking_context
+            out.at[idx, "same_symbol_ranking_context"] = ranking_context
             out.at[idx, "strategy_core"] = row_payload["strategy_core"]
         for key in (
             "effective_min_strike", "covered_notional_cny", "net_income_cny", "option_contract_point_value_cny",

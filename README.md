@@ -18,7 +18,7 @@ OM 面向自己做交易决策的期权投资者，支持富途账户及长桥�
 
 | 功能 | 能做什么 | 使用说明 |
 |---|---|---|
-| CSP / CC 候选筛选 | 结合账户条件筛选现金担保卖出 Put、备兑卖出 Call 的开仓候选 | [策略架构](docs/STRATEGY_ARCHITECTURE.md) |
+| CSP / CC 候选筛选 | 结合账户条件筛选现金担保卖出 Put、备兑卖出 Call；同标的优先扩展2%的净接货/净卖出价档位，缺成本时保留原排序并说明 | [策略架构](docs/STRATEGY_ARCHITECTURE.md)、[净价档位](docs/candidate_strategy.md#66-普通-cspcc-同标的净价档位) |
 | 指定标的合约查询 | 指定标的和可选 Delta 绝对值上限，查询卖出 Put / Call 合约；休市时使用经交易日历核验的快照并标注参考时间；只评估合约，不判断账户现金、持股覆盖、成本底线或集中度 | [合约查询](docs/TOOL_REFERENCE.md#指定标的卖出开仓候选) |
 | Combo Yield | 查看组合候选及策略含义 | [策略架构](docs/STRATEGY_ARCHITECTURE.md)、[术语对照](docs/STRATEGY_TERMINOLOGY.md) |
 | Wheel 轮转策略 | 管理卖出 Put 后接股、卖出 Call 后交股的轮转分支；需启用，仍受身份与交割证据约束，归属不明确时需人工确认 | [轮转策略](docs/WHEEL_STRATEGY_PRD.md) |

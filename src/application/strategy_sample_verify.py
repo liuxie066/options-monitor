@@ -12,7 +12,7 @@ from typing import Any
 
 from domain.domain.engine import CandidateCalculationError
 from domain.domain.engine.candidate_engine import STAGE_INPUT_NORMALIZATION
-from domain.domain.strategy_core import decision_time_from_input, validate_strategy_identity
+from domain.domain.strategy_core import decision_time_from_input, validate_strategy_identity, explain_ranked_candidates
 from om_strategy_core import (
     CallCapacityInputs,
     CurrencyConverter,
@@ -294,6 +294,17 @@ def _ranking_checks(snapshot, eligible, checks):
             recomputed = rank_candidates(deepcopy(rows), mode=mode)
             expected = [r["facts"]["contract_symbol"] for r in recorded]
             actual = [r["contract_symbol"] for r in recomputed]
+            explanations = explain_ranked_candidates(rows, mode=mode)
+            for record in recorded:
+                contract = record["facts"]["contract_symbol"]
+                tier = explanations[contract].get("net_delivery_tier")
+                if tier is not None:
+                    if input_evidence is None:
+                        _check(checks, "ranking_explanation", location + "/" + contract,
+                               reason="complete ranking input evidence unavailable")
+                    else:
+                        _check(checks, "ranking_explanation", location + "/" + contract,
+                               (record.get("ranking") or {}).get("net_delivery_tier"), tier)
             counts = Counter(r["symbol"] for r in rows)
             n = len(counts)
             _check(checks, "ranking", location + "/representatives", expected[:n], actual[:n])

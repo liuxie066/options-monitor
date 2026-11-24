@@ -13,6 +13,7 @@ from domain.domain.option_lifecycle import (
 )
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.symbol_identity import symbol_market
+from domain.domain.strategy_membership import resolve_option_strategy_membership
 from domain.domain.risk_capacity import compute_short_call_locked_shares, compute_short_put_cash_secured
 from domain.domain.wheel.projection import STRATEGY_METADATA_KEYS
 from src.application.ledger.queries import (
@@ -408,6 +409,10 @@ def build_position_risk_context(
         "exchange_rates": (rates or {}),
         "raw_selected_count": len(selected_items),
         "open_positions_min": open_positions_min,
+        "ordinary_opening_prices": _ordinary_opening_price_context(
+            selected_items, snapshot=decision_snapshot, lifecycle_by_lot=lifecycle_by_lot,
+            account=account_norm, broker=broker_norm,
+        ),
         "assignment_positions": [
             {**view.as_open_position_min(as_of_date=expiration_market_date(observed_at_dt, symbol_market(view.canonical_underlying_symbol))),
              **dict(lifecycle_by_lot.get(view.lot_id) or {})}
@@ -755,3 +760,54 @@ def slice_position_risk_context_for_account(shared_ctx: JsonDict, account: str |
         return None
     out = by_account.get(str(account))
     return (dict(out) if isinstance(out, dict) else None)
+
+
+def _ordinary_opening_price_context(
+    items: list[RiskPositionView], *, snapshot: JsonDict | None,
+    lifecycle_by_lot: dict[str, JsonDict], account: str | None, broker: str,
+) -> JsonDict:
+    """Select ordinary open lots from one qualified observation, without replay or I/O."""
+    facts = (snapshot or {}).get("account_opening_net_prices")
+    if not account or (snapshot or {}).get("snapshot_status") != "trusted" or not isinstance(facts, list):
+        return {"status": "unavailable", "reason": "opening_price_snapshot_unavailable", "by_symbol": {}}
+    by_lot = {item["lot_id"]: item for item in facts}
+    valid_combos = {item.get("group_id") for item in (snapshot or {}).get("account_combo_group_memberships", [])
+                    if item.get("status") in ("exact", "released")}
+    groups: dict[str, dict[str, JsonDict]] = {}
+    for item in items:
+        if item.side != "short" or item.option_type not in ("put", "call"):
+            continue
+        lifecycle = lifecycle_by_lot.get(item.lot_id) or {}
+        uncertain = (
+            lifecycle.get("lifecycle_state") in ("conflict", "settlement_pending", "needs_review", "pending")
+            or lifecycle.get("reason_state") in ("conflict", "needs_review", "cause_pending")
+            or (lifecycle.get("reserved_contracts_by_lot") or {}).get(item.lot_id, 0) > 0
+            or (lifecycle.get("pending_close_contracts_by_lot") or {}).get(item.lot_id, 0) > 0
+        )
+        if not item.is_open and not uncertain:
+            continue
+        membership = resolve_option_strategy_membership(
+            {"option_type": item.option_type}, item.side, item.fields,
+            valid_combo_group_ids=valid_combos, source_id=item.lot_id or "",
+        )
+        if not membership.issues and membership.strategy != ("csp" if item.option_type == "put" else "cc"):
+            continue
+        symbol = item.canonical_underlying_symbol
+        group = groups.setdefault(symbol, {}).setdefault(item.option_type, {
+            "status": "available", "reason": None, "currency": item.currency, "prices": [],
+        })
+        price = by_lot.get(item.lot_id)
+        reason = (
+            "strategy_attribution_conflict" if membership.issues else
+            "option_settlement_unresolved" if uncertain else
+            "opening_price_identity_conflict" if item.account != account or item.broker != broker else
+            "opening_price_currency_conflict" if not item.currency or group["currency"] != item.currency else
+            "opening_price_fact_unavailable" if price is None else
+            "opening_price_currency_conflict" if price.get("currency") != item.currency else
+            price.get("reason") if price.get("net_price") is None else None
+        )
+        if reason:
+            group.update(status="unavailable", reason=reason)
+        if price is not None:
+            group["prices"].append(dict(price))
+    return {"status": "available", "reason": None, "by_symbol": groups}

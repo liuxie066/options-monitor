@@ -8,6 +8,21 @@ from decimal import Decimal, ROUND_CEILING
 from typing import Any, Literal
 
 from domain.domain.candidate_defaults import default_max_abs_delta, validate_max_abs_delta
+from domain.domain.engine.same_symbol_ranking import (
+    OPENING_CANDIDATE_NEAR_RETURN_THRESHOLD, rank_same_symbol_candidates, net_delivery_explanation,
+    _is_missing,
+    _coerce_float,
+    _first_float,
+    _candidate_tie_break_margin,
+    _sell_put_period_return,
+    _covered_call_period_return,
+    _candidate_period_return,
+    _known_low_sort,
+    _known_high_sort,
+    _sell_put_within_symbol_tie_key,
+    _covered_call_within_symbol_tie_key,
+    _rank_return_bands,
+ )
 from domain.domain.fee_calc import estimate_futu_option_sell_fee
 from domain.domain.strategy_identity import candidate_ranking_profile
 from domain.domain.trade_contract_identity import contract_share_quantity, require_option_multiplier
@@ -16,7 +31,6 @@ from domain.domain.trade_contract_identity import contract_share_quantity, requi
 CANDIDATE_ENGINE_SCHEMA_VERSION = "1.0"
 SCHEMA_KIND_CANDIDATE_DECISION = "candidate_decision"
 StrategyMode = Literal["put", "call"]
-OPENING_CANDIDATE_NEAR_RETURN_THRESHOLD = 0.002
 OPENING_CANDIDATE_MIN_ANNUALIZED_RETURN = 0.10
 OPENING_CANDIDATE_MIN_NET_PREMIUM_CNY = 50.0
 OPENING_CANDIDATE_MIN_IV_RV_RATIO = 1.10
@@ -300,27 +314,8 @@ def normalize_strategy_mode(mode: Any) -> StrategyMode:
     return mode_norm  # type: ignore[return-value]
 
 
-def _is_missing(value: Any) -> bool:
-    if value is None:
-        return True
-    if isinstance(value, str) and not value.strip():
-        return True
-    try:
-        return bool(value != value)
-    except Exception:
-        return False
 
 
-def _coerce_float(value: Any) -> float | None:
-    if _is_missing(value):
-        return None
-    if isinstance(value, bool):
-        return None
-    try:
-        parsed = float(value)
-    except Exception:
-        return None
-    return parsed if math.isfinite(parsed) else None
 
 
 def _first_text(raw: dict[str, Any], *fields: str) -> str:
@@ -790,6 +785,7 @@ def calculate_opening_candidate_metrics(
     out.update(
         {
             "current_market_value": round(current_market_value, 6),
+            "net_sale_price": round(strike + net_premium / multiplier, 6),
             "period_net_premium_return": round(period_return, 10),
             "period_net_return": round(period_return, 10),
             "annualized_net_premium_return": round(period_return * 365.0 / dte, 10),
@@ -1423,110 +1419,22 @@ def _resolved_policy_float(
     return float(default if resolved is None else resolved)
 
 
-def _first_float(src: dict[str, Any], *names: str) -> float | None:
-    for name in names:
-        value = _coerce_float(src.get(name))
-        if value is not None:
-            return value
-    return None
 
 
-def _candidate_tie_break_margin(src: dict[str, Any], *, mode: StrategyMode) -> float:
-    if mode == "put":
-        explicit = _first_float(src, "net_assignment_discount_pct")
-        if explicit is not None:
-            return float(explicit)
-        spot = _first_float(src, "spot")
-        breakeven = _first_float(src, "breakeven")
-        if spot is not None and spot > 0 and breakeven is not None:
-            return float((spot - breakeven) / spot)
-        return 0.0
-    return float(
-        _first_float(
-            src,
-            "strike_upside_margin_pct",
-            "strike_above_spot_pct",
-            "otm_pct",
-        )
-        or 0.0
-    )
 
 
-def _sell_put_period_return(src: dict[str, Any]) -> float | None:
-    explicit = _first_float(
-        src,
-        "period_net_return_on_cash_basis",
-        "period_net_return",
-    )
-    if explicit is not None:
-        return explicit
-    net_income = _first_float(src, "net_income")
-    cash_basis = _first_float(src, "cash_basis")
-    if net_income is not None and cash_basis is not None and cash_basis > 0:
-        return net_income / cash_basis
-    annualized = _first_float(src, "annualized_net_return_on_cash_basis")
-    dte = _first_float(src, "dte")
-    if annualized is not None and dte is not None and dte > 0:
-        return annualized * dte / 365.0
-    return None
 
 
-def _covered_call_period_return(src: dict[str, Any]) -> float | None:
-    explicit = _first_float(
-        src,
-        "period_net_premium_return",
-        "period_net_return",
-    )
-    if explicit is not None:
-        return explicit
-    net_premium = _first_float(src, "net_income")
-    current_market_value = _first_float(src, "current_market_value")
-    if net_premium is not None and current_market_value is not None and current_market_value > 0:
-        return net_premium / current_market_value
-    annualized = _first_float(src, "annualized_net_premium_return")
-    dte = _first_float(src, "dte")
-    if annualized is not None and dte is not None and dte > 0:
-        return annualized * dte / 365.0
-    # Compatibility for historical diagnostic rows. Formal Phase-2 candidate
-    # rows always carry the period return directly.
-    if annualized is not None:
-        return annualized
-    return None
 
 
-def _candidate_period_return(src: dict[str, Any], *, mode: StrategyMode) -> float | None:
-    return _sell_put_period_return(src) if mode == "put" else _covered_call_period_return(src)
 
 
-def _known_low_sort(value: float | None) -> tuple[bool, float]:
-    return (value is None, 0.0 if value is None else float(value))
 
 
-def _known_high_sort(value: float | None) -> tuple[bool, float]:
-    return (value is None, 0.0 if value is None else -float(value))
 
 
-def _sell_put_within_symbol_tie_key(src: dict[str, Any]) -> tuple[Any, ...]:
-    return (
-        -_candidate_tie_break_margin(src, mode="put"),
-        *_known_low_sort(_first_float(src, "spread_ratio")),
-        *_known_high_sort(_first_float(src, "open_interest")),
-        -float(_first_float(src, "net_income_cny", "net_income") or 0.0),
-        str(src.get("contract_symbol") or src.get("option_symbol") or ""),
-    )
 
 
-def _covered_call_within_symbol_tie_key(src: dict[str, Any]) -> tuple[Any, ...]:
-    # Not merged with _sell_put_within_symbol_tie_key: element 0 is a
-    # mode-specific quantity (negative assignment discount vs negative strike),
-    # not one quantity read through a differently named field.
-    return (
-        -float(_first_float(src, "strike") or 0.0),
-        *_known_low_sort(_first_float(src, "spread_ratio")),
-        *_known_high_sort(_first_float(src, "open_interest")),
-        -float(_first_float(src, "net_income_cny", "net_income") or 0.0),
-        str(src.get("contract_symbol") or src.get("option_symbol") or ""),
-    )
 
 
 # Both modes rank the same physical-assignment net-asset weight.
@@ -1604,43 +1512,6 @@ def _sell_put_option_market_cross_symbol_tie_key(
     )
 
 
-def _rank_return_bands(
-    rows: list[dict[str, Any]],
-    *,
-    period_return_fn: Any,
-    tie_key: Any,
-    near_return_threshold: float = OPENING_CANDIDATE_NEAR_RETURN_THRESHOLD,
-) -> list[dict[str, Any]]:
-    usable = []
-    missing = []
-    for index, row in enumerate(rows):
-        value = period_return_fn(row)
-        if value is None:
-            missing.append((index, row))
-        else:
-            usable.append((value, index, row))
-    usable.sort(key=lambda item: item[0], reverse=True)
-
-    ranked: list[dict[str, Any]] = []
-    start = 0
-    while start < len(usable):
-        # Anchor each band to its maximum, never to the previous adjacent return.
-        floor = usable[start][0] - near_return_threshold
-        end = start + 1
-        while end < len(usable) and usable[end][0] >= floor:
-            end += 1
-        ranked.extend(
-            row for _value, _index, row in sorted(
-                usable[start:end], key=lambda item: (tie_key(item[2]), item[1]),
-            )
-        )
-        start = end
-    ranked.extend(
-        row for _index, row in sorted(
-            missing, key=lambda item: (tie_key(item[1]), item[0]),
-        )
-    )
-    return ranked
 
 
 def _candidate_recommendation_sort_tuple(
@@ -1683,6 +1554,7 @@ def explain_candidate_rank(
     row: dict[str, Any] | Any,
     *,
     mode: StrategyMode | str,
+    group_evaluation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     mode_norm = normalize_strategy_mode(mode)
     src = row if isinstance(row, dict) else {}
@@ -1733,6 +1605,10 @@ def explain_candidate_rank(
             "同标的仍按持有期净收益分带选代表合约；跨标的先按接货后集中度从低到高分组，"
             "未知集中度排后；同集中度组内按收益分带，再比较净接货折价、价差、OI 和净收入"
         )
+    delivery = net_delivery_explanation(src, mode=mode_norm, evaluation=group_evaluation)
+    if delivery is not None:
+        result["net_delivery_tier"] = delivery
+        result["rank_reason"] = delivery["message"] + "；" + result["rank_reason"]
     return result
 
 
@@ -1930,17 +1806,9 @@ def rank_candidate_rows(
     period_return_fn = (
         _sell_put_period_return if mode_norm == "put" else _covered_call_period_return
     )
-    within_tie_key = (
-        _sell_put_within_symbol_tie_key
-        if mode_norm == "put"
-        else _covered_call_within_symbol_tie_key
-    )
     within_ranked = {
-        key: _rank_return_bands(
-            grouped[key],
-            period_return_fn=period_return_fn,
-            tie_key=within_tie_key,
-            near_return_threshold=threshold,
+        key: rank_same_symbol_candidates(
+            grouped[key], mode=mode_norm, near_return_threshold=threshold,
         )
         for key in group_order
     }
