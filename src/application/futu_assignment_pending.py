@@ -97,19 +97,28 @@ def observe_assignment_pending(gateway, balance_rows, *, query_rows, cfg, accoun
             item = {"status": "unmatched", "reason": "assignment_evidence_unavailable",
                     "currency": currency, "pending_amount": None, "adjustment": 0.0, "order_ids": []}
         items.append(item)
-    status = "matched" if all(item["status"] == "matched" for item in items) else "unmatched"
-    total_pending = sum(item.get("pending_amount") or 0 for item in items)
+    # All adjustments are applied to the last whole response. A prior currency
+    # may have settled between queries, so its original deficit must still exist.
+    for item in items:
+        field = {"USD": "us_cash", "HKD": "hk_cash"}[item["currency"]]
+        if (item["status"] == "matched"
+                and number(latest_rows[0].get(field)) != -number(item["adjustment"])):
+            item.update(status="unmatched", reason="assignment_amount_mismatch", adjustment=0.0)
+    return latest_rows, _summarize_items(items)
+
+
+def _summarize_items(items):
+    if len(items) == 1:
+        return {**items[0], "items": items}
+    statuses = {item["status"] for item in items}
+    status = "unmatched" if "unmatched" in statuses else "none" if statuses == {"none"} else "matched"
+    # Different currencies have no scalar total without conversion evidence.
     evidence = {"status": status, "reason": "multiple_currency_reconciliation",
-                "currency": currencies[0] if len(currencies) == 1 else "",
-                "pending_amount": total_pending, "adjustment": sum(item.get("adjustment", 0) for item in items),
-                "items": items}
+                "currency": "", "pending_amount": None, "adjustment": None, "items": items}
     observed_at = [item.get("funds_observed_at") for item in items if item.get("funds_observed_at")]
     if observed_at:
         evidence["funds_observed_at"] = max(observed_at)
-    if len(items) == 1:
-        evidence.update(items[0])
-        evidence["items"] = items
-    return latest_rows, evidence
+    return evidence
 
 
 def apply_assignment_pending(context, evidence):
@@ -123,9 +132,7 @@ def apply_assignment_pending(context, evidence):
     if not context.get("cash_balance_reliable"):
         items = [{**item, "status": "unmatched", "reason": "cash_balance_unreliable", "adjustment": 0.0}
                  if item.get("status") == "matched" else item for item in items]
-        evidence["items"] = items
-        evidence["status"] = "matched" if all(item.get("status") == "matched" for item in items) else "unmatched"
-        evidence["adjustment"] = sum(item.get("adjustment", 0) for item in items)
+        evidence = _summarize_items(items)
     context["assignment_pending"] = evidence
     for item in items:
         if item.get("status") != "matched":
@@ -135,5 +142,5 @@ def apply_assignment_pending(context, evidence):
         context["cash_components_by_currency"][currency]["assignment_pending"] = amount
         context["cash_by_currency"][currency] += amount
         context["cash_capacity_by_currency"][currency]["amount"] = context["cash_by_currency"][currency]
-    if evidence["adjustment"] > 0:
+    if any(item.get("status") == "matched" and item.get("adjustment", 0) > 0 for item in items):
         context["cash_source"] = "futu_cash_like_assets_with_assignment_pending"
