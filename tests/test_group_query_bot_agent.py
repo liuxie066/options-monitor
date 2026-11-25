@@ -631,6 +631,65 @@ def test_second_guard_failure_falls_back_to_host_wording(tmp_path):
     assert "999.9" not in reply.text
 
 
+@pytest.mark.parametrize("rewrite_is_valid", [True, False], ids=["rewrite", "fallback"])
+def test_conditional_roll_nonadvice_requires_unverified_coverage(tmp_path, rewrite_is_valid):
+    arguments = _roll_arguments()
+    arguments["position"]["contract"]["option_type"] = "call"
+    data = {
+        "symbol": "NVDA", "market": "US", "status": "success",
+        "outcome": "found", "analysis_kind": "conditional",
+        "account_eligibility": "not_verified",
+        "position": arguments["position"],
+        "old_quote": {"bid": 1.10, "ask": 1.20},
+        "stock_coverage": {"verification_status": "not_verified", "required_shares": 200},
+        "unverified_conditions": ["actual_share_count_not_verified",
+                                  "all_open_short_calls_coverage_not_verified",
+                                  "coverage_double_use_not_verified"],
+        "candidates": [{
+            "contract_symbol": "US.NVDA270115C190000",
+            "option_contract": {"expiration": "2027-01-15", "strike": 190.0},
+            "bid": 2.0, "ask": 2.2, "dte": 66, "delta": 0.3,
+            "economic_result": "positive_net_credit", "estimated_sell_fee": 1.25,
+            "metrics": {"incremental_annualized_return": 0.25},
+        }],
+        "displayed": 1, "omitted": 0, "reason_codes": [],
+        "scope": arguments["search_bounds"],
+    }
+    misleading = ("股票已经充分覆盖，可以移仓；不构成正式账户建议；"
+                  "费用按模型估算，不是账户实际扣费。")
+    corrected = ("这是条件移仓分析，股票覆盖未经核实；不构成正式账户建议；"
+                 "费用按模型估算，不是账户实际扣费。")
+    model = _ScriptedModel([
+        _tool_response("evaluate_roll_up", arguments),
+        _text_response(misleading),
+        _text_response(corrected if rewrite_is_valid else misleading),
+    ])
+    api = _FakeAPI(data={"evaluate_roll_up": data})
+    agent, _ = _agent(tmp_path, model=model, api=api)
+
+    reply = agent.handle_event(
+        _event(), "NVDA short call，2026-12-18 到期，行权价 180，2 张，"
+        "上移到不晚于 2027-03-19 的合约")
+
+    assert reply.status == "ok"
+    assert len(api.calls) == 1
+    assert api.calls[0]["method"] == "evaluate_roll_up"
+    assert "股票覆盖未经核实" in reply.text, (
+        reply.text, reply.reason_codes, len(model.calls))
+    assert "股票已经充分覆盖" not in reply.text
+    assert len(model.calls) == 3
+    correction = model.calls[2]["messages"][-1]
+    assert correction["role"] == "user"
+    assert "股票覆盖未经核实" in correction["content"]
+    if rewrite_is_valid:
+        assert reply.text == corrected
+        assert reply.reason_codes == ("reply_guard_retry",)
+    else:
+        assert reply.reason_codes == ("reply_guard_fallback",)
+        assert "估算" in reply.text
+        assert "不是账户实际扣费" in reply.text
+
+
 def test_valid_model_narration_is_sent_as_is(tmp_path):
     model = _ScriptedModel([
         _tool_response("query_quotes", QUOTE_ARGUMENTS, "call_1"),
