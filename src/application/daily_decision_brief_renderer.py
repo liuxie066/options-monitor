@@ -1087,8 +1087,6 @@ def _render_user_view_blocks(
                 if parts:
                     line = " · ".join(parts)
                     lines.append(emphasis(line) if strong else line)
-            if fields.get("net_delivery"):
-                lines.append(fields["net_delivery"])
             sizing = fields.get("sizing") or []
             if sizing:
                 lines.append("Position Sizing：" + sizing[0])
@@ -1998,7 +1996,8 @@ def _wheel_batch_views(
             )
             details.append(f"建议：卖出 {contracts} 张 {contract}")
             details.append(f"建议限价：{row.get('currency') or ('HKD' if market == 'HK' else 'USD')} {price:g}")
-            details.append(f"报价采集时间：{observed}")
+            if direction != "call":
+                details.append(f"报价采集时间：{observed}")
             if row.get("quote_update_time"):
                 details.append(f"行情更新时间：{row['quote_update_time']}")
             premium = _number(
@@ -2290,17 +2289,6 @@ def _candidate_metric_fields(
             value = _number(values.get(key))
             sizing.append(f"{label} {_percent(value) if value is not None else '暂不可用'}")
         fields["sizing"] = sizing
-    tier = values.get("net_delivery_tier")
-    if family in {"sell_put", "covered_call"} and isinstance(tier, Mapping):
-        details = [str(tier.get("message") or "无法判断档位")]
-        label = "净接货价" if family == "sell_put" else "净卖出价"
-        for key, prefix in (("candidate_net_price", "预计"), ("baseline_net_price", "持仓基准"),
-                            ("threshold_net_price", "档位门槛")):
-            price = _number(tier.get(key))
-            if price is not None:
-                details.append(f"{prefix}{label} {price:.6f} {tier.get('currency') or ''}".strip())
-        details.append("候选按限价估算，仅计开仓费用")
-        fields["net_delivery"] = "；".join(details)
     return fields
 
 
@@ -2317,8 +2305,6 @@ def _candidate_metric_details(
     details = [" · ".join(parts)] if parts else []
     if fields.get("sizing"):
         details.append("Position Sizing：" + " · ".join(fields["sizing"]))
-    if fields.get("net_delivery"):
-        details.append(fields["net_delivery"])
     details.extend(_candidate_required_data_details(candidate))
     return details
 
