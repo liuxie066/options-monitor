@@ -100,6 +100,17 @@ def normalize_option_positions_read_input(
     """Apply the public action rules before defaults or quality checks."""
 
     normalized = dict(payload)
+    period_fields = {"assignment_year", "assignment_month", "assignment_start_date", "assignment_end_date"}
+    has_period = any(name in normalized for name in period_fields)
+    if has_period:
+        if _scalar_text(normalized.get("action"), default="assigned-stock").lower() != "assigned-stock":
+            raise ValueError("assignment period fields require action=assigned-stock")
+        normalized["action"] = "assigned-stock"
+        if normalized.get("as_of_ms") not in (None, ""):
+            raise ValueError("assignment period queries support current valuation only; omit as_of_ms")
+        if _scalar_text(normalized.get("status"), default="all").lower() != "all":
+            raise ValueError("assignment period queries require status=all")
+        normalized["status"] = "all"
     events_only_fields = {"cursor", "include_total", "position_effect"}
     has_events_only_input = any(name in normalized for name in events_only_fields)
     explicit_action = _scalar_text(normalized.get("action")).lower()
@@ -687,6 +698,16 @@ def _assigned_stock_action(
     normalize_account: Callable[[Any], str],
     refresh_assigned_stock_quotes: Callable[..., Any],
 ) -> dict[str, Any]:
+    if any(key in payload for key in (
+        "assignment_year", "assignment_month", "assignment_start_date", "assignment_end_date",
+    )):
+        from src.application.positions.assignment_period_report import build_assignment_period_report
+
+        return build_assignment_period_report(
+            repo, payload, cfg=cfg,
+            refresh_assigned_stock_quotes=refresh_assigned_stock_quotes,
+            repo_base=repo_base, quote_state_base_dir=quote_state_base_dir,
+        )
     broker = _optional_text(payload.get("broker"))
     broker = normalize_broker(broker) if broker else None
     account = normalize_account(payload.get("account")) if payload.get("account") else None
@@ -1146,13 +1167,13 @@ def option_positions_read_tool(
     if action in {"list", "assigned-stock"}:
         returned = len(data.get("rows") or [])
         limited = action == "list" and returned >= max(1, min(500, limit))
-        data["pagination"] = {"total_count": None if limited else returned,
+        data.setdefault("pagination", {"total_count": None if limited else returned,
                               "matched_count": None if limited else returned, "returned_count": returned,
-                              "scanned_count": None, "has_more": None if limited else False}
-        data["coverage"] = {"status": "partial" if limited else "complete",
+                              "scanned_count": None, "has_more": None if limited else False})
+        data.setdefault("coverage", {"status": "partial" if limited else "complete",
                             "complete_for": "requested_page" if limited else "full_query",
                             "included_count": returned, "total_count": None if limited else returned,
-                            "omitted_count": None if limited else 0, "has_more": None if limited else False}
+                            "omitted_count": None if limited else 0, "has_more": None if limited else False})
     elif action == "inspect":
         matched = len(data.get("matched_record_ids") or [])
         data["pagination"] = {"total_count": None, "matched_count": matched, "returned_count": matched,

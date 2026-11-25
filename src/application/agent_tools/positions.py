@@ -486,6 +486,14 @@ def _option_positions_output_contract(payload: dict[str, Any]) -> dict[str, Any]
     if action == "list":
         return _OPTION_POSITIONS_LIST_OUTPUT_CONTRACT
     if action == "assigned-stock":
+        if any(key in normalized for key in ("assignment_year", "assignment_month", "assignment_start_date", "assignment_end_date")):
+            return {
+                **_OPTION_POSITIONS_ASSIGNED_STOCK_OUTPUT_CONTRACT,
+                "schema_version": "option_positions_read.assignment_period.v1",
+                "fact_fields": ["query", "summary", "accounts", "rows", "coverage", "source", "pagination",
+                                "freshness", "unresolved_stock_sales", "scope_reviews", "quote_refresh"],
+                "missing_data_fields": ["coverage", "rows[].reasons", "scope_reviews"],
+            }
         return _OPTION_POSITIONS_ASSIGNED_STOCK_OUTPUT_CONTRACT
     if action == "events":
         return _OPTION_POSITIONS_EVENTS_OUTPUT_CONTRACT
@@ -1141,22 +1149,19 @@ OPTION_POSITIONS_READ_TOOL = build_agent_tool(
     name="option_positions_read",
     catalog_summary="读取授权账户的期权持仓、交易事件与最近平仓记录。",
     description=(
-        "Read local option position lots, trade events, lot history, assigned-stock lots, or projection "
-        "inspection state. For locally recorded open exposure use action=list and status=open; preserve account and currency. "
-        "Local lots do not prove current broker holdings, cash availability, or capacity for additional shorts. "
-        "Do not infer missing cash_secured_amount, market_price or margin_state, or treat absent observations as zero. "
-        "For canonical trade history use action=events: each page contains 1-20 rows in stable descending "
-        "trade-time order, and next_cursor continues the same signed snapshot without repeating filters. "
-        "Do not silently clamp a request above 20: disclose the per-page limit and offer pagination. "
-        "When has_more=true, say that more records are available; when snapshot_exhausted=true, say that "
-        "the frozen query is exhausted. A missing or expired cursor requires a new query, which may overlap "
-        "records already returned. "
-        "For the latest N closed trades or close records use action=events, position_effect=close, and limit=N; "
-        "omit account when the user asks across all authorized accounts. "
-        "An expired_position_marked_open warning identifies a local ledger-state inconsistency only; it does not "
-        "prove broker settlement, assignment, liquidation, or a pending order. cash_secured_amount is assignment "
-        "collateral, not profit, available cash, or loss. action=assigned-stock can add read-only quote evidence "
-        "for current stock P&L; other actions do not provide market-price P&L evidence."
+        "Read local lots/events/history, assigned stock, projection diagnostics. "
+        "Local exposure: list,status=open; retain account/currency. Lots do not prove broker "
+        "holdings, cash, or short capacity. Missing cash_secured_amount,market_price,margin_state are unknown, not zero. "
+        "Canonical history: action=events,limit=1..20; descending trade time, signed-snapshot next_cursor, "
+        "keep selectors unchanged. Above20: disclose limit and offer pages; never clamp. Report has_more or "
+        "snapshot_exhausted. Missing/expired cursor: restart, possible overlaps. "
+        "latest N closed trades: events,position_effect=close,limit=N; omit account for authorized-account total. "
+        "expired_position_marked_open means local inconsistency, not broker settlement/assignment/liquidation/pending order. "
+        "cash_secured_amount is assignment collateral, not profit/cash/loss. Only assigned-stock adds read-only price evidence. "
+        "Put assignment P&L: action=assigned-stock with assignment_year/month or paired start/end dates. "
+        "Shanghai assignment cohort, current remainder/eligible price; omitted period defaults current YYYY-MM "
+        "assignment_month (MTD). Include sold lots: status=all. Never fill as_of_ms for current valuation. "
+        "Retain per-metric coverage/basis; ledger estimates are not verified broker holdings."
     ),
     requires=("runtime_config", "sqlite_data_config"),
     capabilities=("option_positions", "read_only", "ledger_diagnostics"),
@@ -1208,6 +1213,10 @@ OPTION_POSITIONS_READ_TOOL = build_agent_tool(
         "side": "list-only short|long selector",
         "strike": "list/events/inspect numeric selector",
         "exp": "events/inspect YYYY-MM-DD selector",
+        "assignment_year": {"type": "integer", "minimum": 1, "maximum": 9999, "description": "Assigned Put stock cohort year; current year is Shanghai YTD, valued currently"},
+        "assignment_month": {"type": "string", "pattern": r"^\d{4}-(0[1-9]|1[0-2])$", "description": "Assigned Put stock cohort YYYY-MM; current month is Shanghai MTD, valued currently"},
+        "assignment_start_date": {"type": "string", "format": "date", "description": "Inclusive Shanghai assignment start date; requires assignment_end_date"},
+        "assignment_end_date": {"type": "string", "format": "date", "description": "Inclusive Shanghai assignment end date; requires assignment_start_date"},
         "stock_lot_id": "assigned-stock selector",
         "quote_snapshots": "assigned-stock optional quote snapshot list/dict; supplying it disables implicit realtime refresh",
         "refresh_quotes": "assigned-stock optional bool; current queries refresh realtime OpenD spot by default, false disables it, true with historical as_of_ms is skipped",
@@ -1238,6 +1247,7 @@ OPTION_POSITIONS_READ_TOOL = build_agent_tool(
         "exp_within_days", "expiration_month", "expiration_exact", "expiration_before",
         "expiration_after", "record_id", "symbol", "option_type", "side", "strike",
         "exp", "stock_lot_id", "refresh_quotes", "as_of_ms", "cursor", "include_total", "position_effect",
+        "assignment_year", "assignment_month", "assignment_start_date", "assignment_end_date",
     ),
     bot_input_schema={
         "type": "object",
@@ -1280,6 +1290,10 @@ OPTION_POSITIONS_READ_TOOL = build_agent_tool(
             "side": {"type": "string", "enum": ["short", "long"]},
             "strike": {"type": "number"},
             "exp": {"type": "string", "format": "date"},
+            "assignment_year": {"type": "integer", "minimum": 1, "maximum": 9999},
+            "assignment_month": {"type": "string", "pattern": r"^\d{4}-(0[1-9]|1[0-2])$"},
+            "assignment_start_date": {"type": "string", "format": "date"},
+            "assignment_end_date": {"type": "string", "format": "date"},
             "stock_lot_id": {"type": "string"},
             "refresh_quotes": {"type": "boolean"},
             "as_of_ms": {"type": "integer"},

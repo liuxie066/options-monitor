@@ -162,3 +162,80 @@ def test_assigned_stock_partial_override_overlays_canonical_route(monkeypatch, t
     assert calls[0]["host"] == "canonical"
     assert calls[0]["port"] == 33333
     assert result.diagnostics["route_source"] == "explicit_diagnostic_override"
+
+
+def test_evidence_refresh_keeps_market_time_and_revalidates(monkeypatch, tmp_path):
+    from datetime import datetime
+    from src.application.opening_quote_evidence import normalize_underlier_observation
+    import src.application.positions.assigned_stock_quotes as mod
+
+    clock = datetime.fromisoformat('2026-11-25T15:00:00+00:00')
+    stamp = int(clock.timestamp() * 1000)
+    observation = normalize_underlier_observation(
+        code='US.NVDA', market='US',
+        snapshot_row={'code': 'US.NVDA', 'last_price': 100, 'update_time': '2026-11-25 09:59:30',
+                      'sec_status': 'NORMAL', 'suspension': False},
+        market_state_row={'code': 'US.NVDA', 'market_state': 'MORNING'}, now_utc=clock,
+    )
+    monkeypatch.setattr(mod, 'build_ready_futu_quote_gateway', lambda **kw: _ListGateway())
+    monkeypatch.setattr(mod, 'get_underlier_observations', lambda *a, **kw: {'US.NVDA': observation})
+    result = _refresh(mod, cfg={}, host='localhost', port=11111, base_dir=tmp_path,
+                      now_ms=lambda: stamp, preserve_evidence=True)
+    quote = result.quote_snapshots[0]
+    assert quote['quote_time_ms'] == stamp - 30_000
+    assert quote['quote_observed_at_ms'] == stamp
+    assert mod.assigned_stock_quote_is_usable(quote, stamp)
+    assert not mod.assigned_stock_quote_is_usable(quote, stamp + 600_000)
+    assert not mod.assigned_stock_quote_is_usable({'spot': 100, 'quote_status': 'fresh'}, stamp)
+
+
+def test_quote_evidence_cannot_be_reused_for_another_price_or_symbol():
+    from datetime import datetime
+    from src.application.opening_quote_evidence import normalize_underlier_observation
+    from src.application.positions.assigned_stock_quotes import assigned_stock_quote_is_usable
+
+    clock = datetime.fromisoformat('2026-11-25T15:00:00+00:00')
+    stamp = int(clock.timestamp() * 1000)
+    observation = normalize_underlier_observation(
+        code='US.NVDA', market='US',
+        snapshot_row={'code': 'US.NVDA', 'last_price': 100, 'update_time': '2026-11-25 09:59:30',
+                      'sec_status': 'NORMAL', 'suspension': False},
+        market_state_row={'code': 'US.NVDA', 'market_state': 'MORNING'}, now_utc=clock,
+    ).to_dict()
+    quote = {'symbol': 'NVDA', 'spot': 100, 'quote_time_ms': stamp - 30_000,
+             'quote_observation': observation}
+    assert assigned_stock_quote_is_usable(quote, stamp)
+    assert not assigned_stock_quote_is_usable(quote | {'spot': 101}, stamp)
+    assert not assigned_stock_quote_is_usable(quote | {'symbol': 'FUTU'}, stamp)
+    assert not assigned_stock_quote_is_usable(quote | {'quote_time_ms': stamp}, stamp)
+
+
+def test_closed_market_quote_requires_complete_original_calendar_proof():
+    from datetime import datetime
+    from src.application.positions.assigned_stock_quotes import assigned_stock_quote_is_usable
+
+    def stamp(value):
+        return int(datetime.fromisoformat(value).timestamp() * 1000)
+
+    original = stamp('2026-10-23T07:56:00+00:00')
+    valuation = stamp('2026-10-24T07:56:00+00:00')
+    market = {
+        'stocks': [{'symbol': '0700.HK', 'currency': 'HKD', 'price': '400',
+                    'source': 'frozen-close', 'effective_at_ms': original,
+                    'available_at_ms': original, 'valid_until_ms': original + 300_000}],
+        'options': [], 'fx': [],
+        'closed_market_carry': {
+            'schema_version': 'om.closed-market-carry.v1', 'observation_at_ms': original,
+            'calendars': {'HK': {'start': '2026-10-23', 'end': '2026-10-27',
+                'source_observed_at_utc': '2026-10-22T00:00:00Z',
+                'receipt': {'retcode': 0, 'coverage_complete': True, 'pagination_complete': True,
+                    'page_count': 1, 'rows': [
+                        {'time': day, 'trade_date_type': 'WHOLE'}
+                        for day in ('2026-10-23', '2026-10-26', '2026-10-27')]}}},
+        },
+    }
+    quote = {'symbol': '0700.HK', 'spot': '400', 'quote_time_ms': original,
+             'market_evidence': market}
+    assert assigned_stock_quote_is_usable(quote, valuation)
+    market['closed_market_carry']['calendars']['HK']['receipt']['coverage_complete'] = False
+    assert not assigned_stock_quote_is_usable(quote, valuation)

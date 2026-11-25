@@ -207,3 +207,38 @@ Control / CLI 边界。
 - missing/estimated fee、quote、FX 或 lifecycle evidence 保持 partial。
 - option performance 与 assigned-stock read view 复用 canonical ledger/projector，
   但期权指标不纳入正股现金、成本或 PnL。
+
+## Put 指派期间当前估值查询
+
+`option_positions_read(action=assigned-stock)` 可指定 `assignment_year`（整数）、
+`assignment_month`（YYYY-MM），或同时指定 `assignment_start_date` /
+`assignment_end_date`（YYYY-MM-DD，用户日期含两端）。三种选择互斥。
+当前年/月按 YTD/MTD，截至请求时刻；过去期间按完整自然期间选批次，均使用
+Asia/Shanghai。期间只选择指派生效批次，持有/已售状态来自本次固定账本，
+价格为当前合格观察。新期间查询固定 `status=all`，不能与显式 `as_of_ms`
+同时使用。旧无期间参数的通用 assigned-stock 和历史查询保持原语义。
+
+示例（读取会请求合格现价与汇率，不写账本或估值缓存）：
+
+```bash
+./om tools run --tool option_positions_read --input-json \
+  '{"config_key":"us","action":"assigned-stock","assignment_year":2026}'
+```
+
+消息命令支持 `/assigned-stock month=2026-11`、`year=2026`、
+`from=2026-10-01 to=2026-10-31`，可附账户、标的和 `no-refresh`。
+`no-refresh` 或注入冻结报价时不联网取得报价/FX；缺失 FX 保留原币结果。
+
+新结果版本为 `option_positions_read.assignment_period.v1`。`summary.by_currency`
+分别提供正股剩余浮盈亏与余股抵扣 Put 净权利金后的盈亏，`cny_estimate`
+独立保留汇率证据及覆盖；账户/标的/批次下钻沿用相同未展示舍入的 Decimal
+金额。完全售出且数量无冲突的批次两项剩余盈亏为零，不需现价。已售已实现
+及对应 Put 净额单列，组合其他腿、CC 收益及期间现金流不叠加。
+
+查询经 ledger owner 的同连接短只读事务取得有效交易和股票卖出事实，再释放
+事务取价。trade intake owner 只读发现未入账股票卖出及账户未归属状态；不能从
+没有 sale allocation 推断真实零卖出。已知归属冲突或相关来源不可读时，受影响
+实际数量与盈亏为 null；`book_shares_sold/book_shares_remaining` 只表示账本事实。
+仅缺历史全量证明而无已知冲突时，可返回明确 `basis=ledger`、`coverage=partial`
+的估算，并列 `provisional_lot_ids`。原始成交与人工确认事件不能凭相近时间自动
+配对。未知与完整零匹配分开，Bot 必须引用完整 owner 汇总，不对截断明细求和。

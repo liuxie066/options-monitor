@@ -974,6 +974,7 @@ def assigned_stock_allocation_row(
         "close_type": allocation.close_type,
         "contracts_closed": allocation.contracts,
         "realized_pnl_gross": float(allocation.realized_pnl_gross),
+        "realized_pnl_gross_exact": format(allocation.realized_pnl_gross, "f"),
         "realized_pnl_net": (
             None
             if allocation.realized_pnl_net is None
@@ -1516,6 +1517,9 @@ def project_assigned_stock_lifecycle(
             "stock_principal_basis_total": assignment_notional,
             "basis_policy": "assignment_stock_cost_basis",
             "option_premium_attribution": option_premium_attribution,
+            "option_premium_attribution_exact": format(sum(
+                (Decimal(str(row["realized_pnl_gross_exact"])) for row in option_rows), Decimal(0)
+            ), "f") if all("realized_pnl_gross_exact" in row for row in option_rows) else None,
             "stock_sale_cash_in_net": 0.0,
             "stock_sale_cash_in_gross": 0.0,
             "stock_sale_fees": 0.0,
@@ -2097,6 +2101,7 @@ def _assigned_stock_row_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
 
 __all__ = [
     "assigned_stock_allocation_row",
+    "assigned_put_remaining_economics",
     "assigned_stock_event_time_ms",
     "assigned_stock_fee_fact",
     "assigned_stock_lot_to_position_lot",
@@ -2104,3 +2109,69 @@ __all__ = [
     "assigned_stock_trade_event_row",
     "project_assigned_stock_lifecycle",
 ]
+
+
+def assigned_put_remaining_economics(
+    lot: Mapping[str, Any], *, price: Any = None, quantity_usable: bool = True,
+) -> dict[str, Any]:
+    """Value only this Put's stock and premium, without lifecycle/CC cash.
+
+    The application owns quantity and quote qualification. Missing actual fees
+    suppress only the amounts that depend on them; book values remain upstream.
+    """
+    opened = int(lot.get("shares_opened") or 0)
+    remaining = int(lot.get("shares_remaining") or 0)
+    sold = int(lot.get("shares_sold") or 0)
+    if opened <= 0 or remaining < 0 or sold < 0 or remaining + sold != opened:
+        raise ValueError("assigned-stock quantities do not conserve")
+    facts = list(lot.get("fee_evidence") or [])
+    by_component = {str(f.get("component")): f for f in facts}
+    reasons: list[str] = []
+    stock_fact = by_component.get("assignment_stock_fee", {})
+    stock_actual = stock_fact.get("basis") == "actual"
+    put_facts = [by_component.get(k, {}) for k in ("put_open_option_fee", "put_assignment_option_fee")]
+    put_actual = all(f.get("basis") == "actual" for f in put_facts)
+    cost = to_decimal(lot.get("stock_cost_basis_total"), field_name="stock_cost_basis_total")
+    remaining_cost = cost * Decimal(remaining) / Decimal(opened)
+    premium_raw = lot.get("option_premium_attribution_exact")
+    if premium_raw is None:
+        put_actual = False
+        reasons.append("exact_put_premium_unavailable")
+    premium = to_decimal(premium_raw, field_name="put_premium") if premium_raw is not None else None
+    net = (premium - sum((to_decimal(f.get("amount"), field_name="put_fee") for f in put_facts), Decimal(0))) if put_actual and premium is not None else None
+    remaining_net = net * Decimal(remaining) / Decimal(opened) if net is not None else None
+    sold_net = net - remaining_net if net is not None else None
+    spot = price if price is not None else lot.get("spot")
+    stock_pnl = None
+    if not quantity_usable:
+        reasons.append("stock_quantity_unverified")
+    elif remaining == 0:
+        stock_pnl = Decimal(0)
+        remaining_net = Decimal(0)
+    elif not stock_actual:
+        reasons.append("actual_stock_settlement_fee_missing")
+    elif spot is None:
+        reasons.append("qualified_quote_missing")
+    else:
+        stock_pnl = Decimal(remaining) * to_decimal(spot, field_name="price") - remaining_cost
+    if not put_actual and remaining > 0:
+        reasons.append("actual_put_fee_missing")
+    with_put = stock_pnl + remaining_net if stock_pnl is not None and remaining_net is not None else None
+    sale_facts = [f for f in facts if "sale" in str(f.get("component"))]
+    sold_actual = all(f.get("basis") == "actual" for f in sale_facts) and (sold == 0 or bool(sale_facts))
+    realized = (Decimal(0) if sold == 0 else
+                to_decimal(lot.get("assigned_stock_realized_pnl", 0), field_name="realized")
+                if sold_actual and stock_actual else None)
+    def text(value: Decimal | None) -> str | None:
+        return format(value, "f") if value is not None else None
+    return {
+        "stock_unrealized_pnl": text(stock_pnl),
+        "remaining_pnl_with_put": text(with_put),
+        "remaining_stock_cost_basis_exact": text(remaining_cost),
+        "put_net_premium": text(net),
+        "allocated_put_net_premium_remaining": text(remaining_net if quantity_usable else None),
+        "allocated_put_net_premium_sold": text(sold_net),
+        "stock_realized_pnl": text(realized),
+        "sold_pnl_with_put": text(realized + sold_net) if realized is not None and sold_net is not None else None,
+        "reasons": reasons,
+    }

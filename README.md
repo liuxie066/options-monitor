@@ -29,6 +29,7 @@ OM 面向自己做交易决策的期权投资者，支持富途账户及长桥�
 | 候选解释与决策历史 | 解释已有扫描的排序、未入选原因，查询明确关联的结果 | [工具参考](docs/TOOL_REFERENCE.md)、[决策历史](docs/DECISION_HISTORY.md) |
 | 期权账本 | 查询开仓、平仓、指派和行权记录；写入与修复需要预览和确认 | [账本架构](docs/LEDGER_ARCHITECTURE.md)、[修账指南](docs/OPTION_POSITIONS_REPAIR.md) |
 | 期权现金流与绩效 | 查询期间期权净现金流及开仓批次现金结果；两种口径不能相加，也不能当作包含股票盈亏的账户总回报 | [绩效说明](docs/OPTION_PERFORMANCE_DESIGN.md) |
+| Put 接货当前盈亏 | 按指派年/月或日期选择批次，分别查看余股正股盈亏和含 Put 净权利金的盈亏；原币与人民币估算保留数据缺口，已售部分单列 | [接货收益](docs/ASSIGNED_STOCK_RETURN_DESIGN.md#put-指派期间当前估值查询) |
 | 指派压力测试 | 模拟所选账户仅卖出 Put、仅卖出 Call 或全部未平仓卖出期权被指派（默认全部），查看资产、资金覆盖和潜在负债；不执行实际交易，也不修改账本 | [指派情景](docs/PORTFOLIO_ASSIGNMENT_SCENARIO_DESIGN.md) |
 | 离线研究与归档 | 收集证据、复核已有样本，支持独立名单范围、日终及附属资料持续采集和压缩交付；写入归档需显式授权 | [研究采集](docs/RESEARCH_WATCHLIST_SCOPE.md)、[Agent Handbook](https://github.com/liuxie066/options-monitor/blob/main/docs/AGENT_WIKI.md) |
 

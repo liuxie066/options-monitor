@@ -226,14 +226,28 @@ def _parse_assigned_stock(command: str, args: list[str], *, accounts: frozenset[
     symbol: str | None = None
     lot_id: str | None = None
     refresh_quotes = True
+    period: dict[str, object] = {}
+    explicit_status = False
     for arg in args:
         normalized = arg.lower()
-        if normalized in accounts:
+        if any(normalized.startswith(prefix) for prefix in ("year=", "month=", "from=", "to=")):
+            key, value = arg.split("=", 1)
+            field = {"year": "assignment_year", "month": "assignment_month", "from": "assignment_start_date", "to": "assignment_end_date"}[key.lower()]
+            if field in period:
+                raise _bad_arg(command, arg, "期间参数不能重复。")
+            if field == "assignment_year":
+                if not value.isdigit():
+                    raise _bad_arg(command, arg, "year 必须为年份整数。")
+                period[field] = int(value)
+            else:
+                period[field] = value
+        elif normalized in accounts:
             if account is not None and account != normalized:
                 raise _bad_arg(command, arg, "只能指定一个已配置账户。")
             account = normalized
         elif normalized in _ASSIGNED_STOCK_STATUS_TOKENS:
             status = _ASSIGNED_STOCK_STATUS_TOKENS[normalized]
+            explicit_status = True
         elif normalized in {"no-refresh", "no_refresh", "offline"}:
             refresh_quotes = False
         elif normalized.startswith("stock_lot_id="):
@@ -244,11 +258,16 @@ def _parse_assigned_stock(command: str, args: list[str], *, accounts: frozenset[
             raise _bad_arg(
                 command,
                 arg,
-                "支持：/assigned-stock [账户|all] [symbol] [open|partially_sold|closed|all] [no-refresh]。",
+                "支持：/assigned-stock [账户|all] [symbol] [open|partially_sold|closed|all] [no-refresh] [year=YYYY|month=YYYY-MM|from=YYYY-MM-DD to=YYYY-MM-DD]。",
             )
+    if period:
+        if explicit_status and status != "all":
+            raise _bad_arg(command, status, "期间查询包含全部状态，请使用 all。")
+        status = "all"
     payload: dict[str, object] = {
         "assigned_stock_status": status,
         "refresh_quotes": refresh_quotes,
+        **period,
     }
     if account:
         payload["account"] = account

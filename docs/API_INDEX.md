@@ -206,3 +206,12 @@ restore 同样输出安全阶段和失败码；共享二进制传输内部未细
 ### Narrow ledger snapshot queries
 
 Public read-only entry: src/application/ledger/query_api.py, exporting the existing open_position_query_ledger_from_data_config and list_canonical_position_lot_snapshots. The full ledger.api re-exports the same functions. Cash evidence consumers use the narrow facade to avoid importing Wheel and attribution workflows back into portfolio context; query semantics and storage ownership remain unchanged.
+
+### Put 指派期间当前估值
+
+现有 `option_positions_read` 的 assignment_year / assignment_month / 日期范围选择器
+由 `src/application/positions/assignment_period_report.py::build_assignment_period_report`
+组装；ledger 只读快照经 `ledger.api.read_assigned_stock_query_inputs`，未入账卖出观察
+经 `trades.inbox.read_stock_sell_observations`。纯金额 owner 为
+`domain/domain/assigned_stock.py::assigned_put_remaining_economics`。原币/CNY、book 与
+核实数量、null/零及来源覆盖契约见 [接货收益](ASSIGNED_STOCK_RETURN_DESIGN.md#put-指派期间当前估值查询)。

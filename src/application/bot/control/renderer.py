@@ -537,7 +537,58 @@ def _render_positions(data: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _render_assignment_period(data: dict[str, Any]) -> str:
+    """Render owner totals verbatim; never sum a possibly truncated detail page."""
+    query = _dict(data.get("query"))
+    summary = _dict(data.get("summary"))
+    coverage = _dict(data.get("coverage"))
+    lines = ["Put 指派批次当前盈亏（账本口径）"]
+    if query:
+        period = query.get("assignment_period") or query.get("period") or query
+        lines.append(f"指派期间（Asia/Shanghai）：{period}")
+    lines.append(f"覆盖状态：{_value(coverage.get('status'))}；历史来源未完全核实时仅为账本估算。")
+
+    def metric_text(metric: Any) -> str:
+        if isinstance(metric, dict):
+            amount = metric.get("value")
+            state = metric.get("coverage") or metric.get("status")
+            return f"{amount if amount is not None else '待核实/不可用'}（{state or '见覆盖说明'}）"
+        return str(metric) if metric is not None else "待核实/不可用"
+
+    currencies = summary.get("by_currency") or {}
+    items = currencies.items() if isinstance(currencies, dict) else (
+        (item.get("currency"), item) for item in currencies if isinstance(item, dict)
+    )
+    for currency, raw in items:
+        row = _dict(raw)
+        stock = row.get("stock_unrealized_pnl")
+        put = row.get("remaining_pnl_with_put")
+        lines.append(f"{currency}：正股 {metric_text(stock)}；含 Put 净权利金 {metric_text(put)}")
+    cny = _dict(summary.get("cny_estimate"))
+    cny_metrics = _dict(cny.get("metrics")) or cny
+    if cny:
+        lines.append(f"人民币估算：正股 {metric_text(cny_metrics.get('stock_unrealized_pnl'))}；含 Put {metric_text(cny_metrics.get('remaining_pnl_with_put'))}")
+    rows = _list(data.get("rows"))
+    lines.append(f"本页批次：{len(rows)}；完整合计以上述 owner 汇总为准。")
+    for raw in rows:
+        row = _dict(raw)
+        lines.append(
+            f"{_value(row.get('account'))} {_value(row.get('symbol'))} {_value(row.get('stock_lot_id'))}："
+            f"接货 {_value(row.get('shares_opened'))}股，账本已售 {_value(row.get('book_shares_sold'))}股，"
+            f"账本剩余 {_value(row.get('book_shares_remaining'))}股；"
+            f"数量状态 {_value(row.get('quantity_status'))}；"
+            f"正股 {metric_text(row.get('stock_unrealized_pnl'))}，"
+            f"含Put {metric_text(row.get('remaining_pnl_with_put'))}；"
+            f"原因 {row.get('reasons') or []}"
+        )
+    if data.get("scope_reviews") or data.get("unresolved_stock_sales"):
+        lines.append("存在未归属/来源缺口，受影响指标以空值及覆盖说明为准。")
+    return "\n".join(lines)
+
+
 def _render_assigned_stock_lifecycle(data: dict[str, Any]) -> str:
+    if isinstance(data.get("summary"), dict) and isinstance(data.get("query"), dict):
+        return _render_assignment_period(data)
     rows = _list(data.get("rows") or data.get("assigned_stock_lots"))
     filters = _dict(data.get("filters"))
     source_label = str(data.get("source_label") or "OM 本地 SQLite assigned_stock_events + trade_events").strip()

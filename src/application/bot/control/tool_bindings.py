@@ -227,7 +227,8 @@ _EXTRA_TOOL_BINDINGS: dict[str, tuple[BotToolBinding, ...]] = {
             tool_name="option_positions_read",
             commands=("/assigned-stock",),
             display_name="指派正股",
-            arguments=("account", "symbol", "assigned_stock_status", "stock_lot_id", "refresh_quotes"),
+            arguments=("account", "symbol", "assigned_stock_status", "stock_lot_id", "refresh_quotes",
+                       "assignment_year", "assignment_month", "assignment_start_date", "assignment_end_date"),
             examples=(
                 "指派正股持仓盈亏",
                 "查看 lx 被指派正股浮盈亏",
