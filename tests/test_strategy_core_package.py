@@ -92,7 +92,11 @@ for c in baseline['cases']:
         result = calculate_metrics(c['row'], mode=c['mode'], avg_cost=c['avg_cost'],
             now_utc=datetime.fromisoformat(c['now_utc']), exchange_rates=ExchangeRates(**c['rates']))
     except CandidateCalculationError as exc:
-        assert exc.to_payload() == c['error']
+        expected = deepcopy(c['error'])
+        # Keep the historical fixture and check the additive diagnostic exactly.
+        if c['name'].endswith('-stale'):
+            expected['metric_value']['reason_code'] = 'option_snapshot_stale'
+        assert exc.to_payload() == expected
     else:
         expected_metrics = {**c['metrics'], **c['cny_fields']}
         if c['mode'] == 'call':

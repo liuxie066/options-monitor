@@ -104,6 +104,42 @@ def test_snapshot_normal_skips_and_legacy_status_validation(tmp_path, reason, ex
     validate_wheel_candidate_snapshot(legacy, expected_run_id="run-1", expected_account="lx")
 
 
+@pytest.mark.parametrize("field,value,reason,label", [
+    ("snapshot_received_at_utc", None, "option_snapshot_receipt_missing", "期权报价接收时间缺失或无效"),
+    ("snapshot_received_at_utc", "2026-04-01T15:00:01+00:00", "option_snapshot_receipt_in_future", "期权报价接收时间晚于决策时间"),
+    ("snapshot_received_at_utc", "2026-04-01T14:54:59+00:00", "option_snapshot_stale", "期权报价过期"),
+    ("spot_observed_at_utc", None, "underlier_update_time_missing_or_invalid", "正股行情时间缺失或无效"),
+    ("spot_observed_at_utc", "2026-04-01T15:00:01+00:00", "underlier_update_time_in_future", "正股行情时间晚于决策时间"),
+    ("spot_observed_at_utc", "2026-04-01T14:54:59+00:00", "underlier_quote_stale", "正股行情过期"),
+])
+def test_decision_freshness_reason_survives_snapshot_and_brief(tmp_path, field, value, reason, label):
+    from conftest import phase2_opening_row
+    from domain.domain.engine.candidate_engine import CandidateCalculationError, validate_opening_contract_evidence
+    from src.application.candidate_scanning import calculation_rejection, candidate_diagnostics_from_decisions
+    from src.application.daily_decision_brief_renderer import render_fixed_report_text
+
+    now = "2026-04-01T15:00:00+00:00"
+    row = phase2_opening_row({"symbol": "NVDA", "option_type": "put", "multiplier": 100,
+        "contract_symbol": "NVDA-PUT-100", "expiration": "2026-05-06",
+        "snapshot_received_at_utc": now, "spot_observed_at_utc": now, field: value})
+    with pytest.raises(CandidateCalculationError) as caught:
+        validate_opening_contract_evidence(row, mode="put", now_utc=now)
+    assert caught.value.reason == "evidence_unavailable"
+    assert caught.value.metric_value["reason_code"] == reason
+    decision = {"accepted": False, "normalized_input": row,
+                "rejects": [calculation_rejection(row, caught.value.to_payload())]}
+    diagnostics = candidate_diagnostics_from_decisions([decision, decision])
+    assert diagnostics == [{"outcome": "unavailable", "reason_code": reason,
+                            "expiration": "2026-05-06", "contract_count": 1}]
+    batch = {**_batch(), "candidate_diagnostics": diagnostics, "candidate_evidence_reason": "partial_data"}
+    _seal(tmp_path, scope_results=[_scope()], batches=[batch])
+    loaded = load_wheel_candidate_snapshot(base=tmp_path, run_id="run-1", account="lx")
+    assert loaded["batches"][0]["candidate_diagnostics"] == diagnostics
+    message = render_fixed_report_text({"account": "lx", "market": "US", "wheel_batches": loaded["batches"]})
+    assert label in message
+    assert "evidence_unavailable" not in message
+
+
 def test_snapshot_rejects_invalid_diagnostic_count(tmp_path):
     batch = _batch()
     batch["candidate_diagnostics"] = [{"outcome": "unavailable", "reason_code": "ask_missing_or_invalid",

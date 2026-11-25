@@ -31,7 +31,11 @@ def test_independent_old_source_baseline(case):
     if "error" in case:
         with pytest.raises(CandidateCalculationError) as exc:
             calculate_metrics(case["row"], **kwargs)
-        assert exc.value.to_payload() == case["error"]
+        expected = deepcopy(case["error"])
+        # Preserve the frozen oracle while requiring the new exact reason.
+        if case["name"].endswith("-stale"):
+            expected["metric_value"]["reason_code"] = "option_snapshot_stale"
+        assert exc.value.to_payload() == expected
     else:
         metrics = calculate_metrics(case["row"], **kwargs)
         if case["mode"] == "call":

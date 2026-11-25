@@ -25,7 +25,11 @@ def test_original_metric_and_policy_contract(case):
     if "error" in case:
         with pytest.raises(CandidateCalculationError) as exc:
             calculate_opening_candidate_metrics(raw, **kwargs)
-        assert exc.value.to_payload() == case["error"]
+        expected = deepcopy(case["error"])
+        # Preserve the frozen oracle; explicitly verify the added diagnostic.
+        if case["name"].endswith("-stale"):
+            expected["metric_value"]["reason_code"] = "option_snapshot_stale"
+        assert exc.value.to_payload() == expected
         return
     metrics = calculate_opening_candidate_metrics(raw, **kwargs)
     if case["mode"] == "call":
