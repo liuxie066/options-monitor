@@ -249,6 +249,8 @@ def test_three_contract_fill_can_be_confirmed_across_three_stock_branches(tmp_pa
                 if row["execution_key"] == call["execution_key"])["status"] == "linked"
     from src.application.wheel.read_model import build_wheel_read_model
     branches = build_wheel_read_model(repo, "lx", int(time.time() * 1000) + 1000, market="hk")["wheel_branches"]
+    assert all(row["phase"] == ("option_open" if row["wheel_branch_id"] in chosen else "ready")
+               for row in branches)
     assert {row["wheel_branch_id"]: row["active_option_committed_shares"] for row in branches} == {
         row["wheel_branch_id"]: (500 if row["wheel_branch_id"] in chosen else 0) for row in branches}
     close_at = int(time.time() * 1000) + 10_000
@@ -472,3 +474,36 @@ def test_brief_attribution_keeps_later_void_during_fill_time_replay(tmp_path):
     assert error is None
     assert len(pending) == 1 and pending[0]["symbol"] == "3690.HK"
     assert repo.list_trade_events() == before
+
+
+@pytest.mark.parametrize("call_contracts", [1, 3])
+def test_manual_ordinary_call_releases_wheel_occupancy(tmp_path, monkeypatch, call_contracts):
+    from src.application.wheel.read_model import build_wheel_read_model
+    repo, config, _ = _meituan_repo(tmp_path, call_contracts=call_contracts)
+    monkeypatch.setattr(ledger_attribution, "trade_attribution_capacity_check",
+                        lambda **_: {"status": "available", "reason_codes": [], "evidence_complete": True})
+    now = int(time.time() * 1000) + 1000
+    before = build_wheel_read_model(repo, "lx", now, market="hk")
+    assert {b["phase"] for b in before["wheel_branches"]} == {"linkage_unresolved"}
+    evidence = {"complete": True, "exposures": []}
+    rows = read_trade_attribution_snapshot(repo, account="lx", market="hk")
+    view = build_trade_attribution_view(rows, config=config, account="lx", market="hk",
+        now_ms=now, combo_evidence=evidence)
+    call = next(r for r in view["rows"] if r["contract_key"]["option_type"] == "call")
+    result = apply_trade_attribution(repo, account="lx", market="hk", config=config,
+        execution_key=call["execution_key"], candidate_id="ordinary", expected_input_hash=call["input_hash"],
+        request_id="manual:ordinary-multi", actor="fixture:operator", combo_evidence=evidence,
+        capacity_observation={}, combo_mode="confirm", manual=True)
+    assert result["status"] == "ordinary" and result["origin"] == "manual"
+    after = build_wheel_read_model(repo, "lx", int(time.time() * 1000) + 1000, market="hk")
+    assert {b["phase"] for b in after["wheel_branches"]} == {"ready"}
+    assert after["linkage_candidates"] == []
+
+    from dataclasses import replace
+    proof = next(TradeEvent.from_dict(row) for row in repo.list_trade_events()
+                 if row["event_type"] == "adjust" and row["source"] == "trade_attribution")
+    void_time = int(time.time() * 1000) + 2000
+    persist_trade_event_objects_atomically(repo, [replace(proof, event_id="void-ordinary", event_type="void",
+        event_time_ms=void_time, target_lot_id=None, target_event_id=proof.event_id, raw_payload={})])
+    restored = build_wheel_read_model(repo, "lx", void_time + 1, market="hk")
+    assert {b["phase"] for b in restored["wheel_branches"]} == {"linkage_unresolved"}

@@ -292,8 +292,12 @@ trade intake、生命周期核对和 SQLite option-position ledger 形成权威�
 - Broker 成交数据不承载 OM 内部 `stock_lot_id`。该值由本地归属确认生成，
   不得伪装成 broker 成交字段。
 - 无法唯一证明 `stock_lot_id` 的 Short Call 仍计入账户+标的级覆盖占用，但不计入任一
-  Wheel 生命周期；对应批次保留 `linkage_unresolved`，不猜测归属。Call 扫描使用账户净覆盖额度，
-  归属待确认不单独阻断扫描；同账户同标的的多个分支共用净额度，最终分配不得重复使用剩余股份。
+  Wheel 生命周期；对应批次保留 `linkage_unresolved`，不猜测归属，并暂停该批次的 Call 候选生成、
+  最终额度分配和新意图创建。账户净覆盖额度不能证明某个低成本批次仍未被占用；归属明确后才恢复
+  按批次成本推荐。同账户同标的的多个分支共用净额度，最终分配不得重复使用剩余股份。
+  多张 Call 即使无法整笔放入单个批次，只要其中一张可能占用该批次，就须保留待确认状态；
+  整笔关联候选仍须满足完整数量，不据此猜测拆分。已有有效人工普通 CC 确认的成交不再阻断 Wheel，
+  但仍计入账户覆盖占用；仅有 CC 标签不等同于确认，确认被撤销后重新评估。
 - Combo 和 Wheel 可各自展示同一来源事件的生命周期上下文，但账户或投资组合汇总必须按
   底层成交事件去重，不得重复计入同一 Funding Put 权利金或正股损益。
 
@@ -904,7 +908,8 @@ claim 并按当前事实重算 phase。Short Call/Put 买入平仓或到期未�
 净收益并释放对应股票/现金 claim，branch 再回到 `ready`、`residual_capacity` 或 `data_unavailable`。
 partial assignment 对实际转换量创建 pending child；父分支若仍有 open option 则保持 `option_open`，否则按
 剩余容量重算。full assignment 使父分支 `converted`。无法唯一关联的真实仓位进入
-`linkage_unresolved`，继续计入物理容量。Call 按账户净覆盖额度扫描，Put 保持原归属门禁。
+`linkage_unresolved`，继续计入物理容量，但该分支不生成新候选、不获分配、不创建新意图；
+Call 和 Put 均须先明确归属。旧候选也必须通过当前分支状态校验。
 Call 仍受本分支未覆盖且未预留股数及合约乘数约束；账户额度未知时仅保留
 `capacity_status=unverified` 的观察候选，共享分配器不授予可执行数量。
 观察候选不计入完成扫描的候选数；封存快照和简报保留额度未核实状态及独立缺口提醒。

@@ -18,8 +18,8 @@ from tests.test_wheel_candidate_snapshot import _dependencies
 from tests.test_wheel_scanning import AS_OF, _call_row, _converter, _policy
 
 
-@pytest.mark.parametrize('shares,expected', [(200, 1), (100, 0)])
-def test_ledger_unresolved_call_scans_account_remainder_without_rewriting_events(tmp_path, shares, expected):
+@pytest.mark.parametrize('shares,expected', [(200, 0), (100, 0)])
+def test_ledger_unresolved_call_blocks_recommendation_without_rewriting_events(tmp_path, shares, expected):
     from tests.test_wheel_workflows import _wheel_repo, _open_unlinked_call
     repo, _ = _wheel_repo(tmp_path)
     _open_unlinked_call(repo, event_time_ms=2500)
@@ -39,6 +39,62 @@ def test_ledger_unresolved_call_scans_account_remainder_without_rewriting_events
     assert sum(row['granted_contracts'] for row in captured['batches']) == expected, captured
     assert (repo.list_trade_events(), repo.list_wheel_events(account='lx')) == before
     assert not build_wheel_read_model(repo, 'sy', 3000, market='us')['wheel_branches']
+
+
+def test_multi_call_occupancy_uses_real_ledger_before_batch_cost_scan(tmp_path):
+    from tests.test_wheel_workflows import _trusted_multiplier_payload
+    from src.application.ledger.assigned_stock_projection import build_wheel_read_model_from_rows
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    _open_activation(repo)
+    for index, price in enumerate([110, 97.45, 97.45, 97.45]):
+        opened, assigned = (100, 200) if index == 0 else (1000 + index, 2000 + index)
+        lot_id = f"put-{index}"
+        key = ContractKey.from_values(broker="富途", account="lx", underlying_symbol="NVDA",
+            option_type="put", strike=price, expiration_ymd="2026-03-20")
+        persist_trade_event_objects_atomically(repo, [
+            TradeEvent(event_id=lot_id, event_type="open", event_time_ms=opened, contract_key=key,
+                contracts=1, price=2, multiplier=100, currency="USD", source="test", lot_id=lot_id,
+                raw_payload=_trusted_multiplier_payload(lot_id, side="sell")),
+            TradeEvent(event_id=f"assign-{index}", event_type="assignment", event_time_ms=assigned,
+                contract_key=key, contracts=1, price=0, multiplier=100, currency="USD", source="test",
+                target_lot_id=lot_id, raw_payload={"side": "buy", "target_lot_id": lot_id,
+                    "stock_settlement": {"side": "buy", "shares": 100, "price": price, "fees": 0,
+                        "currency": "USD", "fee_provenance": {"basis": "actual", "source": "test"}}}),
+        ])
+    persist_trade_event_objects_atomically(repo, [TradeEvent(
+        event_id="three-calls", event_type="open", event_time_ms=2500,
+        contract_key=ContractKey.from_values(broker="富途", account="lx", underlying_symbol="NVDA",
+            option_type="call", strike=105, expiration_ymd="2026-05-06"),
+        contracts=3, price=2, multiplier=100, currency="USD", source="test", lot_id="three-calls",
+        raw_payload=_trusted_multiplier_payload("three-calls", side="sell", strategy="cc"),
+    )])
+    before = (repo.list_trade_events(), repo.list_wheel_events(account="lx"))
+    model = build_wheel_read_model(repo, "lx", 3000, market="us",
+        monitoring_readiness={"monitoring_gate": "enabled"})
+    assert len(model["wheel_branches"]) == 3
+    assert {b["shares_remaining"] for b in model["wheel_branches"]} == {100}
+    assert {b["phase"] for b in model["wheel_branches"]} == {"linkage_unresolved"}
+    # A 300-share Call must not become a whole-lot linkage choice for a 100-share batch.
+    assert model["linkage_candidates"] == []
+    historical = build_wheel_read_model_from_rows(repo.read_lifecycle_account_rows(account="lx"),
+        account="lx", as_of_ms=3000, market="us", _historical=True,
+        monitoring_readiness={"monitoring_gate": "enabled"})
+    assert historical["wheel_branches"] == model["wheel_branches"]
+    facts = build_shared_coverage_facts(account="lx", wheel_read_model=model,
+        portfolio_context=cash_portfolio({"stocks_by_symbol": {"NVDA": {"shares": 400, "can_sell_qty": 400}}}),
+        option_context={"decision_snapshot_status": "trusted", "locked_shares_status": "available",
+            "locked_shares_by_symbol": {"NVDA": 300}})
+    assert facts[0]["shares_available_for_cover"] == 100
+    scan = run_wheel_call_scan(model, _policy(),
+        {"frames": {"NVDA": pd.DataFrame([phase2_opening_row(_call_row(strike=100.5, spot=85.6))])}},
+        {f["symbol"]: f for f in facts}, {"exchange_rate_converter": _converter()},
+        decision_time_ms=int(AS_OF.timestamp() * 1000))
+    final = finalize_wheel_capacity(account="lx", wheel_read_model=model, wheel_scan=scan,
+        opening_call_candidates=[], coverage_facts=facts)
+    assert sum(b["final_candidate"] is not None for b in final["batches"]) == 0
+    assert sum(b["granted_contracts"] for b in final["batches"]) == 0
+    assert (repo.list_trade_events(), repo.list_wheel_events(account="lx")) == before
 
 
 @pytest.mark.parametrize('symbol_count', [170, 200])

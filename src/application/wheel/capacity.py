@@ -400,6 +400,8 @@ def build_shared_coverage_facts(
 
 
 def _call_intent_wait_reason(batch: Mapping[str, Any]) -> str | None:
+    if batch.get("phase") == "linkage_unresolved":
+        return "linkage_unresolved"
     if batch.get("active_call_lot_ids") or batch.get("active_option_lot_ids"):
         return "wheel_call_open"
     if batch.get("active_intent_ids"):
