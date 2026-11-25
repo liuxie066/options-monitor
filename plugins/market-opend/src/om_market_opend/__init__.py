@@ -26,6 +26,10 @@ class OpenDMarketDataProvider:
         from src.application.opend_market_snapshot_fetching import get_underlier_observation
         return get_underlier_observation(*args, **kwargs)
 
+    def get_stock_valuation_quote(self, *args, **kwargs):
+        from src.application.opend_market_snapshot_fetching import get_stock_valuation_quote
+        return get_stock_valuation_quote(*args, **kwargs)
+
     def get_stock_spot(self, *args, **kwargs):
         from src.application.opend_market_snapshot_fetching import get_spot_opend
         return get_spot_opend(*args, **kwargs)

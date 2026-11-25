@@ -58,6 +58,7 @@ def _base_projection(
     *,
     assigned_stock_events: list[dict[str, Any]] | None = None,
     quote: float | None = 102,
+    quote_status: str | None = None,
     stock_holdings: list[dict[str, Any]] | None = None,
     extra_events: list[dict[str, Any]] | None = None,
     extra_option_lots: list[dict[str, Any]] | None = None,
@@ -140,6 +141,8 @@ def _base_projection(
         *(extra_allocations or []),
     ]
     quotes = [] if quote is None else [{"symbol": "NVDA", "spot": quote, "quote_time_ms": _ms("2026-06-30T16:00:00")}]
+    if quotes and quote_status:
+        quotes[0]["quote_status"] = quote_status
     return project_assigned_stock_lifecycle(
         trade_events,
         assignment_option_rows=allocations,
@@ -746,3 +749,9 @@ def test_assignment_cost_uses_decimal_settlement_price_before_rounding() -> None
     lot = report["assigned_stock_lots"][0]
     assert lot["stock_cost_basis_total"] == "10000"
     assert assigned_stock_lot_to_position_lot(lot).cost_basis_total == Decimal("10000")
+
+
+def test_legacy_assigned_stock_view_preserves_closed_market_price_status():
+    row = _base_projection(quote=102, quote_status='closed_market_carry')['assigned_stock_lots'][0]
+    assert row['quote_status'] == 'closed_market_carry'
+    assert row['assigned_stock_unrealized_pnl'] is not None

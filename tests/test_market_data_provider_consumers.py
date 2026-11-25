@@ -11,6 +11,11 @@ from test_market_data_provider import RecordingProvider, install, no_live_io  # 
 from test_option_candidates_contract import NOW
 
 
+class _Observation(SimpleNamespace):
+    def to_dict(self):
+        return vars(self)
+
+
 class ConsumerProvider(RecordingProvider):
     def __init__(self, *, complete=True, stale=True, price=120):
         super().__init__(None)
@@ -24,7 +29,7 @@ class ConsumerProvider(RecordingProvider):
         assert gateway is self.gateway
         self.calls.append(("underliers", kwargs))
         age = 86400 if self.stale else 10
-        return {code: SimpleNamespace(
+        return {code: _Observation(
             code=code, market="US", sec_status="NORMAL", suspension=False,
             status="market_closed" if self.stale else "ready", reason_code=None,
             last_price=self.price, age_seconds=age,
@@ -42,6 +47,24 @@ class ConsumerProvider(RecordingProvider):
         assert gateway is self.gateway
         self.calls.append(("state", list(codes)))
         return [{"code": code, "market_state": "MORNING"} for code in codes]
+
+    def get_stock_valuation_quote(self, gateway, *, symbol, underlier, observation, now_ms, **kwargs):
+        from zoneinfo import ZoneInfo
+        from src.application.opening_quote_evidence import normalize_underlier_observation
+        self.calls.append(("valuation", kwargs))
+        if observation.status == 'market_closed':
+            raise ValueError('fixture_completed_close_missing')
+        at = datetime.fromtimestamp(now_ms() / 1000, timezone.utc)
+        observed = normalize_underlier_observation(
+            code=underlier.code, market=underlier.market,
+            snapshot_row={'code': underlier.code, 'last_price': observation.last_price,
+                          'update_time': (at - timedelta(seconds=10)).astimezone(ZoneInfo('America/New_York')).strftime('%Y-%m-%d %H:%M:%S'),
+                          'sec_status': 'NORMAL', 'suspension': False},
+            market_state_row={'code': underlier.code, 'market_state': 'MORNING'}, now_utc=at)
+        return {'symbol': symbol, 'spot': observation.last_price, 'quote_source': 'fixture_realtime',
+                'quote_time_ms': int((at - timedelta(seconds=10)).timestamp() * 1000),
+                'quote_observed_at_ms': now_ms(), 'quote_status': 'ready',
+                'quote_observation': observed.to_dict()}
 
     def get_stock_spot(self, gateway, code, **kwargs):
         assert gateway is self.gateway
@@ -91,7 +114,7 @@ def test_scenario_actual_price_reads_use_provider_and_keep_freshness(
     observation_args = provider.calls[2][1]
     assert observation_args["market"] == "US" and observation_args["base_dir"] == tmp_path
     assert observation_args["snapshot_batch_size"] > 0 and observation_args["snapshot_limit"].max_calls > 0
-    if price is None:
+    if price is None or stale:
         assert quotes == [] and any("quote unavailable" in warning for warning in warnings)
         return
     quote = quotes[0]
@@ -109,24 +132,28 @@ def test_scenario_actual_price_reads_use_provider_and_keep_freshness(
 
 @pytest.mark.parametrize("price", [123.5, None])
 def test_assigned_stock_public_refresh_uses_provider_and_keeps_limits(monkeypatch, tmp_path, price):
-    provider = install(monkeypatch, ConsumerProvider(price=price))
+    provider = install(monkeypatch, ConsumerProvider(price=price, stale=False))
     result = assigned.refresh_assigned_stock_quote_snapshots(
         [{"symbol": "NVDA", "shares_remaining": 100}],
         cfg={"market_data": {"provider": "fixture"}}, base_dir=tmp_path,
         state_base_dir=tmp_path / "state", now_ms=lambda: 1780000000000,
     )
-    assert [name for name, _ in provider.calls] == ["route", "open", "spot"]
-    code, args = provider.calls[-1][1]
-    assert code == "US.NVDA" and args["base_dir"] == tmp_path / "state"
-    assert args["snapshot_max_calls"] > 0 and args["snapshot_max_wait_sec"] >= 0
+    assert [name for name, _ in provider.calls] == ["route", "open", "underliers", "valuation"]
+    args = provider.calls[2][1]
+    assert args["base_dir"] == tmp_path / "state"
+    assert args["snapshot_limit"].max_calls > 0
     assert provider.closed == [True]
     assert result.diagnostics["quote_source"] == "fixture_realtime"
     if price is None:
         assert result.quote_snapshots == []
         assert result.diagnostics["status"] == "missing_quote" and result.warnings
     else:
-        assert result.quote_snapshots == [{"symbol": "NVDA", "spot": price,
-            "quote_time_ms": 1780000000000, "quote_source": "fixture_realtime", "quote_status": "fresh"}]
+        quote = result.quote_snapshots[0]
+        assert quote['symbol'] == 'NVDA' and quote['spot'] == price
+        assert quote['quote_source'] == 'fixture_realtime' and quote['quote_status'] == 'ready'
+        assert quote['quote_time_ms'] == 1780000000000 - 10000
+        assert assigned.assigned_stock_quote_is_usable(quote, 1780000000000)
+
 
 
 @pytest.mark.parametrize("complete", [True, False])

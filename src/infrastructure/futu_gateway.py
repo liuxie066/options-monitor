@@ -1802,11 +1802,17 @@ class FutuGateway:
             )
         raise AssertionError("unreachable")
 
-    def request_history_kline(self, **kwargs: Any) -> dict[str, Any]:
-        quote = self._quote_client()
+    @_with_fetch_control
+    def request_history_kline(
+        self, *, deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None, **kwargs: Any,
+    ) -> dict[str, Any]:
+        check_fetch_control(deadline, cancelled)
+        quote = self._quote_client(deadline=deadline, cancelled=cancelled)
         try:
             params = _normalize_history_kline_kwargs(kwargs)
             result = quote.request_history_kline(**params)
+            check_fetch_control(deadline, cancelled)
             if isinstance(result, tuple) and len(result) >= 2:
                 ret, data = result[0], result[1]
                 if ret != 0:

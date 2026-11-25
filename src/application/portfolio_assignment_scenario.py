@@ -5,8 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import urllib.request
-from datetime import datetime, time, timedelta, timezone
-from zoneinfo import ZoneInfo
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -19,13 +18,12 @@ from domain.domain.portfolio_assignment_scenario import (
 )
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.symbol_identity import canonical_symbol
-from domain.domain.expiration_dates import MARKET_TIMEZONES
 from domain.domain.option_position_identity import normalize_broker, normalize_currency
 from domain.domain.risk_capacity import broker_capacity_binding
 from src.application.account_config import resolve_account_type
 from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.required_data_snapshot import FrozenRequiredDataBatch, FrozenRequiredDataUnavailable
-from src.application.opening_quote_evidence import normalize_underlier_observation, OPENING_UNDERLIER_OBSERVATION_SCHEMA
+from src.application.opening_quote_evidence import normalize_underlier_observation, OPENING_UNDERLIER_OBSERVATION_SCHEMA, stock_valuation_quote_unavailable_reason
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.portfolio_management import (
     PORTFOLIO_MANAGEMENT_DISABLED,
@@ -50,10 +48,9 @@ from src.application.market_data_provider import (
     resolve_quote_route as resolve_futu_quote_route,
     open_quote_gateway as build_ready_futu_quote_gateway,
     get_underlier_observations as get_underlier_observations_opend,
-    get_trading_days_with_receipt,
+    get_stock_valuation_quote,
 )
 from src.application.opend_fetch_config import DEFAULT_OPEND_BATCH_MARKET_SNAPSHOT, resolve_opend_fetch_limits
-from src.application.opend_market_snapshot_fetching import trading_calendar_dates
 from src.application.opend_utils import normalize_underlier
 from src.infrastructure.exchange_rates import (
     current_exchange_rate_snapshot,
@@ -354,47 +351,64 @@ def _read_futu_quotes(
             if rate is not None and rate > 0:
                 rates[currency] = rate
     gateway = None
-    observations = {}
-    closed_market_calendars = {}
+    quotes: list[dict[str, Any]] = []
+    calendars: dict[str, Any] = {}
+    fetch_limits = resolve_opend_fetch_limits(dict(runtime_config))
+    now_ms = lambda: int(datetime.now(timezone.utc).timestamp() * 1000)
     try:
         gateway = build_ready_futu_quote_gateway(
             host=str(host), port=int(port), is_option_chain_cache_enabled=False, **provider_kwargs
         )
+        observations = {}
         for market in {item.market for item in underliers.values()}:
-            market_codes = [item.code for item in underliers.values() if item.market == market]
-            observations.update(
-                get_underlier_observations_opend(
-                    gateway,
-                    market_codes,
-                    market=market,
-                    base_dir=repo_base(),
-                    snapshot_limit=resolve_opend_fetch_limits(dict(runtime_config)).market_snapshot,
-                    snapshot_batch_size=DEFAULT_OPEND_BATCH_MARKET_SNAPSHOT,
-                    **provider_kwargs,
+            observations.update(get_underlier_observations_opend(
+                gateway, [item.code for item in underliers.values() if item.market == market],
+                market=market, base_dir=repo_base(), snapshot_limit=fetch_limits.market_snapshot,
+                snapshot_batch_size=DEFAULT_OPEND_BATCH_MARKET_SNAPSHOT, **provider_kwargs,
+            ))
+        for code, underlier in underliers.items():
+            observed = observations.get(underlier.code)
+            try:
+                if observed is None:
+                    raise ValueError("underlier_observation_missing")
+                snapshot = get_stock_valuation_quote(
+                    gateway, symbol=code, underlier=underlier, observation=observed,
+                    base_dir=repo_base(), calendar_cache=calendars,
+                    history_limit=fetch_limits.history_kline, now_ms=now_ms, **provider_kwargs,
                 )
+                reason = stock_valuation_quote_unavailable_reason(
+                    snapshot, now_ms(), expected_currency=underlier.currency)
+                if reason:
+                    raise ValueError(reason)
+            except Exception as exc:
+                warnings.append(f"{code}: Futu quote unavailable ({exc})")
+                continue
+            price = _amount(snapshot["spot"])
+            observed_at = datetime.fromtimestamp(snapshot["quote_time_ms"] / 1000, timezone.utc).isoformat()
+            rate = rates.get(underlier.currency)
+            if rate is None:
+                warnings.append(f"{code}: Futu quote FX evidence missing")
+            calendar = None
+            market_evidence = snapshot.get("market_evidence")
+            if market_evidence:
+                carry = market_evidence["closed_market_carry"]
+                original_calendar = carry["calendars"][underlier.market]
+                calendar = {
+                    "market": underlier.market, "request_start": original_calendar["start"],
+                    "request_end": original_calendar["end"],
+                    "latest_trading_date": carry["daily_close"]["request"]["start"],
+                    "coverage_complete": True, "pagination_complete": True, "page_count": 1,
+                }
+            quote = _valuation_quote(
+                code, underlier.currency, price, rate, observed_at, underlier.market, calendar=calendar,
+                source=("futu_opend_daily_close" if market_evidence else
+                        "futu_opend_market_snapshot" if provider.name == "opend" else f"{provider.name}_market_snapshot"),
             )
-            if any(observed.market == market and observed.status == "market_closed"
-                   and observed.age_seconds is not None and observed.age_seconds > 300
-                   for observed in observations.values()):
-                evaluated_at = datetime.now(timezone.utc)
-                local_now = evaluated_at.astimezone(ZoneInfo(MARKET_TIMEZONES[market]))
-                end = local_now.date()
-                start = end - timedelta(days=7)
-                try:
-                    receipt = get_trading_days_with_receipt(
-                        gateway, market=market, start=start.isoformat(), end=end.isoformat(), **provider_kwargs)
-                    dates = trading_calendar_dates(receipt, start=start, end=end)
-                    completed = [day for day in dates if day < end.isoformat()
-                                 or local_now.time() >= time(9, 30)]
-                    if completed:
-                        closed_market_calendars[market] = {
-                            "market": market, "request_start": start.isoformat(), "request_end": end.isoformat(),
-                            "dates": dates, "latest_trading_date": completed[-1],
-                            "evaluated_at_utc": evaluated_at.isoformat(),
-                            "coverage_complete": True, "pagination_complete": True, "page_count": 1,
-                        }
-                except Exception as exc:
-                    warnings.append(f"{market}: Futu valuation calendar unavailable ({type(exc).__name__})")
+            quote["quote_observed_at_ms"] = snapshot["quote_observed_at_ms"]
+            quote["quote_observation"] = snapshot["quote_observation"]
+            if market_evidence:
+                quote["market_evidence"] = market_evidence
+            quotes.append(quote)
     except Exception as exc:
         warnings.append(f"Futu quote read failed: {exc}")
     finally:
@@ -403,47 +417,6 @@ def _read_futu_quotes(
                 gateway.close()
             except Exception:
                 pass
-    quotes: list[dict[str, Any]] = []
-    for code, underlier in underliers.items():
-        observed = observations.get(underlier.code)
-        price = _amount(observed.last_price) if observed is not None else None
-        observed_at = observed.observed_at_utc if observed is not None else None
-        age = observed.age_seconds if observed is not None else None
-        if (
-            observed is None
-            or observed.code != underlier.code
-            or observed.market != underlier.market
-            or (observed.status not in {"ready", "market_closed"} and observed.reason_code != "underlier_quote_stale")
-            or observed.sec_status != "NORMAL"
-            or observed.suspension is not False
-            or price is None
-            or price <= 0
-            or not observed_at
-            or age is None
-            or age < 0
-            or age > 7 * 86400
-        ):
-            warnings.append(f"{code}: Futu quote unavailable ({observed.reason_code if observed else 'missing'})")
-            continue
-        calendar = closed_market_calendars.get(underlier.market)
-        quoted_at = _iso_datetime(observed_at)
-        closure_verified = bool(
-            observed.status == "market_closed" and calendar and quoted_at
-            and quoted_at <= _iso_datetime(calendar["evaluated_at_utc"])
-            and quoted_at.astimezone(ZoneInfo(MARKET_TIMEZONES[underlier.market])).date().isoformat()
-                >= calendar["latest_trading_date"]
-        )
-        is_stale = (observed.status not in {"ready", "market_closed"} or age > 300) and not closure_verified
-        if is_stale:
-            warnings.append(_dated_quote_warning(code, observed_at))
-        rate = rates.get(underlier.currency)
-        if rate is None:
-            warnings.append(f"{code}: Futu quote FX evidence missing")
-        quotes.append(_valuation_quote(
-            code, underlier.currency, price, rate, observed_at, underlier.market,
-            is_stale=is_stale, calendar=calendar if closure_verified else None,
-            source="futu_opend_market_snapshot" if provider.name == "opend" else f"{provider.name}_market_snapshot",
-        ))
     return quotes, warnings
 
 

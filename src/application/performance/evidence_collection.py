@@ -426,6 +426,7 @@ def _positive_decimal(value: Any):
 
 _STOCK_MARK_IDENTITIES = {
     "prev_close_price": ("close_estimate", "prev_close_fallback"),
+    "close": ("close", "opend_unadjusted_daily_close"),
 }
 
 
