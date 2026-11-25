@@ -507,13 +507,39 @@ def read_stock_sell_observations(
             # Do not expose a possibly different account's source identifiers.
             result["diagnostics"].append({"code": "stock_sell_account_unverified", "symbol": deal.symbol})
             continue
+        mapped_account = futu_account_mapping.get(str(deal.futu_account_id))
+        if mapped_account and mapped_account != deal.internal_account:
+            # A declared label cannot hide contradictory physical scope from
+            # the other authorized account. Never expose its private fill ID.
+            involved = {mapped_account, deal.internal_account}
+            for account in sorted(involved if account_scope is None else involved & account_scope):
+                result["diagnostics"].append({"code": "stock_sell_account_conflict", "account": account,
+                    "symbol": deal.symbol, "trade_time_ms": deal.trade_time_ms})
+            continue
         if account_scope is not None and deal.internal_account not in account_scope:
             continue
         normalization = dict(deal.normalization_diagnostics or {})
-        if (deal.execution_input or {}).get("errors"):
+        identity_errors = list((deal.execution_input or {}).get("errors") or [])
+        identity_basis = "execution_input"
+        # Persisted pre-v1 Futu rows are observations, not new trade admission.
+        # Reuse the canonical, REAL physical-account-scoped legacy identity;
+        # never default namespaces on standardized or conflicting input.
+        from domain.domain.trade_execution import structured_deal_keys_from_ledger_event
+
+        legacy_keys = structured_deal_keys_from_ledger_event({
+            "account": deal.internal_account, "broker": deal.broker, "raw_payload": payload,
+        })
+        legacy_missing = {"missing:broker_account_ref.broker_account_id",
+                          "missing:external_id_namespace", "missing:external_order_namespace"}
+        if (identity_errors and set(identity_errors) <= legacy_missing
+                and not payload.get("schema_version") and "execution_input" not in payload
+                and payload.get("trd_env") == "REAL"
+                and dict(row).get("broker_deal_key") in legacy_keys):
+            identity_errors = []
+            identity_basis = "persisted_legacy_futu"
+        if identity_errors:
             result["diagnostics"].append({"code": "stock_sell_identity_invalid", "account": deal.internal_account,
-                                           "symbol": deal.symbol})
-            continue
+                "symbol": deal.symbol, "source_id": str(row["inbox_id"])})
         stored = dict(row)
         receipt = json.loads(stored.get("result_json") or "{}")
         if not isinstance(receipt, dict):
@@ -525,7 +551,7 @@ def read_stock_sell_observations(
             "source_deal_id": deal.deal_id, "futu_account_id": deal.futu_account_id,
             "broker_deal_key": stored.get("broker_deal_key"),
             "execution_id": execution_identity_from_input(deal.execution_input),
-            "source_kind": "inbox",
+            "source_kind": "inbox", "identity_errors": identity_errors, "identity_basis": identity_basis,
             "economic_payload_hash": stored.get("economic_payload_hash"),
             "result_status": stored.get("result_status"), "result_reason": stored.get("result_reason"),
             "diagnostics": dict(receipt.get("diagnostics") or {}),

@@ -81,3 +81,10 @@ def test_real_projection_uses_final_canonical_fee_remainder():
             assert Decimal(economics['put_net_premium']) == source.realized_pnl_net
         assert Decimal(assigned_put_remaining_economics(view['assigned_stock_lots'][-1], price=100)
                        ['put_net_premium']) == Decimal('199.666666')
+
+
+def test_unknown_quantity_never_claims_sold_net_or_zero_realized():
+    result = assigned_put_remaining_economics(_lot(), price='8', quantity_usable=False)
+    assert result['stock_realized_pnl'] is None
+    assert result['sold_pnl_with_put'] is None
+    assert result['allocated_put_net_premium_sold'] is None

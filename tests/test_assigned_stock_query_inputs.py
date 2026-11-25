@@ -245,3 +245,58 @@ def test_shared_state_conflicting_label_and_physical_scope_is_not_silently_skipp
     assert result['observations'] == []
     assert all(r['account'] == requested for r in result['diagnostics'])
     assert 'private-conflicting-source' not in json.dumps(result)
+
+
+def test_legacy_futu_sell_is_observed_without_requiring_new_admission_fields(tmp_path):
+    payload = {'code': 'US.NVDA', 'trd_side': 'SELL', 'qty': 40, 'price': 100,
+               'create_time': '2026-09-07 09:02:03', 'deal_id': 'legacy-fill',
+               'order_id': 'legacy-order', 'futu_account_id': 'test-lx', 'trd_env': 'REAL'}
+    path = tmp_path / 'inbox.sqlite3'
+    _inbox(path, [(payload, 'handled')])
+    with sqlite3.connect(path) as conn:
+        conn.execute('ALTER TABLE trade_inbox ADD COLUMN broker_deal_key TEXT')
+        conn.execute("UPDATE trade_inbox SET broker_deal_key='futu:lx:test-lx:legacy-fill'")
+    result = read_stock_sell_observations(path, futu_account_mapping={'test-lx': 'lx'}, accounts=['lx'])
+    assert len(result['observations']) == 1
+    assert not result['observations'][0]['identity_errors']
+    assert result['observations'][0]['identity_basis'] == 'persisted_legacy_futu'
+    assert result['source_history'] == 'unknown'
+
+
+def test_invalid_identity_retains_local_economic_scope_not_global_gap(tmp_path):
+    payload = _sell()
+    payload.pop('external_id_namespace')
+    path = tmp_path / 'inbox.sqlite3'
+    _inbox(path, [(payload, 'unresolved')])
+    result = read_stock_sell_observations(path, futu_account_mapping={'test-lx': 'lx'}, accounts=['lx'])
+    assert len(result['observations']) == 1
+    row = result['observations'][0]
+    assert row['identity_errors']
+    assert row['account'] == 'lx' and row['symbol'] == 'NVDA'
+    assert result['diagnostics'][0]['source_id'] == row['source_id']
+
+
+@pytest.mark.parametrize('change', [{'trd_env': 'SIMULATE'}, {'external_id_namespace': 'other'},
+    {'qty': -1}, {'price': None}, {'futu_account_id': 'other'}])
+def test_legacy_qualification_cannot_repair_conflicting_or_invalid_evidence(tmp_path, change):
+    payload = {'code': 'US.NVDA', 'trd_side': 'SELL', 'qty': 40, 'price': 100,
+               'create_time': '2026-09-07 09:02:03', 'deal_id': 'legacy-fill',
+               'order_id': 'legacy-order', 'futu_account_id': 'test-lx', 'trd_env': 'REAL', **change}
+    path = tmp_path / 'inbox.sqlite3'
+    _inbox(path, [(payload, 'handled')])
+    with sqlite3.connect(path) as conn:
+        conn.execute('ALTER TABLE trade_inbox ADD COLUMN broker_deal_key TEXT')
+        conn.execute("UPDATE trade_inbox SET broker_deal_key='futu:lx:test-lx:legacy-fill'")
+    result = read_stock_sell_observations(path, futu_account_mapping={'test-lx': 'lx'}, accounts=['lx'])
+    assert result['diagnostics']
+    assert all(r['identity_errors'] for r in result['observations'])
+
+
+@pytest.mark.parametrize('account, gap', [('lx', True), ('sy', True), ('zz', False)])
+def test_inbox_conflicting_logical_and_physical_scope_cannot_hide_from_other_account(tmp_path, account, gap):
+    path = tmp_path / 'inbox.sqlite3'
+    _inbox(path, [(_sell(account='lx', physical='test-sy'), 'unresolved')])
+    result = read_stock_sell_observations(path, futu_account_mapping={'test-sy': 'sy'}, accounts=[account])
+    assert bool(result['diagnostics']) == gap
+    assert not result['observations']
+    assert 'sale-1' not in json.dumps(result)

@@ -2177,7 +2177,7 @@ def assigned_put_remaining_economics(
     with_put = stock_pnl + remaining_net if stock_pnl is not None and remaining_net is not None else None
     sale_facts = [f for f in facts if "sale" in str(f.get("component"))]
     sold_actual = all(f.get("basis") == "actual" for f in sale_facts) and (sold == 0 or bool(sale_facts))
-    realized = (Decimal(0) if sold == 0 else
+    realized = (None if not quantity_usable else Decimal(0) if sold == 0 else
                 to_decimal(lot.get("assigned_stock_realized_pnl", 0), field_name="realized")
                 if sold_actual and stock_actual else None)
     def text(value: Decimal | None) -> str | None:
@@ -2188,7 +2188,7 @@ def assigned_put_remaining_economics(
         "remaining_stock_cost_basis_exact": text(remaining_cost),
         "put_net_premium": text(net),
         "allocated_put_net_premium_remaining": text(remaining_net if quantity_usable else None),
-        "allocated_put_net_premium_sold": text(sold_net),
+        "allocated_put_net_premium_sold": text(sold_net if quantity_usable else None),
         "stock_realized_pnl": text(realized),
         "sold_pnl_with_put": text(realized + sold_net) if realized is not None and sold_net is not None else None,
         "reasons": reasons,

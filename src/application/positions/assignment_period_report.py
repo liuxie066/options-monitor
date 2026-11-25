@@ -79,7 +79,7 @@ def summarize_lots(lots: list[dict[str, Any]], *, empty_is_zero: bool = True) ->
                 'value': _money(total) if included else None,
                 'exact_value': str(total) if included else None,
                 'coverage': 'partial' if omitted or provisional else 'complete',
-                'basis': 'ledger' if provisional else 'confirmed',
+                'basis': 'unavailable' if not included else 'ledger' if provisional else 'confirmed',
                 'included_lot_ids': [r['stock_lot_id'] for r in included],
                 'provisional_lot_ids': [r['stock_lot_id'] for r in provisional],
                 'omitted_lot_ids': [r['stock_lot_id'] for r in omitted],
@@ -120,7 +120,7 @@ def _period_leaf(row: dict[str, Any]) -> dict[str, Any]:
         'stock_unrealized_pnl', 'remaining_pnl_with_put', 'remaining_stock_cost_basis_exact',
         'put_net_premium', 'allocated_put_net_premium_remaining',
         'allocated_put_net_premium_sold', 'stock_realized_pnl', 'sold_pnl_with_put',
-        'spot', 'quote', 'reasons',
+        'spot', 'quote', 'reasons', 'valuation_basis', 'confirmed', 'provisional',
     }
     result = {key: value for key, value in row.items() if key in fields}
     quote = row['quote']
@@ -228,7 +228,7 @@ def build_assignment_period_report(repo, payload, *, cfg, refresh_assigned_stock
                 # the authorized accounts before filtering a requested symbol:
                 # a source revision may contradict this symbol's accepted sale.
                 symbols=None, repo_base=root,
-                runtime_root=resolve_runtime_root(repo_root=root).runtime_root)
+                runtime_root=quote_state_base_dir or resolve_runtime_root(repo_root=root).runtime_root)
     except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
         observations['diagnostics'] = [{'code': 'stock_sell_source_unavailable', 'message': type(exc).__name__}]
     qualified_observations = ledger_api.qualify_assigned_stock_sell_observations(
@@ -248,7 +248,15 @@ def build_assignment_period_report(repo, payload, *, cfg, refresh_assigned_stock
         source_event = events.get(review.get('event_id'), {})
         review['trade_time_ms'] = source_event.get('trade_time_ms') or source_event.get('event_time_ms')
 
-    source_gaps = observations.get('diagnostics') or ([] if observations['coverage'] == 'complete' else [{}])
+    # Identity failures retain their scoped economic observation and are
+    # qualified at its disposal time. Do not also turn them into an account-wide
+    # timeless read failure after qualification.
+    observed_ids = {o.get('source_id') for o in qualified_observations}
+    diagnostics = observations.get('diagnostics') or []
+    source_gaps = [d for d in diagnostics if not (
+        d.get('code') == 'stock_sell_identity_invalid' and d.get('source_id') in observed_ids)]
+    if not diagnostics and observations['coverage'] != 'complete':
+        source_gaps = [{}]
     for row in selected:
         row['_pending'] = (any(_affected(row, gap) for gap in source_gaps) or bool(inputs.diagnostics)
             or any(_affected(row, o) for o in pending)
@@ -299,6 +307,14 @@ def build_assignment_period_report(repo, payload, *, cfg, refresh_assigned_stock
             row['reasons'].append('unresolved_stock_sale_or_source_gap')
         elif not confirmed:
             row['reasons'].append('source_history_not_proven')
+        row['valuation_basis'] = 'unavailable' if is_pending else 'confirmed' if confirmed else 'ledger'
+        values = {key: row.get(key) for key in (
+            'shares_sold', 'shares_remaining', *_METRICS, 'stock_realized_pnl', 'sold_pnl_with_put')}
+        row['confirmed'] = values if confirmed else {key: None for key in values}
+        row['provisional'] = ({**values, 'shares_sold': row['book_shares_sold'],
+            'shares_remaining': row['book_shares_remaining'], 'basis': 'ledger',
+            'source_history': observations.get('source_history', 'unknown')}
+            if not confirmed and not is_pending else None)
         row['strike'] = events.get(row['source_assignment_event_id'], {}).get('strike')
         rows.append(_period_leaf(row))
     summary = summarize_lots(rows, empty_is_zero=not inputs.diagnostics and not reviews and not source_gaps and not pending)
@@ -325,7 +341,7 @@ def build_assignment_period_report(repo, payload, *, cfg, refresh_assigned_stock
             if r.get('stock_lot_id') in {lot['stock_lot_id'] for lot in rows}],
         'scope_reviews': reviews, 'assigned_stock_review_rows': reviews, 'quote_refresh': refresh,
         'coverage': {'status': 'partial' if inputs.diagnostics or observations.get('source_history') != 'complete'
-                     or pending else 'complete', 'ledger_read': 'gap' if inputs.diagnostics else 'complete',
+                     or pending or source_gaps or reviews else 'complete', 'ledger_read': 'gap' if inputs.diagnostics else 'complete',
                      'source_history': observations.get('source_history', 'unknown')},
         'pagination': {'has_more': False, 'source': 'full_snapshot'},
         'freshness': {'status': 'observed', 'ledger_read_at_ms': raw.get('source', {}).get('read_at_ms'),

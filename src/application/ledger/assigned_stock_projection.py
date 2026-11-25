@@ -353,7 +353,7 @@ def qualify_assigned_stock_sell_observations(
         item = dict(observation)
         proof = economic(item)
         identity = keys(item)
-        item["resolved"] = proof is not None and bool(identity) and any(
+        item["resolved"] = not item.get("identity_errors") and proof is not None and bool(identity) and any(
             identity & keys(sale) and economic(sale) == proof for sale in accepted_sales
         )
         qualified.append(item)
@@ -407,9 +407,15 @@ def qualify_assigned_stock_sell_observations(
         # Include inventory just before and at that instant, including a batch
         # first assigned there even if a confirmed fill also closes it there.
         inventory = [*inventory_at(max(0, instant - 1)), *inventory_at(instant)]
+        # An explicitly invalidated currency is evidence, not a trusted scope
+        # discriminator. Keep the original value for provenance/economic proof,
+        # but never use it to prove a same-account/symbol sale affects no lot.
+        scope = dict(item)
+        if "invalid:currency:instrument_mismatch" in (item.get("identity_errors") or []):
+            scope["currency"] = None
         candidate_ids = {r["stock_lot_id"] for r in inventory
             if (int(r.get("shares_remaining") or 0) > 0 or int(r.get("assigned_at_ms") or 0) == instant)
-            and all(not item.get(k) or item[k] == r.get(k) for k in ("account", "symbol", "currency"))
+            and all(not scope.get(k) or scope[k] == r.get(k) for k in ("account", "symbol", "currency"))
             and (not item.get("broker") or normalize_broker(item["broker"]) == normalize_broker(r.get("broker")))}
         # A revision conflicting with an accepted disposal is evidence against
         # that disposal's targets, even after it has consumed all inventory.
