@@ -23,6 +23,7 @@ from src.application.portfolio_context_service import (
 )
 from src.application.ledger.api import read_wheel_capacity_context
 from src.infrastructure.exchange_rates import (current_exchange_rate_snapshot, project_exchange_rate_snapshot)
+from src.application.wheel.candidate_snapshot import wheel_scope_is_normal_skip
 
 
 from src.application.ledger.api import (
@@ -645,7 +646,12 @@ def finalize_wheel_capacity(
                 "reason_codes": sorted(set(batch.get("reason_codes") or []) | (
                     {"option_close_settlement_pending"} if pending_settlement else set()
                 )),
+                **({"candidate_diagnostics": source_scope["candidate_diagnostics"]}
+                   if "candidate_diagnostics" in source_scope else {}),
+                **({"required_data_coverage": source_scope["required_data_coverage"]}
+                   if "required_data_coverage" in source_scope else {}),
                 "candidate_status": candidate_status,
+                "candidate_evidence_reason": source_scope.get("reason_code"),
                 "reason_code": candidate_reason,
                 "raw_candidates": raw_candidates,
                 "allocation": allocation,
@@ -663,7 +669,8 @@ def finalize_wheel_capacity(
         ]
         raw_count = sum(len(row.get("raw_candidates") or []) for row in symbol_batches
                         if row.get("candidate_status") == "completed")
-        statuses = {str(row.get("candidate_status") or "") for row in symbol_batches}
+        active_batches = [row for row in symbol_batches if not wheel_scope_is_normal_skip(row)]
+        statuses = {str(row.get("candidate_status") or "") for row in (active_batches or symbol_batches)}
         partial_data = any(
             str(row.get("reason_code") or "") == "partial_data"
             for row in source_scopes
@@ -679,7 +686,9 @@ def finalize_wheel_capacity(
             reason = "partial_data" if partial_data else None if raw_count else "no_candidate"
         elif statuses == {"not_applicable"}:
             status = "not_applicable"
-            reason = str(symbol_batches[0].get("reason_code") or "wheel_not_applicable")
+            skip_reasons = {row.get("reason_code") for row in (active_batches or symbol_batches)}
+            reason = ("partial_data" if partial_data else
+                      next(iter(skip_reasons)) if len(skip_reasons) == 1 else "wheel_not_applicable")
         elif "completed" in statuses:
             status = "completed"
             reason = "partial_data"
@@ -883,7 +892,12 @@ def finalize_wheel_put_capacity(
                 "principal_anchor": branch.get("principal_anchor"),
                 "currency": branch.get("currency"),
                 "reason_codes": list(branch.get("reason_codes") or []),
+                **({"candidate_diagnostics": scope["candidate_diagnostics"]}
+                   if "candidate_diagnostics" in scope else {}),
+                **({"required_data_coverage": scope["required_data_coverage"]}
+                   if "required_data_coverage" in scope else {}),
                 "candidate_status": scope.get("status"),
+                "candidate_evidence_reason": scope.get("reason_code"),
                 "reason_code": reason,
                 "raw_candidates": raw_candidates,
                 "allocation": allocation,
@@ -909,7 +923,8 @@ def finalize_wheel_put_capacity(
             for row in branch_scopes
             if str(row.get("symbol") or "").strip().upper() == symbol
         ]
-        statuses = {str(row.get("status") or "") for row in rows}
+        active_rows = [row for row in rows if not wheel_scope_is_normal_skip(row)]
+        statuses = {str(row.get("status") or "") for row in (active_rows or rows)}
         reasons = {str(row.get("reason_code") or "") for row in rows}
         failed_reasons = {
             str(row.get("reason_code") or "").strip()
@@ -917,8 +932,8 @@ def finalize_wheel_put_capacity(
             if str(row.get("status") or "") == "failed"
             and str(row.get("reason_code") or "").strip()
         }
-        candidate_count = sum(int(row.get("candidate_count") or 0) for row in rows)
-        if any(row.get("required_data_coverage") for row in rows):
+        candidate_count = sum(int(row.get("candidate_count") or 0) for row in rows if row.get("status") == "completed")
+        if any(row.get("required_data_coverage") or row.get("candidate_evidence_reason") == "partial_data" for row in snapshot_batches if row.get("symbol") == symbol):
             reasons.add("partial_data")
         if statuses == {"completed"}:
             status = "completed"
@@ -927,7 +942,9 @@ def finalize_wheel_put_capacity(
                 reason = "no_candidate"
         elif statuses == {"not_applicable"}:
             status = "not_applicable"
-            reason = next(iter(reasons)) if len(reasons) == 1 else "wheel_not_applicable"
+            skip_reasons = {row.get("reason_code") for row in (active_rows or rows)}
+            reason = ("partial_data" if "partial_data" in reasons else
+                      next(iter(skip_reasons)) if len(skip_reasons) == 1 else "wheel_not_applicable")
         elif "completed" in statuses:
             status, reason = "completed", "partial_data"
         elif "failed" in statuses:

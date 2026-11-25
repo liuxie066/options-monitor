@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import math
 from numbers import Real
 
@@ -10,6 +11,21 @@ import pandas as pd
 
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.trade_contract_identity import require_option_multiplier
+
+
+def _opening_reason_codes(value: Any) -> list[str] | str:
+    # The required-data CSV stores Python list literals; in-memory provider
+    # frames carry lists. Decode at the input boundary, not in report renderers.
+    if isinstance(value, str) and value.strip().startswith("["):
+        try:
+            decoded = ast.literal_eval(value)
+        except (ValueError, SyntaxError):
+            decoded = None
+        if isinstance(decoded, list) and all(isinstance(code, str) for code in decoded):
+            return decoded
+    if isinstance(value, (list, tuple)) and all(isinstance(code, str) for code in value):
+        return list(value)
+    return str(value or "").strip()
 
 
 def _as_float(value: Any) -> float | None:
@@ -83,7 +99,7 @@ class CandidateContractInput:
     snapshot_multiplier: float | None
     multiplier: float | None
     opening_contract_status: str
-    opening_contract_reason_codes: str
+    opening_contract_reason_codes: list[str] | str
     delta_source: str | None = None
     delta_unit: str | None = None
     delta_reason_code: str | None = None
@@ -166,7 +182,7 @@ class CandidateContractInput:
             snapshot_multiplier=multipliers["snapshot_multiplier"],
             multiplier=multipliers["multiplier"],
             opening_contract_status=str(row.get("opening_contract_status") or "").strip(),
-            opening_contract_reason_codes=str(row.get("opening_contract_reason_codes") or "").strip(),
+            opening_contract_reason_codes=_opening_reason_codes(row.get("opening_contract_reason_codes")),
         )
 
     def to_gate_payload(self) -> dict[str, Any]:

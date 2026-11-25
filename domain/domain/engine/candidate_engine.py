@@ -463,6 +463,10 @@ def validate_option_contract_evidence(
         )
     opening_status = _first_text(raw, "opening_contract_status").lower()
     reason_codes = raw.get("opening_contract_reason_codes")
+    no_bid_observation = (
+        opening_status == "ineligible" and isinstance(reason_codes, (list, tuple))
+        and "option_no_current_bid" in reason_codes
+    )
     buyback_without_bid = (
         quote_side == "buy"
         and opening_status == "ineligible"
@@ -470,7 +474,7 @@ def validate_option_contract_evidence(
         and set(reason_codes) == {"option_no_current_bid"}
         and _coerce_float(raw.get("bid")) == 0
     )
-    if opening_status != "ready" and not buyback_without_bid:
+    if opening_status != "ready" and not buyback_without_bid and not no_bid_observation:
         raise CandidateCalculationError(
             _opening_not_ready_reason(opening_status),
             "normalized OpenD opening contract is not ready",
@@ -549,6 +553,14 @@ def validate_option_contract_evidence(
             "OpenD underlier quote is stale relative to the decision moment",
             metric_value={"spot_age_seconds": spot_age},
             threshold=300,
+        )
+
+    # No current bid is a time-sensitive market fact, unlike contract identity.
+    # Recheck both source and receipt age before treating it as a definite skip.
+    if no_bid_observation and not buyback_without_bid:
+        raise CandidateCalculationError(
+            REJECT_CONTRACT_INELIGIBLE, "normalized OpenD contract has no current bid",
+            metric_value={"status": opening_status, "reason_codes": reason_codes}, threshold="ready",
         )
 
     option_type = _first_text(raw, "option_type").lower()

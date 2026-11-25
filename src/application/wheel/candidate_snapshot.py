@@ -37,6 +37,19 @@ WHEEL_CANDIDATE_SNAPSHOT_FILE_V2 = "wheel_candidate_snapshot.v2.json"
 WHEEL_CANDIDATE_SNAPSHOT_FILE_V3 = "wheel_candidate_snapshot.v3.json"
 WHEEL_CANDIDATE_SNAPSHOT_FILE = WHEEL_CANDIDATE_SNAPSHOT_FILE_V3
 
+WHEEL_STATUS_POLICY = "normal_skips.v1"
+
+
+def wheel_scope_is_normal_skip(row: Mapping[str, Any]) -> bool:
+    """Only explicit lifecycle/capacity skips are neutral to scan completeness."""
+    if row.get("candidate_evidence_reason") in {"partial_data", "data_unavailable", "wheel_candidate_data_unavailable"}:
+        return False
+    return row.get("status", row.get("candidate_status")) == "not_applicable" and row.get("reason_code") in {
+        "wheel_pending_decision", "wheel_disabled", "wheel_capacity_fully_committed_or_reserved",
+        "wheel_call_open", "wheel_call_pending", "wheel_put_open", "wheel_put_pending",
+        "share_capacity_insufficient",
+    }
+
 
 class WheelCandidateSnapshotError(RuntimeError):
     pass
@@ -160,6 +173,17 @@ def _batches(
             seen.add(identity)
             if str(row.get("account") or account).strip().lower() != account:
                 raise CandidateSnapshotContractError("Wheel candidate batch account mismatch")
+            if "candidate_diagnostics" in row:
+                diagnostics = row["candidate_diagnostics"]
+                if not isinstance(diagnostics, list) or any(
+                    not isinstance(item, dict)
+                    or item.get("outcome") not in {"unavailable", "ineligible"}
+                    or not isinstance(item.get("reason_code"), str) or not item["reason_code"]
+                    or not isinstance(item.get("expiration"), str)
+                    or type(item.get("contract_count")) is not int or item["contract_count"] <= 0
+                    for item in diagnostics
+                ):
+                    raise CandidateSnapshotContractError("Wheel candidate diagnostics are invalid")
             sha256_text(generation_hash, "batch_generation_hash")
             sha256_text(row.get("projection_hash"), "projection_hash")
             raw_candidates = row.get("raw_candidates") or []
@@ -216,17 +240,39 @@ def _batches(
     )
 
 
-def _opening_status(scopes: list[Mapping[str, Any]], batches: list[Mapping[str, Any]]) -> str:
+def _opening_status(scopes: list[Mapping[str, Any]], batches: list[Mapping[str, Any]],
+                    *, status_policy_version: str | None = None) -> str:
     if not scopes:
         raise CandidateSnapshotContractError("Wheel candidate scopes are missing")
+    if status_policy_version == WHEEL_STATUS_POLICY:
+        active_scopes = []
+        for scope in scopes:
+            matching = [batch for batch in batches
+                        if batch.get("symbol") == scope.get("symbol")
+                        and batch.get("direction", "call") == scope.get("direction", "call")]
+            normal_skip = scope.get("status") == "not_applicable" and (
+                all(wheel_scope_is_normal_skip(batch) for batch in matching)
+                if matching else wheel_scope_is_normal_skip(scope)
+            )
+            if not normal_skip:
+                active_scopes.append(scope)
+        if not active_scopes:
+            return "not_applicable"
+        scopes = active_scopes
+        if any(scope.get("reason_code") == "partial_data" for scope in scopes):
+            return "partial_data"
     states = {str(row.get("status") or "") for row in scopes}
-    candidate_count = sum(len(row.get("raw_candidates") or []) for row in batches)
+    candidate_count = (
+        sum(int(row.get("candidate_count") or 0) for row in scopes if row.get("status") == "completed")
+        if status_policy_version == WHEEL_STATUS_POLICY
+        else sum(len(row.get("raw_candidates") or []) for row in batches)
+    )
     if states == {"completed"}:
         if any(row.get("reason_code") == "partial_data" for row in scopes):
             return "partial_data"
         return "candidates_found" if candidate_count else "no_candidate"
     if states == {"not_applicable"}:
-        return "not_applicable"
+        return "data_unavailable" if status_policy_version == WHEEL_STATUS_POLICY else "not_applicable"
     if "completed" in states or "not_applicable" in states:
         return "partial_data"
     return "data_unavailable"
@@ -311,7 +357,10 @@ def validate_wheel_candidate_snapshot(
             item.get("capacity_allocations") or [],
             schema_version=schema_version,
         )
-        if item.get("opening_status") != _opening_status(scopes, batches):
+        status_policy = item.get("status_policy_version")
+        if status_policy not in (None, WHEEL_STATUS_POLICY):
+            raise WheelCandidateSnapshotError("Wheel status policy version mismatch")
+        if item.get("opening_status") != _opening_status(scopes, batches, status_policy_version=status_policy):
             raise WheelCandidateSnapshotError("Wheel candidate snapshot terminal status mismatch")
         binding = {
             "run_id": item["run_id"],
@@ -392,7 +441,8 @@ def seal_wheel_candidate_snapshot(
         "required_data_manifest_sha256": required_data_hash,
         "dependencies": dependency_rows,
         "sealed_at_utc": seal_time,
-        "opening_status": _opening_status(scopes, batch_rows),
+        "status_policy_version": WHEEL_STATUS_POLICY,
+        "opening_status": _opening_status(scopes, batch_rows, status_policy_version=WHEEL_STATUS_POLICY),
         "scope_results": scopes,
         "batches": batch_rows,
         "capacity_allocations": allocation_rows,

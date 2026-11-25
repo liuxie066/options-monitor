@@ -35,6 +35,78 @@ from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 AS_OF = datetime(2026, 4, 1, 15, 0, tzinfo=timezone.utc)
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("direction", ["call", "put"])
+def test_normal_skip_cannot_hide_missing_coverage_sibling(tmp_path, reverse, direction):
+    from copy import deepcopy
+    model = _read_model() if direction == "call" else _eligibility_model("put")
+    key = "batches" if direction == "call" else "wheel_branches"
+    id_key = "stock_lot_id" if direction == "call" else "wheel_branch_id"
+    model[key].append({**deepcopy(model[key][0]), id_key: "stock-2"})
+    scopes = [
+        {id_key: "stock-1", "symbol": "NVDA", "status": "not_applicable", "reason_code": "wheel_disabled"},
+        {id_key: "stock-2", "symbol": "NVDA", "status": "not_applicable", "reason_code": "coverage_quantity_unavailable"},
+    ]
+    if reverse:
+        model[key].reverse()
+        scopes.reverse()
+    kwargs = dict(account="lx", wheel_read_model=model,
+                  wheel_scan={"raw_candidates": {}, "capacity_claims": [], "scope_results": scopes})
+    if direction == "call":
+        captured = finalize_wheel_capacity(**kwargs, opening_call_candidates=[], coverage_facts=[])
+    else:
+        captured = finalize_wheel_put_capacity(**kwargs, opening_put_candidates=[],
+            cash_capacity_fact=cash_portfolio({"account": "lx", "status": "available",
+                "cash_by_currency": {"USD": 100_000}, "wheel_intent_reservations": [],
+                "capacity_identity_hash": "c" * 64}), exchange_rate_converter=_converter())
+    assert captured["scope_results"][0]["reason_code"] == "coverage_quantity_unavailable"
+    from src.application.wheel.candidate_snapshot import _opening_status, WHEEL_STATUS_POLICY
+    completed = {"symbol": "AMD", "direction": direction, "status": "completed", "candidate_count": 0}
+    assert _opening_status([*captured["scope_results"], completed], captured["batches"],
+                           status_policy_version=WHEEL_STATUS_POLICY) == "partial_data"
+
+
+@pytest.mark.parametrize("reason,expected", [
+    ("wheel_capacity_fully_committed_or_reserved", "no_candidate"),
+    ("wheel_pending_decision", "no_candidate"),
+    ("wheel_config_mismatch", "partial_data"),
+    ("coverage_quantity_unavailable", "partial_data"),
+    ("unknown", "partial_data"),
+])
+def test_completed_call_with_skipped_sibling_reports_real_data_state(reason, expected):
+    from copy import deepcopy
+    model = _read_model()
+    model["batches"].append({**deepcopy(model["batches"][0]), "stock_lot_id": "stock-2"})
+    scan = {"raw_candidates": {}, "capacity_claims": [], "scope_results": [
+        {"stock_lot_id": "stock-1", "symbol": "NVDA", "status": "completed", "reason_code": "no_candidate"},
+        {"stock_lot_id": "stock-2", "symbol": "NVDA", "status": "not_applicable", "reason_code": reason},
+    ]}
+    captured = finalize_wheel_capacity(account="lx", wheel_read_model=model, wheel_scan=scan,
+                                      opening_call_candidates=[], coverage_facts=[])
+    assert captured["scope_results"][0]["reason_code"] == expected
+
+
+@pytest.mark.parametrize("reason,expected", [
+    ("wheel_capacity_fully_committed_or_reserved", "no_candidate"),
+    ("wheel_pending_decision", "no_candidate"),
+    ("wheel_config_mismatch", "partial_data"),
+])
+def test_completed_put_with_skipped_sibling_reports_real_data_state(reason, expected):
+    from copy import deepcopy
+    model = _eligibility_model("put")
+    model["wheel_branches"].append({**deepcopy(model["wheel_branches"][0]), "wheel_branch_id": "stock-2"})
+    scan = {"raw_candidates": {}, "capacity_claims": [], "scope_results": [
+        {"wheel_branch_id": "stock-1", "symbol": "NVDA", "status": "completed", "reason_code": "no_candidate"},
+        {"wheel_branch_id": "stock-2", "symbol": "NVDA", "status": "not_applicable", "reason_code": reason},
+    ]}
+    captured = finalize_wheel_put_capacity(account="lx", wheel_read_model=model, wheel_scan=scan,
+        opening_put_candidates=[], cash_capacity_fact=cash_portfolio({
+            "account": "lx", "status": "available", "cash_by_currency": {"USD": 100_000},
+            "wheel_intent_reservations": [], "capacity_identity_hash": "c" * 64}),
+        exchange_rate_converter=_converter())
+    assert captured["scope_results"][0]["reason_code"] == expected
+
+
 @pytest.mark.parametrize("shares,branches,expected", [(300, 1, 1), (200, 1, 0), (300, 2, 1)])
 @pytest.mark.parametrize("branch_multiplier", [100, 500])
 def test_unresolved_call_scans_account_net_capacity_without_changing_attribution(shares, branches, expected, branch_multiplier):
@@ -725,6 +797,18 @@ def test_wheel_scan_uses_decision_time_and_ignores_ineligible_sibling() -> None:
     assert len(result["raw_candidates"]["stock-1"]) == 1
 
 
+@pytest.mark.parametrize("age,expected", [(0, "no_candidate"), (300, "no_candidate"), (301, "data_unavailable")])
+@pytest.mark.parametrize("stale_field", ["snapshot_received_at_utc", "spot_observed_at_utc"])
+def test_no_bid_evidence_is_rechecked_at_wheel_decision_time(age, expected, stale_field):
+    row = phase2_opening_row(_call_row(bid=0, ask=0, opening_contract_status="ineligible",
+        opening_contract_reason_codes=["option_no_current_bid", "option_ask_missing_or_invalid"],
+        snapshot_received_at_utc=AS_OF.isoformat(), spot_observed_at_utc=AS_OF.isoformat()))
+    row[stale_field] = (AS_OF - timedelta(seconds=age)).isoformat()
+    scan = run_wheel_call_scan(_read_model(), _policy(), {"frames": {"NVDA": pd.DataFrame([row])}}, {},
+        {"exchange_rate_converter": _converter()}, decision_time_ms=int(AS_OF.timestamp() * 1000))
+    assert scan["scope_results"][0]["reason_code"] == expected
+
+
 def test_shared_coverage_and_finalization_prioritize_wheel_over_ordinary_cc() -> None:
     model = {
         "account": "lx",
@@ -993,6 +1077,57 @@ def test_wheel_scan_preserves_partial_data_when_another_candidate_is_valid() -> 
     assert len(result["raw_candidates"]["stock-1"]) == 1
     assert result["scope_results"][0]["status"] == "completed"
     assert result["scope_results"][0]["reason_code"] == "partial_data"
+
+
+@pytest.mark.parametrize("direction", ["call", "put"])
+@pytest.mark.parametrize("kind", ["no_bid", "missing_ask", "economics"])
+def test_wheel_diagnostics_reach_sealed_snapshot_and_brief(tmp_path, direction, kind):
+    model = _eligibility_model(direction)
+    row = phase2_opening_row(_call_row(option_type=direction,
+        delta=-0.3 if direction == "put" else 0.3, strike=99 if direction == "put" else 110))
+    fees = {"exchange_rate_converter": _converter()}
+    if kind == "no_bid":
+        row.update(bid=0, ask=0, opening_contract_status="ineligible",
+                   opening_contract_reason_codes=["option_no_current_bid", "option_ask_missing_or_invalid"])
+        expected = "无当前买盘，已排除"
+    elif kind == "missing_ask":
+        row.update(ask=None)
+        expected = "卖价缺失或无效"
+    else:
+        fee_key = "stock_exit_fee_fact_fn" if direction == "call" else "stock_assignment_fee_fact_fn"
+        fees[fee_key] = lambda *_: {"basis": "missing", "amount": None}
+        expected = "卖股费用不可用" if direction == "call" else "指派买股费用不可用"
+    args = (model, _policy(), {"frames": {"NVDA": pd.DataFrame([row])}})
+    if direction == "call":
+        scan = run_wheel_call_scan(*args, {}, fees, decision_time_ms=int(AS_OF.timestamp() * 1000))
+        captured = finalize_wheel_capacity(account="lx", wheel_read_model=model, wheel_scan=scan,
+                                           opening_call_candidates=[], coverage_facts=[])
+    else:
+        scan = run_wheel_put_scan(*args, fees, decision_time_ms=int(AS_OF.timestamp() * 1000))
+        captured = finalize_wheel_put_capacity(account="lx", wheel_read_model=model, wheel_scan=scan,
+            opening_put_candidates=[], cash_capacity_fact=cash_portfolio({
+                "account": "lx", "status": "available", "cash_by_currency": {"USD": 100_000},
+                "wheel_intent_reservations": [], "capacity_identity_hash": "c" * 64}),
+            exchange_rate_converter=_converter())
+    diagnostics = captured["batches"][0]["candidate_diagnostics"]
+    assert diagnostics and all(item["contract_count"] == 1 for item in diagnostics)
+    if kind == "no_bid":
+        assert captured["batches"][0]["reason_code"] == "no_candidate"
+        assert {item["outcome"] for item in diagnostics} == {"ineligible"}
+    payload = seal_wheel_candidate_snapshot(base=tmp_path, run_id="diagnostics", account="lx", market="us",
+        account_config_sha256="a" * 64, strategy_policy_sha256="b" * 64,
+        dependencies=_seal_dependencies(), scope_results=captured["scope_results"],
+        batches=captured["batches"], capacity_allocations=captured["allocations"],
+        run_mode={"scan_mode": "standard", "executable": True}, sealed_at=AS_OF)
+    assert load_wheel_candidate_snapshot(base=tmp_path, run_id="diagnostics", account="lx") == payload
+    views, _, available = _load_wheel_snapshot_family(run_id="diagnostics", account="lx", market="US",
+        source_artifacts=[], data_gaps=[], snapshot=payload)
+    assert available and views[0]["candidate_diagnostics"] == diagnostics
+    from src.application.daily_decision_brief_renderer import render_fixed_report
+    message = render_fixed_report({"account": "lx", "market": "US", "wheel_batches": views})
+    assert expected in message
+    assert f"1 份 {direction.title()}" in message
+    assert "暂停建议" not in message
 
 
 @pytest.mark.parametrize("direction", ["put", "call"])

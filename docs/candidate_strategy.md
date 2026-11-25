@@ -161,6 +161,10 @@ CC 的持股覆盖或成本底价。组合资金、风险和排序由组合 owne
 - OpenD 明确返回 `bid=0` 且其余身份/盘口/状态证据完整时，视为当前无有效
   买盘的合法市场状态，合约归为 `ineligible`，不作为“证据缺失”告警；`bid`
   缺失、非有限或为负仍 `data_unavailable`。
+- 交易时段内明确 `bid=0, ask=0`，且身份、状态、乘数、价格档位和时效均有效时，
+  同样归为无买盘的 `ineligible`；保留 `option_ask_missing_or_invalid` 诊断，不允许买入。
+  Ask 缺失或负数、其他证据缺口、休市参考行情均不适用此例外。决策时重新核验期权
+  receipt 和标的源时间；已过期的无买盘观察属于证据不足，不能沿用取数时的排除结论。
 - 不回退旧 required-data、CSV、收盘价或 `last` 作为 bid/ask 替代。
 - 市场状态、spot 或关键时间戳缺失时，在最小受影响范围内 `data_unavailable`。
 

@@ -492,7 +492,20 @@ def normalize_option_observation(
             and snapshot_age_seconds > int(max_age_seconds)
         ):
             unavailable.append("option_snapshot_stale")
-        if unavailable:
+        # A fresh, identity-verified live double-zero quote already proves that
+        # this contract cannot be sold. Retain the ask diagnostic for buy-side
+        # consumers; no other missing evidence may use this exception.
+        no_live_market = (
+            closed_market_reference is None
+            and underlier_observation.status == "ready"
+            and bid == 0 and ask == 0
+            and unavailable == ["option_ask_missing_or_invalid"]
+            and ineligible == ["option_no_current_bid"]
+        )
+        if no_live_market:
+            status = "ineligible"
+            reason_codes = tuple(ineligible + unavailable)
+        elif unavailable:
             status = "data_unavailable"
             reason_codes = tuple(dict.fromkeys(unavailable + ineligible))
         elif ineligible:

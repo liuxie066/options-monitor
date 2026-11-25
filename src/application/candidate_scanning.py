@@ -28,6 +28,10 @@ from src.application.earnings_calendar import annotate_candidates_with_earnings_
 from src.application.required_data_coverage import required_data_candidate_coverage
 
 _DEFINITIVE_CALCULATION_REASONS = frozenset({"net_premium_non_positive"})
+_EVIDENCE_UNAVAILABLE_REASONS = frozenset({
+    REJECT_EVIDENCE_UNAVAILABLE, REJECT_INPUT_INVALID, REJECT_INPUT_MISSING,
+    REJECT_RISK_EARNINGS_UNAVAILABLE, REJECT_RISK_DELTA_UNAVAILABLE,
+})
 _DEFINITIVE_CONTRACT_EVIDENCE_REASONS = frozenset(
     {
         "option_multiplier_conflict",
@@ -213,9 +217,9 @@ def calculation_rejection(normalized_input: Mapping[str, Any], reason: Mapping[s
     # fallback is the general input-invalid reason.
     reject_reason = REJECT_INPUT_INVALID
     for matched, candidate_reason in (
+        (specific_reason == REJECT_EVIDENCE_UNAVAILABLE, REJECT_EVIDENCE_UNAVAILABLE),
         (opening_status == "ineligible", REJECT_CONTRACT_INELIGIBLE),
         (opening_status in {"data_unavailable", "market_closed"}, REJECT_EVIDENCE_UNAVAILABLE),
-        (specific_reason == REJECT_EVIDENCE_UNAVAILABLE, REJECT_EVIDENCE_UNAVAILABLE),
         (specific_reason == REJECT_CONTRACT_INELIGIBLE, REJECT_CONTRACT_INELIGIBLE),
         (specific_reason in _DEFINITIVE_CONTRACT_EVIDENCE_REASONS, REJECT_CONTRACT_INELIGIBLE),
         (opening_status != "ready", REJECT_INPUT_INVALID),
@@ -326,6 +330,42 @@ def run_candidate_scan(
     return out
 
 
+def candidate_diagnostics_from_decisions(decisions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Retain rejection details without reclassifying the owning decision.
+
+    Counts are per reason and expiration, not additive across reasons. Identity
+    sets prevent the same contract from being counted twice for one reason.
+    """
+    grouped: dict[tuple[str, str, str], set[str]] = {}
+    for index, record in enumerate(decisions):
+        decision = record.get("opening_decision", record)
+        if decision.get("accepted"):
+            continue
+        normalized = decision.get("normalized_input") or record.get("normalized_input") or {}
+        expiration = str(normalized.get("expiration") or "")
+        identity = str(decision.get("contract_symbol") or normalized.get("contract_symbol") or index)
+        for reject in decision.get("rejects") or []:
+            reason = reject.get("reason")
+            if reason not in _EVIDENCE_UNAVAILABLE_REASONS and reason != REJECT_CONTRACT_INELIGIBLE:
+                continue
+            outcome = "ineligible" if reason == REJECT_CONTRACT_INELIGIBLE else "unavailable"
+            detail = reject.get("metric_value")
+            codes = []
+            # Calculation rejects wrap the original calculation payload once;
+            # policy rejects already carry the direct metric value.
+            for value in (detail, detail.get("metric_value") if isinstance(detail, dict) else None):
+                if isinstance(value, dict):
+                    if isinstance(value.get("reason_codes"), (list, tuple)) and value["reason_codes"]:
+                        codes = list(value["reason_codes"])
+                    elif value.get("reason_code"):
+                        codes = [value["reason_code"]]
+            for code in codes or [reason]:
+                grouped.setdefault((outcome, str(code), expiration), set()).add(identity)
+    return [{"outcome": outcome, "reason_code": reason, "expiration": expiration,
+             "contract_count": len(identities)}
+            for (outcome, reason, expiration), identities in sorted(grouped.items())]
+
+
 def evidence_summary_from_decisions(
     *,
     decisions: list[dict[str, Any]],
@@ -349,13 +389,7 @@ def evidence_summary_from_decisions(
     unavailable_by_reason: dict[str, int] = {}
     diagnostic_gaps_by_reason: dict[str, int] = {}
     accepted_decisions = 0
-    unavailable_reasons = {
-        REJECT_EVIDENCE_UNAVAILABLE,
-        REJECT_INPUT_INVALID,
-        REJECT_INPUT_MISSING,
-        REJECT_RISK_EARNINGS_UNAVAILABLE,
-        REJECT_RISK_DELTA_UNAVAILABLE,
-    }
+    unavailable_reasons = _EVIDENCE_UNAVAILABLE_REASONS
     for record in decisions:
         if not isinstance(record, dict):
             raise ValueError("candidate evidence decision must be an object")

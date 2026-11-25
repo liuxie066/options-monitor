@@ -354,6 +354,42 @@ def test_option_observation_explicit_zero_bid_is_ineligible_not_unavailable() ->
     assert "option_bid_missing_or_invalid" not in observation.reason_codes
 
 
+@pytest.mark.parametrize("market", ["US", "HK"])
+def test_live_double_zero_quote_is_ineligible_with_ask_diagnostic(market):
+    observation = (_us_option(snapshot_row=_snapshot(bid_price=0.0, ask_price=0.0), **_RECEIPT)
+                   if market == "US" else _hk_option(_hk_underlier(_HK_NOW), _HK_NOW,
+                       snapshot_row=_hk_snapshot(bid_price=0.0, ask_price=0.0), **_RECEIPT_HK))
+    assert observation.status == "ineligible"
+    assert set(observation.reason_codes) == {"option_no_current_bid", "option_ask_missing_or_invalid"}
+
+
+@pytest.mark.parametrize("change", [{"sec_status": None}, {"code": "wrong"},
+                                   {"ask_price": None}, {"ask_price": -1.0}])
+def test_double_zero_exception_does_not_hide_untrusted_or_missing_quote(change):
+    observation = _us_option(snapshot_row=_snapshot(**{"bid_price": 0.0, "ask_price": 0.0, **change}), **_RECEIPT)
+    assert observation.status == "data_unavailable"
+
+
+def test_double_zero_stale_receipt_and_closed_market_stay_unavailable():
+    stale = _us_option(snapshot_row=_snapshot(bid_price=0, ask_price=0),
+        snapshot_requested_at_utc="2026-08-06T14:50:00Z", snapshot_received_at_utc="2026-08-06T14:50:01Z")
+    assert stale.status == "data_unavailable"
+    assert "option_snapshot_stale" in stale.reason_codes
+    closed = _hk_option(_hk_underlier(_HK_NOW, market_state="CLOSED"), _HK_NOW,
+                         snapshot_row=_hk_snapshot(bid_price=0, ask_price=0), **_RECEIPT_HK)
+    assert closed.status == "market_closed"
+
+
+@pytest.mark.parametrize("side", ["buy", "sell"])
+def test_double_zero_normalization_cannot_authorize_either_order_side(side):
+    from domain.domain.engine.candidate_engine import CandidateCalculationError, validate_option_contract_evidence
+    observation = _us_option(snapshot_row=_snapshot(bid_price=0, ask_price=0), **_RECEIPT)
+    with pytest.raises(CandidateCalculationError):
+        validate_option_contract_evidence({"opening_contract_status": observation.status,
+            "opening_contract_reason_codes": list(observation.reason_codes), "bid": observation.bid,
+            "ask": observation.ask}, mode="put", quote_side=side, now_utc=_US_NOW)
+
+
 def test_option_observation_zero_bid_does_not_mask_other_unavailable_evidence() -> None:
     observation = _us_option(snapshot_row=_snapshot(bid_price=0.0, sec_status=None), **_RECEIPT)
 
