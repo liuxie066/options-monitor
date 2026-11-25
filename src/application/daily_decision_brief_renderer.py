@@ -933,7 +933,7 @@ def _render_user_view(
             lines.extend(
                 [
                     _VISIBLE_BLANK_LINE,
-                    f"{section_mark} 持仓事实核查（非交易建议）",
+                    f"{section_mark} 持仓提醒（非交易建议）",
                 ]
             )
             for item in fact_reviews:
@@ -944,7 +944,7 @@ def _render_user_view(
                     ]
                 )
                 for detail in item.get("details") or []:
-                    lines.append(f"核查原因｜{detail}")
+                    lines.append(f"说明｜{detail}")
 
     funds = [str(item) for item in view.get("funds") or [] if str(item).strip()]
     capacity = [str(item) for item in view.get("capacity") or [] if str(item).strip()]
@@ -1149,11 +1149,11 @@ def _render_user_view_blocks(
                 blocks.append("\n".join(lines), "action", -int(item.get("selection_rank", index)),
                               identities=item.get("roll_identities") or ())
         if fact_reviews:
-            blocks.append(heading("持仓事实核查（非交易建议）"))
+            blocks.append(heading("持仓提醒（非交易建议）"))
             for item in fact_reviews:
                 blocks.append("\n".join([
                     emphasis(f"{_flat_title(item['title'])}｜{item['status']}"),
-                    *[f"核查原因｜{detail}" for detail in item.get("details") or []],
+                    *[f"说明｜{detail}" for detail in item.get("details") or []],
                 ]), "aux")
 
     funds = [str(item) for item in view.get("funds") or [] if str(item).strip()]
@@ -1394,7 +1394,7 @@ def _business_deadline(row: Mapping[str, Any]) -> datetime | None:
     return min((value for value in values if value is not None), default=None)
 
 
-def _has_timing_reminder(row: Mapping[str, Any]) -> bool:
+def _has_position_reminder(row: Mapping[str, Any]) -> bool:
     return (
         _lower(row.get("decision_basis")) == "near_expiry_far_otm_hold"
         or any(row.get(key) for key in ("last_trading_at_utc", "assignment_deadline_at_utc", "event_at_utc"))
@@ -1453,7 +1453,7 @@ def _selection_plan(
             continue
         if _lower(row.get("recommendation_state")) == "not_evaluable":
             unavailable += 1
-        elif _has_timing_reminder(row):
+        elif _has_position_reminder(row):
             reminders.append({"kind": "position", "tier": "C", "rows": [row]})
         elif _position_status_label(row).startswith("暂无法评估"):
             unavailable += 1
@@ -2487,9 +2487,35 @@ def _position_views(
                 ]]
             if display_kind == "fact_review":
                 deadline = _business_deadline(row)
-                status = "持仓时间提醒" if deadline else "持仓提醒 · 时间待核实"
-                details = ([f"已证实时间：{deadline.isoformat()}；执行前复核持仓和报价。"] if deadline else
-                           ["时间待核实；请先核对交易日历与事件时间，继续按原持仓建议观察。"])
+                status = f"持仓提醒 · {status}"
+                reason = str(row.get("reason") or "").strip()
+                details = [reason] if reason else []
+                facts: list[str] = []
+                sessions = _whole_number(row.get("remaining_trading_sessions"))
+                minimum = _whole_number(row.get("remaining_trading_sessions_min"))
+                maximum = _whole_number(row.get("remaining_trading_sessions_max"))
+                if sessions is not None:
+                    facts.append(f"剩余交易日 {sessions} 天")
+                elif minimum is not None and maximum is not None:
+                    facts.append(f"剩余交易日 {minimum}–{maximum} 天")
+                delta = _number(row.get("delta"))
+                if delta is not None:
+                    facts.append(f"Delta {delta:g}")
+                if facts:
+                    details.append(" · ".join(facts))
+                # A hold decision needs session evidence, not an intraday deadline.
+                # Only an explicitly supplied time can require time verification.
+                for key, label in (
+                    ("last_trading_at_utc", "最后交易时间"),
+                    ("assignment_deadline_at_utc", "指派截止时间"),
+                    ("event_at_utc", "事件时间"),
+                ):
+                    if row.get(key):
+                        confirmed = _confirmed_time(row[key])
+                        details.append(f"{label}：{confirmed.isoformat()}" if confirmed else
+                                       f"{label}待核实：来源未提供带时区的有效时刻。")
+                if deadline:
+                    status = "持仓时间提醒"
         out.append(
             {
                 "title": " · ".join(title_parts),
@@ -2575,7 +2601,7 @@ def _position_has_advice(row: Mapping[str, Any]) -> bool:
 
 
 def _is_position_fact_review(row: Mapping[str, Any]) -> bool:
-    return _has_timing_reminder(row) and not _position_has_advice(row)
+    return _has_position_reminder(row) and not _position_has_advice(row)
 
 
 def _partition_position_views(
@@ -2611,7 +2637,7 @@ def _position_summary(
             summary += f"，需交易处理 {trade_total} 条"
         else:
             summary += "，当前没有需要交易处理的持仓"
-        summary += f"，另有事实核查 {review_total} 条（非交易建议）"
+        summary += f"，另有持仓提醒 {review_total} 条（非交易建议）"
     elif actionable_total:
         summary += f"，需处理 {actionable_total} 条"
     else:

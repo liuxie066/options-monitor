@@ -130,16 +130,22 @@ def test_zero_account_cap_still_respects_whole_brief_budget() -> None:
     assert len(view["positions"]) == 40
 
 
-@pytest.mark.parametrize("unknown_time", [None, "2026-07-20", "2026-07-20T01:00:00", "invalid"])
-def test_unknown_reminder_time_sorts_after_confirmed_time_without_forced_close(unknown_time) -> None:
+@pytest.mark.parametrize("unknown_time", ["2026-07-20", "2026-07-20T01:00:00", "invalid"])
+@pytest.mark.parametrize("field,label", [
+    ("last_trading_at_utc", "最后交易时间"),
+    ("assignment_deadline_at_utc", "指派截止时间"),
+    ("event_at_utc", "事件时间"),
+])
+def test_unknown_reminder_time_sorts_after_confirmed_time_without_forced_close(unknown_time, field, label) -> None:
     rows = [{**_close(i), "recommendation_state": "hold", "decision_basis": "near_expiry_far_otm_hold"} for i in range(2)]
-    rows[0]["last_trading_at_utc"] = unknown_time
-    rows[1]["last_trading_at_utc"] = "2026-07-21T20:00:00Z"
+    rows[0][field] = unknown_time
+    rows[1][field] = "2026-07-21T20:00:00Z"
     brief = _source(rows)
     view = build_daily_brief_user_view(brief)
     assert _symbols(view) == ["C1", "C0"]
     text = render_fixed_report_card_markdown(brief)
-    assert "时间待核实" in text
+    assert f"{label}待核实" in text
+    assert f"{label}：2026-07-21T20:00:00+00:00" in text
     assert "必须平仓" not in text
 
 
