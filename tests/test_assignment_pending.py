@@ -376,6 +376,25 @@ def test_pending_survives_canonical_brief_normalization(status, text):
     assert text in "".join(_fund_views(brief))
 
 
+def test_multi_currency_pending_normalizes_and_reports_each_currency():
+    from domain.domain.daily_decision_brief import normalize_daily_decision_brief
+    from src.application.daily_decision_brief_renderer import _fund_views
+    brief = normalize_daily_decision_brief({"schema_version": "daily_decision_brief.v1",
+        "account": "lx", "market": "US", "market_trading_date": "2026-11-23", "revision": 1,
+        "funds": {"assignment_pending": {
+            "status": "unmatched", "reason": "multiple_currency_reconciliation", "currency": "",
+            "pending_amount": 12245, "adjustment": 9745, "items": [
+                {"status": "matched", "reason": "assignment_pending_inferred", "currency": "USD",
+                 "pending_amount": 9745, "adjustment": 9745},
+                {"status": "unmatched", "reason": "assignment_amount_mismatch", "currency": "HKD",
+                 "pending_amount": 2500, "adjustment": 0},
+            ],
+        }}})
+    rendered = "".join(_fund_views(brief))
+    assert "指派匹配在途：$9,745.00" in rendered
+    assert "未纳入开仓额度" in rendered and "HK$2,500.00" in rendered
+
+
 def test_pending_ledger_query_facade_preserves_canonical_functions():
     from src.application.ledger import api, query_api
     assert query_api.list_canonical_position_lot_snapshots is api.list_canonical_position_lot_snapshots
