@@ -3002,8 +3002,8 @@ def test_fact_review_blocks_share_content_without_becoming_trade_advice(monkeypa
     monkeypatch.setattr(renderer, "build_daily_brief_user_view", lambda *a, **k: view)
     blocks = render_fixed_report_card_blocks({})
     text = render_fixed_report_text({})
-    assert "## 持仓事实核查（非交易建议）" in blocks
-    assert "核查原因｜持仓事实证据不完整" in text
+    assert "## 持仓提醒（非交易建议）" in blocks
+    assert "说明｜持仓事实证据不完整" in text
     assert "当前没有需要交易处理的持仓" in text
     assert "建议平仓" not in text
     assert _shared_channel_content(text) == _shared_channel_content(_plain_card_content("\n\n".join(blocks)))

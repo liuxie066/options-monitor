@@ -2296,6 +2296,59 @@ def test_close_advice_daily_brief_honors_ranked_account_limit(
     assert brief["next_fixed_report_at_utc"] == "2026-07-17T15:00:00+00:00"
 
 
+@pytest.mark.parametrize("sessions", [0, 2, None])
+@pytest.mark.parametrize("market,option_type,symbol,spot", [
+    ("US", "put", "NVDA", 120), ("HK", "call", "3690.HK", 70),
+])
+def test_near_expiry_hold_report_preserves_reason_without_inventing_time_gap(
+    tmp_path: Path, sessions, market, option_type, symbol, spot,
+) -> None:
+    from test_strict_close_advice import _row
+    from src.application.daily_decision_brief_renderer import (
+        render_fixed_report_card_markdown, render_fixed_report_text,
+    )
+
+    account_dir = _write_labeled_put_candidates(tmp_path, header_only=True)
+    if market == "HK":
+        (account_dir / "nvda_sell_put_candidates_labeled.csv").rename(
+            account_dir / "3690.hk_sell_put_candidates_labeled.csv"
+        )
+    row = _row(dte=4, bid=0.0, ask=0.01, delta=0.05 if option_type == "call" else -0.05, option_type=option_type,
+               symbol=symbol, spot=spot, currency="HKD" if market == "HK" else "USD",
+               remaining_trading_sessions=sessions,
+               remaining_trading_sessions_min=0 if sessions is None else sessions,
+               remaining_trading_sessions_max=1 if sessions is None else sessions)
+    assert row["decision_basis"] == "near_expiry_far_otm_hold"
+    _write_close_report(account_dir, [row], market=market)
+    brief = _assemble(tmp_path, market=market)
+    for render in (render_fixed_report_card_markdown, render_fixed_report_text):
+        text = render(brief)
+        assert row["reason"] in text
+        assert f"Delta {row["delta"]:g}" in text
+        assert ("剩余交易日 0–1 天" if sessions is None else f"剩余交易日 {sessions} 天") in text
+        assert "时间待核实" not in text
+        assert "核查原因" not in text
+        assert "建议平仓" not in text
+
+
+@pytest.mark.parametrize("missing", [{"delta": None}, {"remaining_trading_sessions": None}])
+def test_missing_hold_evidence_remains_unavailable_in_brief(tmp_path: Path, missing) -> None:
+    from test_strict_close_advice import _row
+    from src.application.daily_decision_brief_renderer import render_fixed_report_card_markdown
+
+    account_dir = _write_labeled_put_candidates(tmp_path, header_only=True)
+    row = _row(**{"dte": 4, "bid": 0.0, "ask": 0.01, "delta": -0.05,
+                  "remaining_trading_sessions": 2, **missing})
+    assert row["recommendation_state"] == "not_evaluable"
+    _write_close_report(account_dir, [row])
+    brief = _assemble(tmp_path)
+    assert brief["positions"][0]["reason"] == row["reason"]
+    text = render_fixed_report_card_markdown(brief)
+    assert "1 条暂无法评估" in text
+    assert "倾向持有到期" not in text
+    assert "时间待核实" not in text
+
+
 def test_daily_brief_retains_all_qualified_closes_before_configured_section_limit(tmp_path: Path) -> None:
     from domain.domain.close_advice import select_close_advice_notification_rows
     from src.application.daily_decision_brief_renderer import build_daily_brief_user_view
