@@ -97,6 +97,15 @@ def load(tmp_path, fetch, **overrides):
     return load_account_portfolio_context(**params)
 
 
+@pytest.fixture(autouse=True)
+def _use_injected_futu_provider(monkeypatch):
+    # These tests exercise cache and consumer contracts; provider selection is
+    # covered elsewhere and must not require a separately installed plugin.
+    import src.application.portfolio_context_service as service
+    monkeypatch.setattr(service, "resolve_broker_portfolio_provider",
+                        lambda _config, *, account, futu_provider: futu_provider)
+
+
 def test_cache_reuse_binds_current_fx_without_mutating_source(tmp_path):
     ctx = cash_context(exchange_rates={"old": True})
     path = tmp_path / "portfolio_context.json"

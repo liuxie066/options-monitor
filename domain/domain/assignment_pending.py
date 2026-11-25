@@ -33,9 +33,6 @@ def match_assignment_pending(*, balance, orders, terms, account_id, environment,
         return {**result, "status": "none", "reason": "no_pending"}
     if cash is None or cash >= 0 or pending != -cash:
         return result
-    if any((number(balance.get(key)) or 0) < 0 for key in ("us_cash", "hk_cash", "cn_cash") if key != field):
-        return {**result, "reason": "assignment_currency_ambiguous"}
-
     # No default contract multiplier: terms come from the account's existing ledger.
     by_contract = {}
     for term in terms:
