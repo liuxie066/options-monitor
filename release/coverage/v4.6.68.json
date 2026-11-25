@@ -1,0 +1,65 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.68",
+  "base": {
+    "tag": "v4.6.67",
+    "commit": "3f6195ac8d332e31ba24230d54e5af09e6739ab6"
+  },
+  "reviewed_head": "a587f5a8355bae26d7339feace1a3aa7aac979f3",
+  "commits": [
+    {
+      "sha": "2e2ed220bcd6e313ef0eba550ebfef0bb83bc1fb",
+      "subject": "fix(ledger): preserve late voids in assignment metadata replay"
+    },
+    {
+      "sha": "ddfa2fd0a1fbfdfef29d32179b39b17645488cf4",
+      "subject": "docs: note assignment replay correction"
+    },
+    {
+      "sha": "a587f5a8355bae26d7339feace1a3aa7aac979f3",
+      "subject": "Merge pull request #1287: preserve assignment history voids"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Put 接货期间查询在历史回放中保留有效作废记录，避免已作废开仓复活触发批次重复错误；继续保留真实重复、来源缺口和实际费用校验。",
+      "commits": [
+        "2e2ed220bcd6e313ef0eba550ebfef0bb83bc1fb"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "ddfa2fd0a1fbfdfef29d32179b39b17645488cf4",
+      "reason": "Changelog documentation for the same assignment replay correction; no additional behavior."
+    },
+    {
+      "commit": "a587f5a8355bae26d7339feace1a3aa7aac979f3",
+      "reason": "Merge of reviewed assignment replay correction; no additional behavior."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "2e2ed220bcd6e313ef0eba550ebfef0bb83bc1fb",
+      "references": [
+        "docs/ASSIGNED_STOCK_RETURN_DESIGN.md",
+        "https://github.com/liuxie066/options-monitor/pull/1287"
+      ]
+    },
+    {
+      "commit": "ddfa2fd0a1fbfdfef29d32179b39b17645488cf4",
+      "references": [
+        "docs/ASSIGNED_STOCK_RETURN_DESIGN.md",
+        "https://github.com/liuxie066/options-monitor/pull/1287"
+      ]
+    },
+    {
+      "commit": "a587f5a8355bae26d7339feace1a3aa7aac979f3",
+      "references": [
+        "docs/ASSIGNED_STOCK_RETURN_DESIGN.md",
+        "https://github.com/liuxie066/options-monitor/pull/1287"
+      ]
+    }
+  ]
+}
