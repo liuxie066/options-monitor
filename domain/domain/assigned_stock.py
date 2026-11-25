@@ -1809,7 +1809,7 @@ def project_assigned_stock_lifecycle(
             if quote is not None
             else ("not_required" if shares_remaining == 0 else "missing_quote")
         )
-        if quote is not None and quote_status not in {"fresh", "stale", "missing_quote"}:
+        if quote is not None and quote_status not in {"fresh", "stale", "missing_quote", "closed_market_carry"}:
             quote_status = "fresh" if spot is not None else "missing_quote"
         remaining_market_value = _round_money(spot * shares_remaining) if spot is not None and shares_remaining > 0 else None
         assigned_stock_unrealized_pnl = (

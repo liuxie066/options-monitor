@@ -125,6 +125,29 @@ CNY 为 null/partial；禁止用当前汇率补历史缺口。
 - 历史数量和策略元数据复用同一份已验证事件选择，保留用于重述该边界的晚到 void；
   不再次按时间丢弃这些控制记录，也不纳入边界之后的开仓或策略调整。
 
+当前正股估值共用 `market_data_provider.get_stock_valuation_quote`，OpenD 实现归
+`opend_market_snapshot_fetching`。接货刷新（包括默认未指定 preserve_evidence 的路径）、
+组合估值及当前绩效的结构化 spot 入口均复用这一选择；原始观测接口不改 readiness。
+正常交易时沿用新鲜 `quote_observation`。休市或盘前由同一报价入口
+查询完整原生日历，仅请求最近完整结束交易日的 `K_DAY / NONE` 未复权日线；不调用
+历史回填或用 `prev_close_price` 估算替代。单日结果必须完整分页且只有对应代码/日期
+的一行。午休、盘中及收盘竞价不以未完成的当日日线估值，未来时间或币种冲突保留缺口。
+
+此路径在既有估值 owner 中使用 `om.closed-market-carry.v2`（仅单只正股）：
+`daily_close` 保留原始请求、行、完整性和实际取得毫秒，`session_observation` 保留
+原观测及独立取得时间，`calendars` 保留带取得时间的完整原生日历。收盘生效时间由
+同一市场时段政策、交易日期及半日市类型推导，保持在 `quote_time_ms`；本次日线
+取得时间另列于 `quote_observed_at_ms` 与 mark 的 `available_at_ms`，不得回填成
+收盘时已经取得。凭证在下一正常时段开盘时失效，使用时再次校验日期、价格、代码、
+币种及可知时间；已有 v1 封存凭证的严格口径不变。日历查询窗口为当前市场日期前后
+14天；无法证明最近完整交易日或下一开盘时刻时返回缺口，不外推。
+
+`quote_refresh.received_symbols` 仅表示收到观测，`qualified_symbols` 与
+`refreshed_symbols` 表示最终估值时确实可用；`observation_status` 留存各标的原观测
+状态，`qualification_gaps` 及原始错误列保留遗漏原因。取得后因时效到期而被排除也
+进入这些缺口；部分可用返回 `partial`，全无可用返回 `missing_quote`，来源错误不
+改写成合法空结果。新报价不改变批次的 confirmed/ledger-only 判定或实际费用要求。
+
 ## 公开入口
 
 期间表现：
@@ -216,7 +239,9 @@ Control / CLI 边界。
 `assignment_month`（YYYY-MM），或同时指定 `assignment_start_date` /
 `assignment_end_date`（YYYY-MM-DD，用户日期含两端）。三种选择互斥。
 当前年/月按 YTD/MTD，截至请求时刻；过去期间按完整自然期间选批次，均使用
-Asia/Shanghai。期间只选择指派生效批次，持有/已售状态来自本次固定账本，
+Asia/Shanghai。期间明细的 `assigned_date` 也从 `assigned_at_ms` 按同一时区
+生成，包括账户／标的下钻，避免美股当地日期与北京时间跨日时显示不一致。
+不更改指派时间戳或底层生命周期的市场日期。期间只选择指派生效批次，持有/已售状态来自本次固定账本，
 价格为当前合格观察。新期间查询固定 `status=all`，不能与显式 `as_of_ms`
 同时使用。旧无期间参数的通用 assigned-stock 和历史查询保持原语义。
 

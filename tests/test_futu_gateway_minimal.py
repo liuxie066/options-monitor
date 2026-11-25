@@ -1051,3 +1051,38 @@ def test_port_open_preserves_original_sdk_path(monkeypatch) -> None:
     with pytest.raises(mod.FutuGatewayError):
         mod.build_ready_futu_quote_gateway(host="127.0.0.9", port=11119)
     assert constructed == [("127.0.0.9", 11119)]
+
+
+@pytest.mark.parametrize('stop', ['cancelled', 'deadline'])
+def test_history_kline_bounds_inflight_sdk_call_and_keeps_controls_out_of_sdk(stop):
+    from threading import Event
+    from time import monotonic
+    from src.infrastructure import futu_gateway as mod
+
+    entered, release = Event(), Event()
+    seen = []
+    class SDK:
+        def request_history_kline(self, **kwargs):
+            seen.append(kwargs)
+            entered.set()
+            release.wait(1)
+            return 0, [], None
+        def close(self):
+            pass
+    query = mod._FutuQueryContext(SDK(), deadline=None, cancelled=None)
+    class Backend:
+        def _ensure_quote_client(self):
+            return query
+    gateway = mod.FutuGateway(host='isolated.invalid', port=1, backend=Backend(), client=None)
+    before = mod._FETCH_CONTROL.get()
+    controls = {'cancelled': entered.is_set} if stop == 'cancelled' else {'deadline': monotonic() + 0.1}
+    try:
+        with pytest.raises(TimeoutError, match='cancelled|deadline'):
+            gateway.request_history_kline(code='US.FUTU', start='2026-11-24', end='2026-11-24',
+                                          ktype='K_DAY', autype='NONE', **controls)
+        assert entered.is_set()
+        assert query._unavailable is not None
+        assert mod._FETCH_CONTROL.get() == before
+        assert seen and 'deadline' not in seen[0] and 'cancelled' not in seen[0]
+    finally:
+        release.set()
