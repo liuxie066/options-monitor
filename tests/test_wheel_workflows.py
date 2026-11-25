@@ -546,6 +546,7 @@ def _create_call_intent(
     include_decision_identity: bool = True,
     include_capacity_identity: bool = True,
     account_shares: int | None = None,
+    apply_changes: bool = True,
 ) -> tuple[dict, dict]:
     batch = build_wheel_read_model(repo, "lx", 3_000)["batches"][0]
     snapshot = {
@@ -618,32 +619,25 @@ def _create_call_intent(
         },
         policy_sha256="a" * 64,
         broker_order_id=broker_order_id,
-        apply_changes=True,
+        apply_changes=apply_changes,
         as_of_ms=4_000,
     )
     return created, coverage
 
 
 @pytest.mark.parametrize("account_shares", [100, 200])
-def test_unresolved_call_intent_rechecks_net_capacity_without_attributing_old_call(tmp_path, account_shares):
+@pytest.mark.parametrize("apply_changes", [False, True])
+def test_unresolved_call_intent_rejects_even_with_net_capacity(tmp_path, account_shares, apply_changes):
     repo, lot_id = _wheel_repo(tmp_path)
     _open_unlinked_call(repo, event_time_ms=2_500)
     before = repo.list_trade_events()
+    before_wheel = repo.list_wheel_events(account="lx")
     branch = build_wheel_read_model(repo, "lx", 3_000)["batches"][0]
     assert branch["phase"] == "linkage_unresolved"
-    if account_shares == 100:
-        before_wheel = repo.list_wheel_events(account="lx")
-        with pytest.raises(ValueError, match="coverage is insufficient"):
-            _create_call_intent(repo, lot_id, account_shares=account_shares)
-        assert repo.list_trade_events() == before
-        assert repo.list_wheel_events(account="lx") == before_wheel
-        return
-    created, _ = _create_call_intent(repo, lot_id, account_shares=account_shares)
-    after = build_wheel_read_model(repo, "lx", 5_000)["batches"][0]
-    assert created["status"] == "created"
-    assert after["phase"] == "linkage_unresolved"
-    assert after["active_intent_reserved_shares"] == 100
+    with pytest.raises(ValueError, match="not ready for a Call intent"):
+        _create_call_intent(repo, lot_id, account_shares=account_shares, apply_changes=apply_changes)
     assert repo.list_trade_events() == before
+    assert repo.list_wheel_events(account="lx") == before_wheel
 
 
 def test_call_intent_rejects_stale_broker_fact_and_unbound_decision(

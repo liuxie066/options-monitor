@@ -146,6 +146,112 @@ def test_actual_assignment_shapes_match_without_fund_redemption_receipt(contract
     assert result["reason"] == "assignment_pending_inferred"
 
 
+def test_one_currency_matches_even_when_another_currency_is_also_in_deficit():
+    balance, orders, terms = sample()
+    balance["hk_cash"] = -2500
+    result = match(balance, orders, terms)
+    assert result["status"] == "matched"
+    assert result["adjustment"] == 9745
+
+
+def test_observation_reconciles_multiple_deficit_currencies_independently(monkeypatch):
+    balance, orders, terms = sample()
+    balance["hk_cash"] = -2500
+    hk_balance = {**balance, "currency": "HKD", "hk_cash": -2500,
+                  "pending_asset": 2500}
+    today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+    for row in orders:
+        row["create_time"] = today + " 02:14:30"
+    monkeypatch.setattr(ap, "_account_terms", lambda *_: terms)
+
+    class Gateway:
+        def get_history_orders(self, **kwargs):
+            rows = orders if kwargs["order_market"] == "US" else []
+            return {"retcode": 0, "coverage_complete": True, "pagination_complete": True, "rows": rows}
+
+    def query_rows(_gateway, _method, _account_ids, *, currency, **_kwargs):
+        return [balance if currency == "USD" else hk_balance]
+
+    initial = [{**balance, "currency": "CNH", "pending_asset": 1}]
+    rows, evidence = ap.observe_assignment_pending(
+        Gateway(), initial, query_rows=query_rows, cfg={}, account="lx", account_id="123", environment="REAL",
+    )
+    assert [item["currency"] for item in evidence["items"]] == ["USD", "HKD"]
+    assert [item["status"] for item in evidence["items"]] == ["matched", "unmatched"]
+    assert evidence["adjustment"] is None
+    assert evidence["pending_amount"] is None
+    assert evidence["items"][0]["adjustment"] == 9745
+    assert rows == [hk_balance]
+
+
+@pytest.mark.parametrize("usd_arrived,hkd_matched", [(False, False), (False, True), (True, False)])
+def test_live_multi_currency_adjustments_use_final_cash_snapshot(monkeypatch, usd_arrived, hkd_matched):
+    from src.application import futu_portfolio_context as fc
+    today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+    balance, orders, terms = sample(day=today)
+    balance["hk_cash"] = -2500
+    hk_day = datetime.now(ZoneInfo("Asia/Hong_Kong")).date().isoformat()
+    hk_orders = [
+        {**orders[0], "order_id": "hk-put", "currency": "HKD", "code": "HK.00700261120P25000",
+         "create_time": hk_day + " 02:14:30"},
+        {**orders[1], "order_id": "hk-stock", "currency": "HKD", "code": "HK.00700",
+         "price": 25, "dealt_avg_price": 25, "create_time": hk_day + " 02:14:30"},
+    ]
+    terms.append({"symbol": "0700.HK", "expiration_ymd": "2026-11-20", "strike": 25, "multiplier": 100})
+    final_balance = {**balance, "currency": "HKD", "pending_asset": 2500,
+                     "us_cash": 0 if usd_arrived else -9745, "fund_assets": 624000}
+    monkeypatch.setattr(ap, "_account_terms", lambda *_: terms)
+    class Gateway:
+        def get_account_balance(self, **kwargs):
+            if kwargs["currency"] == "CNH":
+                return [{**balance, "currency": "CNH", "fund_assets": 560000, "pending_asset": 70000}]
+            return [balance if kwargs["currency"] == "USD" else final_balance]
+        def get_history_orders(self, **kwargs):
+            rows = orders if kwargs["order_market"] == "US" else hk_orders if hkd_matched else []
+            return {"retcode": 0, "coverage_complete": True, "pagination_complete": True, "rows": rows}
+        def get_positions(self, **kwargs): return []
+        def close(self): pass
+    monkeypatch.setattr(fc, "build_ready_futu_broker_gateway", lambda **_: Gateway())
+    context = fc.fetch_futu_portfolio_context(
+        cfg={"portfolio": {"futu": {"host": "test", "port": 1, "trd_env": "REAL"}},
+             "account_settings": {"lx": {"futu": {"account_id": "123"}}}},
+        account="lx", exchange_rate_observation=None,
+    )
+    # The final HKD response owns the single fund_assets component; never keep
+    # an earlier USD fund component or re-credit USD that has already arrived.
+    assert context["cash_by_currency"]["USD"] == 0
+    assert context["cash_by_currency"]["HKD"] == 624000 - (0 if hkd_matched else 2500)
+    assert context["cash_by_currency"]["CNY"] == 0
+    for currency in ("USD", "HKD"):
+        assert context["cash_capacity_by_currency"][currency]["amount"] == context["cash_by_currency"][currency]
+
+
+def test_unreliable_cash_preserves_none_and_updates_single_match_reason():
+    from src.application.futu_portfolio_context import build_futu_portfolio_context
+    context = build_futu_portfolio_context(balance_rows=[], position_rows=[], account="lx")
+    ap.apply_assignment_pending(context, {"status": "none", "reason": "no_pending", "adjustment": 0})
+    assert context["assignment_pending"]["status"] == "none"
+    ap.apply_assignment_pending(context, {"status": "matched", "reason": "assignment_pending_inferred",
+                                         "currency": "USD", "pending_amount": 10, "adjustment": 10})
+    assert context["assignment_pending"]["status"] == "unmatched"
+    assert context["assignment_pending"]["reason"] == "cash_balance_unreliable"
+
+
+def test_apply_assignment_pending_credits_each_matched_currency_only():
+    from src.application.futu_portfolio_context import build_futu_portfolio_context
+    balance, _, _ = sample()
+    balance["hk_cash"] = -2500
+    context = build_futu_portfolio_context(balance_rows=[balance], position_rows=[], account="lx")
+    ap.apply_assignment_pending(context, {
+        "status": "unmatched", "adjustment": 9745, "currency": "", "items": [
+            {"status": "matched", "currency": "USD", "adjustment": 9745},
+            {"status": "unmatched", "currency": "HKD", "adjustment": 0},
+        ],
+    })
+    assert context["cash_by_currency"]["USD"] == 80000
+    assert context["cash_by_currency"]["HKD"] == -2500
+
+
 @pytest.mark.parametrize("change", [
     "amount", "cash", "currency", "time", "quantity", "strike",
     "account", "environment", "missing_terms", "multiplier", "old", "call",
@@ -323,6 +429,25 @@ def test_pending_survives_canonical_brief_normalization(status, text):
         "status": status, "currency": "USD", "pending_amount": 9745, "adjustment": 9745,
     }}})
     assert text in "".join(_fund_views(brief))
+
+
+def test_multi_currency_pending_normalizes_and_reports_each_currency():
+    from domain.domain.daily_decision_brief import normalize_daily_decision_brief
+    from src.application.daily_decision_brief_renderer import _fund_views
+    brief = normalize_daily_decision_brief({"schema_version": "daily_decision_brief.v1",
+        "account": "lx", "market": "US", "market_trading_date": "2026-11-23", "revision": 1,
+        "funds": {"assignment_pending": {
+            "status": "unmatched", "reason": "multiple_currency_reconciliation", "currency": "",
+            "pending_amount": None, "adjustment": None, "items": [
+                {"status": "matched", "reason": "assignment_pending_inferred", "currency": "USD",
+                 "pending_amount": 9745, "adjustment": 9745},
+                {"status": "unmatched", "reason": "assignment_amount_mismatch", "currency": "HKD",
+                 "pending_amount": 2500, "adjustment": 0},
+            ],
+        }}})
+    rendered = "".join(_fund_views(brief))
+    assert "指派匹配在途：$9,745.00" in rendered
+    assert "未纳入开仓额度" in rendered and "HK$2,500.00" in rendered
 
 
 def test_pending_ledger_query_facade_preserves_canonical_functions():

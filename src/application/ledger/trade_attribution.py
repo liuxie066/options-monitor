@@ -10,6 +10,7 @@ from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.ledger.position_fields import effective_contracts_open
 from domain.domain.trade_execution import execution_identity_from_input, legacy_open_execution_input_from_event
 from domain.domain.strategy_membership import strategy_metadata_has_owner, POSITION_LOT_STRATEGY_PATCH_FIELDS, validate_attribution_decision
+from domain.domain.wheel.projection import ordinary_attribution_decision as _ordinary_decision
 from domain.domain.ledger.events import lot_id_for_open_event
 from domain.domain.wheel import lot_strategy_metadata_from_trade_events, effective_wheel_events, build_wheel_event
 from .event_codec import valid_void_target_event_id
@@ -147,30 +148,6 @@ def assert_trade_attribution_unclaimed(events: Sequence[Mapping[str, Any]], lot_
             raise ValueError("trade attribution already claimed: " + lot_id)
         if _ordinary_decision(effective, lot_id, metadata=metadata, accepted=accepted):
             raise ValueError("trade attribution manually excluded: " + lot_id)
-
-
-def _ordinary_decision(events: Sequence[Mapping[str, Any]], lot_id: str, *,
-    metadata: Mapping[str, Mapping[str, Any]], accepted: set[str], allow_rule: bool = False,
-) -> dict[str, Any] | None:
-    for event in reversed(events):
-        raw = event.get("raw_payload") or {}
-        if (event.get("event_type") == "adjust" and event.get("target_lot_id") == lot_id
-                and any(key in (raw.get("patch") or {}) for key in POSITION_LOT_STRATEGY_PATCH_FIELDS)):
-            if "attribution_decision" in raw and event["event_id"] not in accepted:
-                continue
-            if (event.get("source") == "trade_attribution"
-                and (raw.get("attribution_origin") == "manual" or allow_rule
-                     and raw.get("attribution_origin") == "rule" and event["event_id"] in accepted
-                     and (raw.get("attribution_decision") or {}).get("manual") is False)
-                and raw.get("attribution_action") == "ordinary"
-                and raw.get("actor") and raw.get("attribution_request_id")):
-                if raw.get("attribution_decision"):
-                    current = metadata.get(lot_id, {})
-                    if any(current.get(key) != raw["patch"].get(key) for key in POSITION_LOT_STRATEGY_PATCH_FIELDS):
-                        return None
-                return dict(event)
-            return None
-    return None
 
 
 def _legacy_manual_wheel_call_confirmation(
