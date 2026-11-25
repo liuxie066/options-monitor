@@ -146,6 +146,57 @@ def test_actual_assignment_shapes_match_without_fund_redemption_receipt(contract
     assert result["reason"] == "assignment_pending_inferred"
 
 
+def test_one_currency_matches_even_when_another_currency_is_also_in_deficit():
+    balance, orders, terms = sample()
+    balance["hk_cash"] = -2500
+    result = match(balance, orders, terms)
+    assert result["status"] == "matched"
+    assert result["adjustment"] == 9745
+
+
+def test_observation_reconciles_multiple_deficit_currencies_independently(monkeypatch):
+    balance, orders, terms = sample()
+    balance["hk_cash"] = -2500
+    hk_balance = {**balance, "currency": "HKD", "us_cash": 0, "hk_cash": -2500,
+                  "pending_asset": 2500}
+    today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+    for row in orders:
+        row["create_time"] = today + " 02:14:30"
+    monkeypatch.setattr(ap, "_account_terms", lambda *_: terms)
+
+    class Gateway:
+        def get_history_orders(self, **kwargs):
+            rows = orders if kwargs["order_market"] == "US" else []
+            return {"retcode": 0, "coverage_complete": True, "pagination_complete": True, "rows": rows}
+
+    def query_rows(_gateway, _method, _account_ids, *, currency, **_kwargs):
+        return [balance if currency == "USD" else hk_balance]
+
+    initial = [{**balance, "currency": "CNH", "pending_asset": 1}]
+    rows, evidence = ap.observe_assignment_pending(
+        Gateway(), initial, query_rows=query_rows, cfg={}, account="lx", account_id="123", environment="REAL",
+    )
+    assert [item["currency"] for item in evidence["items"]] == ["USD", "HKD"]
+    assert [item["status"] for item in evidence["items"]] == ["matched", "unmatched"]
+    assert evidence["adjustment"] == 9745
+    assert rows == [hk_balance]
+
+
+def test_apply_assignment_pending_credits_each_matched_currency_only():
+    from src.application.futu_portfolio_context import build_futu_portfolio_context
+    balance, _, _ = sample()
+    balance["hk_cash"] = -2500
+    context = build_futu_portfolio_context(balance_rows=[balance], position_rows=[], account="lx")
+    ap.apply_assignment_pending(context, {
+        "status": "unmatched", "adjustment": 9745, "currency": "", "items": [
+            {"status": "matched", "currency": "USD", "adjustment": 9745},
+            {"status": "unmatched", "currency": "HKD", "adjustment": 0},
+        ],
+    })
+    assert context["cash_by_currency"]["USD"] == 80000
+    assert context["cash_by_currency"]["HKD"] == -2500
+
+
 @pytest.mark.parametrize("change", [
     "amount", "cash", "currency", "time", "quantity", "strike",
     "account", "environment", "missing_terms", "multiplier", "old", "call",

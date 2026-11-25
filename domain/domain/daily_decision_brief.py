@@ -811,6 +811,31 @@ def _normalize_daily_brief_funds(value: Any) -> dict[str, Any]:
                 if not math.isfinite(amount) or amount < 0:
                     raise ValueError(f"funds.assignment_pending.{key} must be nonnegative and finite")
                 normalized_pending[key] = amount
+        if isinstance(pending.get("items"), list):
+            normalized_pending["items"] = []
+            for index, item in enumerate(pending["items"]):
+                item = _mapping(item, field=f"funds.assignment_pending.items[{index}]")
+                item_status = str(item.get("status") or "").strip()
+                if item_status not in {"none", "matched", "unmatched"}:
+                    raise ValueError("funds.assignment_pending.items has invalid status")
+                normalized_item = {"status": item_status,
+                                   "reason": str(item.get("reason") or "").strip(),
+                                   "currency": _upper(item.get("currency"))}
+                for key in ("pending_amount", "adjustment"):
+                    raw = item.get(key)
+                    if raw is None:
+                        normalized_item[key] = None
+                    else:
+                        if isinstance(raw, bool):
+                            raise ValueError(f"funds.assignment_pending.items[{index}].{key} must be finite")
+                        try:
+                            amount = float(raw)
+                        except (TypeError, ValueError, OverflowError) as exc:
+                            raise ValueError(f"funds.assignment_pending.items[{index}].{key} must be finite") from exc
+                        if not math.isfinite(amount) or amount < 0:
+                            raise ValueError(f"funds.assignment_pending.items[{index}].{key} must be nonnegative and finite")
+                        normalized_item[key] = amount
+                normalized_pending["items"].append(normalized_item)
         out["assignment_pending"] = normalized_pending
     if "cash_secured_unavailable_by_symbol" in funds:
         out["cash_secured_unavailable_by_symbol"] = {

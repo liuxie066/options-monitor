@@ -41,57 +41,75 @@ def observe_assignment_pending(gateway, balance_rows, *, query_rows, cfg, accoun
     if pending == 0:
         return balance_rows, {**result, "status": "unmatched" if deficits else "none",
                               "reason": "negative_cash_without_pending" if deficits else "no_pending"}
-    if len(deficits) != 1 or deficits[0] not in {"USD", "HKD"}:
+    currencies = [currency for currency in ("USD", "HKD") if currency in deficits]
+    if not currencies:
         return balance_rows, {**result, "reason": "assignment_currency_ambiguous"}
-    currency = deficits[0]
-    market = "US" if currency == "USD" else "HK"
-    today = datetime.now(ZoneInfo("America/New_York" if market == "US" else "Asia/Hong_Kong")).date()
-    try:
-        check_fetch_control(deadline, cancelled)
-        receipt = gateway.get_history_orders(
-            acc_id=int(account_id), trd_env=environment, order_market=market,
-            start=(today - timedelta(days=7)).isoformat(), end=today.isoformat(),
-        )
-        if (not isinstance(receipt, dict) or receipt.get("retcode") != 0
-                or receipt.get("coverage_complete") is not True
-                or receipt.get("pagination_complete") is not True
-                or not isinstance(receipt.get("rows"), list)
-                or any(not isinstance(r, dict) for r in receipt["rows"])):
-            raise ValueError("assignment history incomplete")
-        terms = _account_terms(cfg, account)
-        check_fetch_control(deadline, cancelled)
-        # Use the entire second response, never new pending plus old cash/fund.
-        fresh = query_rows(gateway, "get_account_balance", {account_id},
-                           trd_env=environment, currency=currency, refresh_cache=True,
-                           **({"deadline": deadline, "cancelled": cancelled}
-                              if deadline is not None or cancelled is not None else {}))
-        if len(fresh) != 1 or str(fresh[0].get("currency")) != currency:
-            raise ValueError("assignment funds currency mismatch")
-        if (str(fresh[0].get("acc_id", account_id)) != str(account_id)
-                or str(fresh[0].get("trd_env", environment)) != environment):
-            raise ValueError("assignment funds identity mismatch")
-        result = match_assignment_pending(balance=fresh[0], orders=receipt["rows"], terms=terms,
-                                          account_id=account_id, environment=environment, today=today)
-        result["funds_observed_at"] = datetime.now(timezone.utc).isoformat()
-        balance_rows = fresh
-        if result["reason"] == "close_fees_unavailable":
-            if len(result["order_ids"]) > 400:
-                return fresh, result
+    terms = None
+    items = []
+    latest_rows = balance_rows
+    for currency in currencies:
+        market = "US" if currency == "USD" else "HK"
+        today = datetime.now(ZoneInfo("America/New_York" if market == "US" else "Asia/Hong_Kong")).date()
+        try:
             check_fetch_control(deadline, cancelled)
-            fees = query_rows(gateway, "get_order_fees", {account_id}, trd_env=environment,
-                              order_id_list=result["order_ids"])
-            check_fetch_control(deadline, cancelled)
-            matched = match_assignment_pending(
-                balance=fresh[0], orders=receipt["rows"], terms=terms, order_fees=fees,
-                account_id=account_id, environment=environment, today=today,
+            receipt = gateway.get_history_orders(
+                acc_id=int(account_id), trd_env=environment, order_market=market,
+                start=(today - timedelta(days=7)).isoformat(), end=today.isoformat(),
             )
-            result = {**matched, "funds_observed_at": result["funds_observed_at"]}
-        return fresh, result
-    except (TimeoutError, CancelledError):
-        raise
-    except Exception:
-        check_fetch_control(deadline, cancelled)
-        return balance_rows, {**result, "reason": "assignment_evidence_unavailable"}
+            if (not isinstance(receipt, dict) or receipt.get("retcode") != 0
+                    or receipt.get("coverage_complete") is not True
+                    or receipt.get("pagination_complete") is not True
+                    or not isinstance(receipt.get("rows"), list)
+                    or any(not isinstance(r, dict) for r in receipt["rows"])):
+                raise ValueError("assignment history incomplete")
+            if terms is None:
+                terms = _account_terms(cfg, account)
+            check_fetch_control(deadline, cancelled)
+            # Each currency is reconciled against its own complete fresh funds response.
+            fresh = query_rows(gateway, "get_account_balance", {account_id},
+                               trd_env=environment, currency=currency, refresh_cache=True,
+                               **({"deadline": deadline, "cancelled": cancelled}
+                                  if deadline is not None or cancelled is not None else {}))
+            if len(fresh) != 1 or str(fresh[0].get("currency")) != currency:
+                raise ValueError("assignment funds currency mismatch")
+            if (str(fresh[0].get("acc_id", account_id)) != str(account_id)
+                    or str(fresh[0].get("trd_env", environment)) != environment):
+                raise ValueError("assignment funds identity mismatch")
+            latest_rows = fresh
+            item = match_assignment_pending(balance=fresh[0], orders=receipt["rows"], terms=terms,
+                                            account_id=account_id, environment=environment, today=today)
+            if item["reason"] == "close_fees_unavailable":
+                if len(item["order_ids"]) > 400:
+                    raise ValueError("too many close orders for fee reconciliation")
+                check_fetch_control(deadline, cancelled)
+                fees = query_rows(gateway, "get_order_fees", {account_id}, trd_env=environment,
+                                  order_id_list=item["order_ids"])
+                check_fetch_control(deadline, cancelled)
+                item = match_assignment_pending(
+                    balance=fresh[0], orders=receipt["rows"], terms=terms, order_fees=fees,
+                    account_id=account_id, environment=environment, today=today,
+                )
+            item["funds_observed_at"] = datetime.now(timezone.utc).isoformat()
+        except (TimeoutError, CancelledError):
+            raise
+        except Exception:
+            check_fetch_control(deadline, cancelled)
+            item = {"status": "unmatched", "reason": "assignment_evidence_unavailable",
+                    "currency": currency, "pending_amount": None, "adjustment": 0.0, "order_ids": []}
+        items.append(item)
+    status = "matched" if all(item["status"] == "matched" for item in items) else "unmatched"
+    total_pending = sum(item.get("pending_amount") or 0 for item in items)
+    evidence = {"status": status, "reason": "multiple_currency_reconciliation",
+                "currency": currencies[0] if len(currencies) == 1 else "",
+                "pending_amount": total_pending, "adjustment": sum(item.get("adjustment", 0) for item in items),
+                "items": items}
+    observed_at = [item.get("funds_observed_at") for item in items if item.get("funds_observed_at")]
+    if observed_at:
+        evidence["funds_observed_at"] = max(observed_at)
+    if len(items) == 1:
+        evidence.update(items[0])
+        evidence["items"] = items
+    return latest_rows, evidence
 
 
 def apply_assignment_pending(context, evidence):
@@ -101,13 +119,21 @@ def apply_assignment_pending(context, evidence):
         context["cash_by_currency"][currency] -= previous
         context["cash_capacity_by_currency"][currency]["amount"] = context["cash_by_currency"][currency]
     evidence = dict(evidence)
-    if evidence["status"] == "matched" and not context.get("cash_balance_reliable"):
-        evidence.update(status="unmatched", reason="cash_balance_unreliable", adjustment=0.0)
+    items = evidence.get("items") or [evidence]
+    if not context.get("cash_balance_reliable"):
+        items = [{**item, "status": "unmatched", "reason": "cash_balance_unreliable", "adjustment": 0.0}
+                 if item.get("status") == "matched" else item for item in items]
+        evidence["items"] = items
+        evidence["status"] = "matched" if all(item.get("status") == "matched" for item in items) else "unmatched"
+        evidence["adjustment"] = sum(item.get("adjustment", 0) for item in items)
     context["assignment_pending"] = evidence
-    if evidence["status"] == "matched":
-        currency = evidence["currency"]
-        amount = evidence["adjustment"]
+    for item in items:
+        if item.get("status") != "matched":
+            continue
+        currency = item["currency"]
+        amount = item["adjustment"]
         context["cash_components_by_currency"][currency]["assignment_pending"] = amount
         context["cash_by_currency"][currency] += amount
         context["cash_capacity_by_currency"][currency]["amount"] = context["cash_by_currency"][currency]
+    if evidence["adjustment"] > 0:
         context["cash_source"] = "futu_cash_like_assets_with_assignment_pending"

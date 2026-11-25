@@ -3205,17 +3205,20 @@ def _fund_views(brief: Mapping[str, Any]) -> list[str]:
         )
     transit = funds.get("assignment_pending")
     if isinstance(transit, Mapping) and transit.get("status") != "none":
-        amount = _number(transit.get("pending_amount"))
-        money = _currency_money(str(transit.get("currency") or ""), amount) if amount is not None else "金额未知"
         if transit.get("status") == "verified_mmf":
             out.append("货基在途已按现有核实凭证补计，未重复叠加指派推断金额。")
-        elif transit.get("status") == "matched":
-            if transit.get("reason") == "close_pending_reconciled":
-                out.append(f"平仓匹配在途：{money} 已补入开仓资金（已核对资产分项及成交费用）")
-            else:
-                out.append(f"指派匹配在途：{money} 已补入开仓资金（按匹配规则推断）")
         else:
-            out.append(f"提醒：在途资金 {money} 未纳入开仓额度；指派、欠款或取数证据未匹配。")
+            items = transit.get("items") if isinstance(transit.get("items"), list) else [transit]
+            for item in items:
+                amount = _number(item.get("pending_amount"))
+                money = _currency_money(str(item.get("currency") or ""), amount) if amount is not None else "金额未知"
+                if item.get("status") == "matched":
+                    if item.get("reason") == "close_pending_reconciled":
+                        out.append(f"平仓匹配在途：{money} 已补入开仓资金（已核对资产分项及成交费用）")
+                    else:
+                        out.append(f"指派匹配在途：{money} 已补入开仓资金（按匹配规则推断）")
+                elif item.get("status") != "none":
+                    out.append(f"提醒：在途资金 {money} 未纳入开仓额度；指派、欠款或取数证据未匹配。")
     pending = funds.get("cash_secured_pending_by_symbol_by_ccy")
     if isinstance(pending, Mapping):
         for symbol, amounts in sorted(pending.items()):
