@@ -1,0 +1,100 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.66",
+  "base": {
+    "tag": "v4.6.65",
+    "commit": "3b56528c24444c3f4409b8b3baabd8ab74954652"
+  },
+  "reviewed_head": "69da7eec63c2f262624e78e5364a473c010b28cb",
+  "commits": [
+    {
+      "sha": "472b116b899db8f130766b659c32dce20dcc292e",
+      "subject": "fix(wheel): remove exclusion details from daily brief"
+    },
+    {
+      "sha": "74bdaac856d95893d1b813f448a6b50303d7faeb",
+      "subject": "Merge remote-tracking branch 'origin/main' into cindy/swift-thompson"
+    },
+    {
+      "sha": "bfcacfca98b02dae199bbfbb90453a422276fe32",
+      "subject": "Merge pull request #1277 from liuxie066/cindy/swift-thompson"
+    },
+    {
+      "sha": "b31f140d10d6cd63b363fc12c5f16170825cd87e",
+      "subject": "feat(positions): report current Put assignment cohort PnL"
+    },
+    {
+      "sha": "ac1893cb772774d076a4d6c147bbd3c4931a714c",
+      "subject": "fix(notify): suppress hold-only position reminders"
+    },
+    {
+      "sha": "69da7eec63c2f262624e78e5364a473c010b28cb",
+      "subject": "Merge pull request #1279 from liuxie066/cindy/vigilant-colden"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "支持查询指定期间 Put 指派批次的当前盈亏，展示原币和人民币汇总、归属及数据覆盖情况，CLI 和 Bot 复用只读查询。",
+      "commits": [
+        "b31f140d10d6cd63b363fc12c5f16170825cd87e"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "持仓仅建议持有或继续观察时不再逐条提醒，临期低 Delta 和时间字段不构成例外；有效平仓、滚仓建议及原始持仓证据继续保留。",
+      "commits": [
+        "ac1893cb772774d076a4d6c147bbd3c4931a714c",
+        "69da7eec63c2f262624e78e5364a473c010b28cb"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Wheel 简报不再展示候选排除详情，扫描快照继续保留诊断，真实证据缺口及有效建议正常展示。",
+      "commits": [
+        "472b116b899db8f130766b659c32dce20dcc292e",
+        "74bdaac856d95893d1b813f448a6b50303d7faeb",
+        "bfcacfca98b02dae199bbfbb90453a422276fe32"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "472b116b899db8f130766b659c32dce20dcc292e",
+      "references": [
+        "docs/WHEEL_STRATEGY_PRD.md"
+      ]
+    },
+    {
+      "commit": "74bdaac856d95893d1b813f448a6b50303d7faeb",
+      "references": [
+        "docs/WHEEL_STRATEGY_PRD.md"
+      ]
+    },
+    {
+      "commit": "bfcacfca98b02dae199bbfbb90453a422276fe32",
+      "references": [
+        "docs/WHEEL_STRATEGY_PRD.md"
+      ]
+    },
+    {
+      "commit": "b31f140d10d6cd63b363fc12c5f16170825cd87e",
+      "references": [
+        "docs/ASSIGNED_STOCK_RETURN_DESIGN.md"
+      ]
+    },
+    {
+      "commit": "ac1893cb772774d076a4d6c147bbd3c4931a714c",
+      "references": [
+        "docs/OPTION_NOTIFICATION_EXPERIENCE_PRD.md"
+      ]
+    },
+    {
+      "commit": "69da7eec63c2f262624e78e5364a473c010b28cb",
+      "references": [
+        "docs/OPTION_NOTIFICATION_EXPERIENCE_PRD.md"
+      ]
+    }
+  ]
+}
