@@ -2079,7 +2079,6 @@ def _wheel_candidate_diagnostic_details(row: Mapping[str, Any]) -> list[str]:
             return ["数据说明：本次记录未提供具体缺项"]
         return []
     labels = {
-        "option_no_current_bid": "无当前买盘，已排除",
         "option_ask_missing_or_invalid": "卖价缺失或无效",
         "option_bid_missing_or_invalid": "买价缺失或无效",
         "bid_missing_or_invalid": "买价缺失或无效",
@@ -2105,16 +2104,15 @@ def _wheel_candidate_diagnostic_details(row: Mapping[str, Any]) -> list[str]:
     details = []
     side = str(row.get("direction") or "call").title()
     for item in sorted(diagnostics, key=lambda item: 0 if isinstance(item, Mapping) and item.get("outcome") == "unavailable" else 1):
-        if not isinstance(item, Mapping):
+        if not isinstance(item, Mapping) or item.get("outcome") != "unavailable":
             continue
         count = item.get("contract_count")
         if type(count) is not int or count <= 0:
             continue
         reason = str(item.get("reason_code") or "")
         label = labels.get(reason, reason or "原因未记录")
-        prefix = "缺项" if item.get("outcome") == "unavailable" else "排除说明"
         expiration = str(item.get("expiration") or "到期日未记录")
-        details.append(f"{prefix}：{expiration} · {count} 份 {side} · {label}")
+        details.append(f"缺项：{expiration} · {count} 份 {side} · {label}")
     details = list(dict.fromkeys(details))
     if len(details) > 4:
         return [*details[:4], f"数据说明：另有 {len(details) - 4} 项诊断，详见扫描快照；各原因数量不相加"]
