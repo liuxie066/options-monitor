@@ -232,7 +232,9 @@ def refresh_assigned_stock_quote_snapshots(
 __all__ = ["AssignedStockQuoteRefreshResult", "refresh_assigned_stock_quote_snapshots"]
 
 
-def assigned_stock_quote_is_usable(snapshot: Mapping[str, Any], valuation_at_ms: int) -> bool:
+def assigned_stock_quote_is_usable(
+    snapshot: Mapping[str, Any], valuation_at_ms: int, *, expected_currency: str | None = None,
+) -> bool:
     """Revalidate original observations with the canonical quote-age policy.
 
     Closed quotes without an explicit validated carry receipt remain unavailable;
@@ -246,6 +248,11 @@ def assigned_stock_quote_is_usable(snapshot: Mapping[str, Any], valuation_at_ms:
             return False
     except (InvalidOperation, ValueError, TypeError):
         return False
+    from domain.domain.symbol_identity import symbol_currency
+
+    currency = expected_currency or symbol_currency(norm_symbol(snapshot.get("symbol")))
+    if snapshot.get("currency") and snapshot["currency"] != currency:
+        return False
     market_evidence = snapshot.get("market_evidence")
     if isinstance(market_evidence, dict):
         from domain.domain.performance.strategy_evaluation import eligible_stock_marks
@@ -254,7 +261,11 @@ def assigned_stock_quote_is_usable(snapshot: Mapping[str, Any], valuation_at_ms:
             marks = eligible_stock_marks(market=market_evidence, at_ms=valuation_at_ms)
             return any(
                 norm_symbol(mark.get("symbol")) == norm_symbol(snapshot.get("symbol"))
+                and mark.get("currency") == currency
                 and Decimal(str(mark.get("price"))) == Decimal(str(snapshot.get("spot")))
+                and int(snapshot.get("quote_time_ms")) == int(
+                    mark["effective_at_ms"] if mark.get("effective_at_ms") is not None
+                    else mark["available_at_ms"])
                 for mark in marks
             )
         except (ValueError, TypeError, InvalidOperation):
@@ -265,7 +276,8 @@ def assigned_stock_quote_is_usable(snapshot: Mapping[str, Any], valuation_at_ms:
         # a scalar with a caller-selected 'fresh' label.
         return False
     try:
-        if (norm_symbol(evidence.get("code")) != norm_symbol(snapshot.get("symbol"))
+        if (symbol_currency(norm_symbol(evidence.get("code"))) != currency
+                or norm_symbol(evidence.get("code")) != norm_symbol(snapshot.get("symbol"))
                 or Decimal(str(evidence.get("last_price"))) != spot):
             return False
         market_stamp = datetime.fromisoformat(str(evidence.get("observed_at_utc")))

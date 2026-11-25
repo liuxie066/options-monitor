@@ -471,6 +471,7 @@ def read_stock_sell_observations(
     """
     from src.application.trades.normalizer import normalize_trade_deal
     from domain.domain.option_position_identity import normalize_broker
+    from domain.domain.trade_execution import execution_identity_from_input
 
     inbox_path = Path(path)
     read_at = time.time_ns() // 1_000_000
@@ -523,59 +524,107 @@ def read_stock_sell_observations(
             "shares": deal.contracts, "price": deal.price, "trade_time_ms": deal.trade_time_ms,
             "source_deal_id": deal.deal_id, "futu_account_id": deal.futu_account_id,
             "broker_deal_key": stored.get("broker_deal_key"),
+            "execution_id": execution_identity_from_input(deal.execution_input),
+            "source_kind": "inbox",
+            "economic_payload_hash": stored.get("economic_payload_hash"),
             "result_status": stored.get("result_status"), "result_reason": stored.get("result_reason"),
             "diagnostics": dict(receipt.get("diagnostics") or {}),
             "normalization_diagnostics": normalization,
         })
     if runtime_root is not None and account_scope is not None:
         state_sources = []
+        if config is None:
+            paths_by_account = {account: [Path(runtime_root) / "output_shared/state/trade_intake" / account / "state.json"]
+                                for account in account_scope}
+            state_accounts_by_path = {paths[0]: {account} for account, paths in paths_by_account.items()}
+            account_bound_paths = {account: set(paths) for account, paths in paths_by_account.items()}
+        else:
+            from src.application.trades.account_mapping import resolve_trade_intake_config
+
+            paths_by_account: dict[str, list[Path]] = {account: [] for account in account_scope}
+            state_accounts_by_path: dict[Path, set[str]] = {}
+            account_bound_paths: dict[str, set[Path]] = {account: set() for account in account_scope}
+            for source in resolve_trade_intake_config(config)["sources"]:
+                bound_accounts = ({source["account"]} if source.get("account") else
+                                  set((source.get("account_mapping") or {}).values()))
+                state_path = Path(source["state_path"])
+                if not state_path.is_absolute():
+                    state_path = (Path(runtime_root) / state_path).resolve()
+                state_accounts_by_path.setdefault(state_path, set()).update(bound_accounts)
+                for account in account_scope & bound_accounts:
+                    if source.get("account") == account:
+                        account_bound_paths[account].add(state_path)
+                    if state_path not in paths_by_account[account]:
+                        paths_by_account[account].append(state_path)
         for account in sorted(account_scope):
-            state_path = Path(runtime_root) / "output_shared/state/trade_intake" / account / "state.json"
-            if not state_path.exists():
-                result["diagnostics"].append({"code": "stock_sell_state_unavailable", "account": account})
-                continue
-            state_bytes = state_path.read_bytes()
-            state = json.loads(state_bytes)
-            if not isinstance(state, dict):
-                raise ValueError("stock sell state must be an object")
-            state_sources.append({"account": account, "read_at_ms": time.time_ns() // 1_000_000,
-                                  "sha256": hashlib.sha256(state_bytes).hexdigest()})
-            for bucket in ("unresolved_deal_ids", "failed_deal_ids"):
-                entries = state.get(bucket)
-                if not isinstance(entries, dict):
-                    result["diagnostics"].append({"code": "stock_sell_state_incomplete", "account": account})
+            if not paths_by_account[account]:
+                result["diagnostics"].append({"code": "stock_sell_state_binding_unavailable", "account": account})
+            for state_path in paths_by_account[account]:
+                if not state_path.exists():
+                    result["diagnostics"].append({"code": "stock_sell_state_unavailable", "account": account})
                     continue
-                for identity, entry in entries.items():
-                    if not isinstance(entry, dict):
-                        raise ValueError("stock sell state entry must be an object")
-                    if entry.get("action") != "assigned_stock_sale":
+                state_bytes = state_path.read_bytes()
+                state = json.loads(state_bytes)
+                if not isinstance(state, dict):
+                    raise ValueError("stock sell state must be an object")
+                state_sources.append({"account": account, "identity": str(state_path.resolve()),
+                                      "read_at_ms": time.time_ns() // 1_000_000,
+                                      "sha256": hashlib.sha256(state_bytes).hexdigest()})
+                for bucket in ("unresolved_deal_ids", "failed_deal_ids"):
+                    entries = state.get(bucket)
+                    if not isinstance(entries, dict):
+                        result["diagnostics"].append({"code": "stock_sell_state_incomplete", "account": account})
                         continue
-                    if entry.get("account") not in (None, account):
-                        result["diagnostics"].append({"code": "stock_sell_state_account_conflict", "account": account})
-                        continue
-                    physical_id = entry.get("futu_account_id")
-                    if physical_id and futu_account_mapping.get(str(physical_id)) != account:
-                        result["diagnostics"].append({"code": "stock_sell_state_account_unverified", "account": account})
-                        continue
-                    diagnostics = dict(entry.get("diagnostics") or {})
-                    candidates = diagnostics.get("candidates") or []
-                    candidate_symbols = {str(c.get("symbol")) for c in candidates if isinstance(c, dict) and c.get("symbol")}
-                    symbol = next(iter(candidate_symbols)) if len(candidate_symbols) == 1 else None
-                    if symbol_scope is not None and symbol is not None and symbol not in symbol_scope:
-                        continue
-                    # Keep the pending source even if its old state omitted time
-                    # or quantity; the query must then use the narrowest proven
-                    # account/symbol scope rather than invent zero sold shares.
-                    result["observations"].append({
-                        "source_id": f"state:{account}:{bucket}:{identity}", "account": account,
-                        "broker": "富途", "symbol": symbol, "currency": entry.get("currency"),
-                        "shares": entry.get("shares"), "trade_time_ms": entry.get("trade_time_ms"),
-                        "source_deal_id": entry.get("source_deal_id"),
-                        "futu_account_id": entry.get("futu_account_id"),
-                        "broker_deal_key": entry.get("broker_deal_key"),
-                        "result_status": entry.get("status"), "result_reason": entry.get("reason"),
-                        "diagnostics": diagnostics,
-                    })
+                    for identity, entry in entries.items():
+                        if not isinstance(entry, dict):
+                            raise ValueError("stock sell state entry must be an object")
+                        if entry.get("action") != "assigned_stock_sale":
+                            continue
+                        declared_account = entry.get("account")
+                        physical_id = entry.get("futu_account_id")
+                        mapped_account = futu_account_mapping.get(str(physical_id)) if physical_id else None
+                        # Check contradictory identity before skipping a shared
+                        # file's other accounts. Otherwise each side could skip
+                        # this same record and falsely report a complete source.
+                        if declared_account and mapped_account and declared_account != mapped_account:
+                            if account in (declared_account, mapped_account):
+                                result["diagnostics"].append({"code": "stock_sell_state_account_conflict", "account": account})
+                            continue
+                        if entry.get("account") not in (None, account):
+                            if entry.get("account") in state_accounts_by_path[state_path]:
+                                continue
+                            result["diagnostics"].append({"code": "stock_sell_state_account_conflict", "account": account})
+                            continue
+                        if (entry.get("account") is None and not physical_id
+                                and state_path not in account_bound_paths[account]):
+                            result["diagnostics"].append({"code": "stock_sell_state_account_unverified", "account": account})
+                            continue
+                        if physical_id and futu_account_mapping.get(str(physical_id)) != account:
+                            if futu_account_mapping.get(str(physical_id)) in state_accounts_by_path[state_path]:
+                                continue
+                            result["diagnostics"].append({"code": "stock_sell_state_account_unverified", "account": account})
+                            continue
+                        diagnostics = dict(entry.get("diagnostics") or {})
+                        candidates = diagnostics.get("candidates") or []
+                        candidate_symbols = {str(c.get("symbol")) for c in candidates if isinstance(c, dict) and c.get("symbol")}
+                        symbol = next(iter(candidate_symbols)) if len(candidate_symbols) == 1 else None
+                        if symbol_scope is not None and symbol is not None and symbol not in symbol_scope:
+                            continue
+                        # Keep the pending source even if its old state omitted time
+                        # or quantity; the query must then use the narrowest proven
+                        # account/symbol scope rather than invent zero sold shares.
+                        result["observations"].append({
+                            "source_id": f"state:{account}:{bucket}:{identity}", "account": account,
+                            "broker": "富途", "symbol": symbol, "currency": entry.get("currency"),
+                            "shares": entry.get("shares"), "trade_time_ms": entry.get("trade_time_ms"),
+                            "source_deal_id": entry.get("source_deal_id"),
+                            "futu_account_id": entry.get("futu_account_id"),
+                            "broker_deal_key": entry.get("broker_deal_key"),
+                            "source_kind": "state",
+                            "economic_payload_hash": entry.get("economic_payload_hash"),
+                            "result_status": entry.get("status"), "result_reason": entry.get("reason"),
+                            "diagnostics": diagnostics,
+                        })
         result["state_sources"] = state_sources
     result["coverage"] = "unknown" if result["diagnostics"] else "complete"
     return result

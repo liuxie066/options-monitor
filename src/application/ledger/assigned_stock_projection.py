@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import replace
+from decimal import Decimal, InvalidOperation
 from domain.domain.trade_contract_identity import contract_share_quantity
 from domain.domain.symbol_identity import symbol_market
 from domain.domain.wheel import project_wheel_branches, project_wheel_coverage, project_wheel_linkage_candidates
@@ -295,6 +296,129 @@ def project_assigned_stock_lifecycle_from_rows(
     )
 
 
+def qualify_assigned_stock_sell_observations(
+    rows: Mapping[str, Any], observations: list[dict[str, Any]], *, as_of_ms: int,
+) -> list[dict[str, Any]]:
+    """Qualify source observations against accepted effects and historical inventory.
+
+    Source status alone cannot resolve a fill, and a currently closed batch may
+    still have been a candidate at an earlier uncertain disposal. Reuse the same
+    canonical projection at the disposal's instant instead of deriving inventory
+    with a separate quantity algorithm.
+    """
+    from domain.domain.assigned_stock import assigned_stock_sale_allocations
+    from domain.domain.option_position_identity import normalize_broker
+    from domain.domain.trade_execution import structured_deal_keys_from_ledger_event
+
+    def keys(item: Mapping[str, Any]) -> set[str]:
+        # A native namespace identity must not fall back to an unnamespaced ID.
+        native = str(item.get("execution_id") or "")
+        durable = str(item.get("broker_deal_key") or "")
+        if native.startswith("execution:v1:"):
+            return {native}
+        if durable.startswith("execution:v1:"):
+            return {durable}
+        return structured_deal_keys_from_ledger_event(
+            {"account": item.get("account"), "raw_payload": dict(item)},
+        ) | ({durable} if durable else set())
+
+    def economic(item: Mapping[str, Any]) -> tuple[Any, ...] | None:
+        if any(item.get(k) is None for k in (
+            "account", "futu_account_id", "symbol", "currency", "shares", "price", "trade_time_ms",
+        )):
+            return None
+        try:
+            amount = Decimal(str(item["price"]))
+            quantity = Decimal(str(item["shares"]))
+            if not amount.is_finite() or amount < 0 or not quantity.is_finite() or quantity <= 0:
+                return None
+            return (item["account"], str(item["futu_account_id"]), normalize_broker(item.get("broker")),
+                    item["symbol"], item["currency"], quantity, amount, int(item["trade_time_ms"]))
+        except (ValueError, TypeError, InvalidOperation):
+            return None
+
+    current = project_assigned_stock_lifecycle_from_rows(rows, as_of_ms=as_of_ms, quote_snapshots=[])
+    accepted = {r["stock_event_id"] for r in current.get("assigned_stock_sale_rows") or []}
+    accepted_sales = []
+    for sale in rows.get("account_assigned_stock_events") or []:
+        try:
+            children = assigned_stock_sale_allocations(sale)
+            if (children and all(child.get("stock_event_id") in accepted for child in children)
+                    and sum(int(c.get("shares") or 0) for c in children) == int(sale.get("shares") or 0)):
+                accepted_sales.append(sale)
+        except (ValueError, TypeError):
+            continue
+    qualified = []
+    for observation in observations:
+        item = dict(observation)
+        proof = economic(item)
+        identity = keys(item)
+        item["resolved"] = proof is not None and bool(identity) and any(
+            identity & keys(sale) and economic(sale) == proof for sale in accepted_sales
+        )
+        qualified.append(item)
+    # Sparse state is not another economic trade. Link it only to an exact
+    # scoped source identity whose complete peer is proved by accepted effects.
+    for item in qualified:
+        if item.get("source_kind") != "state" or economic(item) is not None:
+            continue
+        identity = keys(item)
+        peers = [p for p in qualified if p.get("source_kind") != "state" and economic(p) is not None
+                 and identity and identity & keys(p)
+                 and p.get("account") == item.get("account")
+                 and str(p.get("futu_account_id") or "") == str(item.get("futu_account_id") or "")]
+        if item.get("economic_payload_hash") and any(
+            p.get("economic_payload_hash") != item["economic_payload_hash"] for p in peers
+        ):
+            continue
+        if peers and all(p["resolved"] for p in peers) and len({economic(p) for p in peers}) == 1:
+            item["resolved"] = True
+            item["resolution_source_ids"] = [p.get("source_id") for p in peers]
+    historical: dict[int, list[dict[str, Any]]] = {}
+
+    def inventory_at(instant: int) -> list[dict[str, Any]]:
+        if instant not in historical:
+            projection = project_assigned_stock_lifecycle_from_rows(rows, as_of_ms=instant, quote_snapshots=[])
+            historical[instant] = projection.get("assigned_stock_lots") or []
+        return historical[instant]
+
+    for item in qualified:
+        instant = item.get("trade_time_ms")
+        if item["resolved"]:
+            continue
+        # A presently observed revision is evidence against an already accepted
+        # disposal even when the revised economic timestamp is unknown/future.
+        # This does not apply the revised disposal or any future cash flow.
+        identity = keys(item)
+        conflict_targets: set[str] = set()
+        for sale in accepted_sales:
+            if (identity and identity & keys(sale)
+                    and item.get("account") == sale.get("account")
+                    and item.get("futu_account_id")
+                    and str(item["futu_account_id"]) == str(sale.get("futu_account_id") or "")
+                    and normalize_broker(item.get("broker")) == normalize_broker(sale.get("broker"))):
+                conflict_targets.update(c["target_stock_lot_id"] for c in assigned_stock_sale_allocations(sale))
+        item["accepted_sale_conflict"] = bool(conflict_targets)
+        item["accepted_sale_conflict_lot_ids"] = sorted(conflict_targets)
+        if instant is None or int(instant) > as_of_ms:
+            continue
+        instant = int(instant)
+        # Independent fills sharing one millisecond have no proven ordering.
+        # Include inventory just before and at that instant, including a batch
+        # first assigned there even if a confirmed fill also closes it there.
+        inventory = [*inventory_at(max(0, instant - 1)), *inventory_at(instant)]
+        candidate_ids = {r["stock_lot_id"] for r in inventory
+            if (int(r.get("shares_remaining") or 0) > 0 or int(r.get("assigned_at_ms") or 0) == instant)
+            and all(not item.get(k) or item[k] == r.get(k) for k in ("account", "symbol", "currency"))
+            and (not item.get("broker") or normalize_broker(item["broker"]) == normalize_broker(r.get("broker")))}
+        # A revision conflicting with an accepted disposal is evidence against
+        # that disposal's targets, even after it has consumed all inventory.
+        # Do not let post-sale zero erase a known same-execution contradiction.
+        candidate_ids.update(conflict_targets)
+        item["candidate_stock_lot_ids"] = sorted(candidate_ids)
+    return qualified
+
+
 def _select_assigned_stock_trade_rows(
     rows: Mapping[str, Any], instant: int, *, account: str | None = None, broker: str | None = None,
 ) -> list[dict[str, Any]]:
@@ -457,6 +581,7 @@ def _project_assigned_stock_from_prepared_rows(
 
 
 __all__ = [
+    "qualify_assigned_stock_sell_observations",
     "project_assigned_stock_lifecycle_from_rows",
     "project_position_lots_and_assigned_stock_from_rows",
 ]

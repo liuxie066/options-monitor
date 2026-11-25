@@ -9,7 +9,7 @@ import sqlite3
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from domain.domain.assigned_stock import assigned_put_remaining_economics, assigned_stock_sale_allocations
+from domain.domain.assigned_stock import assigned_put_remaining_economics
 from domain.domain.trade_contract_identity import derive_position_side
 from domain.domain.option_position_identity import normalize_broker
 from src.application.agent_tool_contracts import AgentToolError
@@ -88,36 +88,11 @@ def summarize_lots(lots: list[dict[str, Any]], *, empty_is_zero: bool = True) ->
     return {'by_currency': result, 'empty_value': '0.00' if not lots and empty_is_zero else None}
 
 
-def _resolved_observation(observation: dict, sales: list[dict]) -> bool:
-    """Only a fully scoped, economically identical canonical sale resolves a fill."""
-    for sale in sales:
-        if not all(str(sale.get(k) or '') == str(observation.get(k) or '')
-                   for k in ('account', 'symbol', 'source_deal_id')):
-            continue
-        if not observation.get('source_deal_id') or not observation.get('futu_account_id'):
-            continue
-        if str(sale.get('futu_account_id') or '') != str(observation['futu_account_id']):
-            continue
-        if (normalize_broker(sale.get('broker')) != normalize_broker(observation.get('broker')) or sale.get('currency') != observation.get('currency')
-                or int(sale.get('shares') or 0) != int(observation.get('shares') or 0)):
-            continue
-        if observation.get('price') is None or sale.get('price') is None:
-            continue
-        if Decimal(str(sale['price'])) != Decimal(str(observation['price'])):
-            continue
-        if observation.get('trade_time_ms') != sale.get('trade_time_ms'):
-            continue
-        try:
-            allocations = assigned_stock_sale_allocations(sale)
-        except (TypeError, ValueError):
-            continue
-        if sum(int(a.get('shares') or 0) for a in allocations) != int(sale['shares']):
-            continue
-        return True
-    return False
-
-
 def _affected(row: dict, observation: dict) -> bool:
+    if row.get('stock_lot_id') in observation.get('accepted_sale_conflict_lot_ids', []):
+        return True
+    if "candidate_stock_lot_ids" in observation:
+        return row.get("stock_lot_id") in observation["candidate_stock_lot_ids"]
     if (observation.get('broker') and normalize_broker(observation['broker']) != normalize_broker(row.get('broker'))):
         return False
     if any(observation.get(k) and observation[k] != row.get(k) for k in ('account', 'symbol', 'currency')):
@@ -129,6 +104,55 @@ def _affected(row: dict, observation: dict) -> bool:
 def _quote_scope_matches(quote: dict, row: dict) -> bool:
     return (not quote.get('account') or str(quote['account']).lower() == row['account']) and (
         not quote.get('broker') or normalize_broker(quote['broker']) == normalize_broker(row['broker']))
+
+
+def _period_leaf(row: dict[str, Any]) -> dict[str, Any]:
+    """Expose one coherent period result, without unrelated lifecycle/CC totals."""
+    fields = {
+        'stock_lot_id', 'source_assignment_event_id', 'source_option_lot_id',
+        'account', 'broker', 'symbol', 'currency', 'strategy', 'strategy_group_id',
+        'source_option_leg_role', 'structure_mode', 'expiry_structure', 'strategy_snapshot',
+        'assigned_at_ms', 'assigned_date', 'opened_at_ms', 'shares_opened', 'shares_sold',
+        'shares_remaining', 'book_shares_sold', 'book_shares_remaining', 'quantity_status',
+        'status', 'strike', 'assignment_price', 'stock_cost_basis_total',
+        'option_premium_attribution_exact', 'put_open_premium_exact', 'source_option_fee_allocations',
+        'sale_event_ids', 'fee_evidence',
+        'stock_unrealized_pnl', 'remaining_pnl_with_put', 'remaining_stock_cost_basis_exact',
+        'put_net_premium', 'allocated_put_net_premium_remaining',
+        'allocated_put_net_premium_sold', 'stock_realized_pnl', 'sold_pnl_with_put',
+        'spot', 'quote', 'reasons',
+    }
+    result = {key: value for key, value in row.items() if key in fields}
+    quote = row['quote']
+    remaining = row['book_shares_remaining']
+    pending = row['quantity_status'] in {'pending', 'unknown'}
+    result['quote_status'] = (
+        'not_required' if remaining == 0 and not pending else
+        ('closed_market_carry' if (quote.get('market_evidence') or {}).get('closed_market_carry') else 'fresh') if quote else 'missing_quote'
+    )
+    result['spot_time'] = quote.get('quote_time_ms')
+    result['quote_source'] = quote.get('quote_source') or quote.get('source')
+    result['review_status'] = (
+        'pending' if pending else 'ready' if all(row.get(k) is not None for k in _METRICS) else
+        'partial' if row['stock_unrealized_pnl'] is not None else
+        'missing_quote' if remaining and not quote else 'incomplete_actual_fees'
+    )
+    # The legacy alias, when retained in this versioned result, names the same
+    # qualified amount. Never publish the pre-price projection's stale None.
+    result['assigned_stock_unrealized_pnl'] = row['stock_unrealized_pnl']
+    result['book_remaining_stock_cost_basis_exact'] = row['remaining_stock_cost_basis_exact']
+    if pending:
+        result['remaining_stock_cost_basis_exact'] = None
+    result['fee_evidence'] = [fact for fact in row.get('fee_evidence', [])
+        if fact.get('component') == 'assignment_stock_fee'
+        or str(fact.get('component', '')).startswith('stock_sale')]
+    result['fee_evidence'].extend(
+        {**fact, 'component': {'option_open': 'put_open_option_fee',
+                              'option_assignment': 'put_assignment_option_fee'}[fact['component']]}
+        for fact in row.get('source_option_fee_allocations', [])
+        if fact.get('component') in {'option_open', 'option_assignment'}
+    )
+    return result
 
 
 def _fx_summary(summary: dict, snapshot: dict, valuation_at_ms: int) -> dict:
@@ -200,13 +224,22 @@ def build_assignment_period_report(repo, payload, *, cfg, refresh_assigned_stock
             observations = read_stock_sell_observations(str(db) + '.trade_intake_inbox.sqlite3',
                 futu_account_mapping=resolve_futu_account_mapping(cfg), config=cfg,
                 accounts=sorted(allowed_accounts),
-                symbols=[payload['symbol']] if payload.get('symbol') else None, repo_base=root,
+                # Instrument is economic content, not execution identity. Read
+                # the authorized accounts before filtering a requested symbol:
+                # a source revision may contradict this symbol's accepted sale.
+                symbols=None, repo_base=root,
                 runtime_root=resolve_runtime_root(repo_root=root).runtime_root)
     except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
         observations['diagnostics'] = [{'code': 'stock_sell_source_unavailable', 'message': type(exc).__name__}]
-    pending = [o for o in observations['observations']
-               if (o.get('trade_time_ms') is None or o['trade_time_ms'] <= request_at)
-               and not _resolved_observation(o, list(inputs.assigned_stock_events))]
+    qualified_observations = ledger_api.qualify_assigned_stock_sell_observations(
+        raw, observations['observations'], as_of_ms=request_at,
+    )
+    selected_ids = {r['stock_lot_id'] for r in selected}
+    pending = [o for o in qualified_observations
+               if (o.get('accepted_sale_conflict') or o.get('trade_time_ms') is None or o['trade_time_ms'] <= request_at)
+               and not o['resolved']
+               and (selected_ids.intersection(o.get('accepted_sale_conflict_lot_ids', []))
+                    or not payload.get('symbol') or o.get('symbol') in (None, payload['symbol'].upper()))]
     reviews = [r for r in base.get('assigned_stock_review_rows', [])
                if r.get('status') != 'missing_quote' and not str(r.get('status', '')).startswith('covered_call_')
                and r.get('account') in allowed_accounts
@@ -227,7 +260,8 @@ def build_assignment_period_report(repo, payload, *, cfg, refresh_assigned_stock
         if needed:
             try:
                 result = refresh_assigned_stock_quotes(needed, cfg=cfg, account=payload.get('account'),
-                    base_dir=root, state_base_dir=quote_state_base_dir, preserve_evidence=True)
+                    base_dir=root, state_base_dir=quote_state_base_dir, preserve_evidence=True,
+                    host=payload.get('opend_host'), port=payload.get('opend_port'))
                 quotes = result.quote_snapshots
                 refresh = result.diagnostics
             except Exception as exc:
@@ -249,7 +283,7 @@ def build_assignment_period_report(repo, payload, *, cfg, refresh_assigned_stock
         is_pending = row.pop('_pending')
         qualified = [q for q in quote_rows if q.get('symbol') == row['symbol']
                      and _quote_scope_matches(q, row)
-                     and assigned_stock_quote_is_usable(q, valuation_at)
+                     and assigned_stock_quote_is_usable(q, valuation_at, expected_currency=row['currency'])
                      and (not q.get('currency') or q['currency'] == row['currency'])
                      and q.get('quote_time_ms') is not None and int(q['quote_time_ms']) <= valuation_at]
         quote = max(qualified, key=lambda q: int(q['quote_time_ms']), default={})
@@ -266,7 +300,7 @@ def build_assignment_period_report(repo, payload, *, cfg, refresh_assigned_stock
         elif not confirmed:
             row['reasons'].append('source_history_not_proven')
         row['strike'] = events.get(row['source_assignment_event_id'], {}).get('strike')
-        rows.append(row)
+        rows.append(_period_leaf(row))
     summary = summarize_lots(rows, empty_is_zero=not inputs.diagnostics and not reviews and not source_gaps and not pending)
     summary['cny_estimate'] = _fx_summary(summary, fx, valuation_at)
     accounts = []
