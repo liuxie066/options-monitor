@@ -1,0 +1,50 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.67",
+  "base": {
+    "tag": "v4.6.66",
+    "commit": "6c56bcf7c68c671272d136d24aaa699a7b21c4ba"
+  },
+  "reviewed_head": "0aba6bf21aa8861a49936c395a3b623e93d21d0a",
+  "commits": [
+    {
+      "sha": "c9fa4d2c2fa1b47abf5b7ca381ddc7a5d9e8e800",
+      "subject": "fix(positions): scope assignment evidence gaps to affected lots"
+    },
+    {
+      "sha": "0aba6bf21aa8861a49936c395a3b623e93d21d0a",
+      "subject": "Merge pull request #1285: assignment source qualification fixes"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Put 接货损益沿用已选账本的来源目录，按受影响批次保留身份和币种矛盾缺口，区分已核实结果与账本暂估；数量待核实时不再返回确定的已售净额。",
+      "commits": [
+        "c9fa4d2c2fa1b47abf5b7ca381ddc7a5d9e8e800"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "0aba6bf21aa8861a49936c395a3b623e93d21d0a",
+      "reason": "Merge of the reviewed assignment-source repair; no additional behavior or separate release note."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "c9fa4d2c2fa1b47abf5b7ca381ddc7a5d9e8e800",
+      "references": [
+        "docs/ASSIGNED_STOCK_RETURN_DESIGN.md",
+        "https://github.com/liuxie066/options-monitor/pull/1285"
+      ]
+    },
+    {
+      "commit": "0aba6bf21aa8861a49936c395a3b623e93d21d0a",
+      "references": [
+        "docs/ASSIGNED_STOCK_RETURN_DESIGN.md",
+        "https://github.com/liuxie066/options-monitor/pull/1285"
+      ]
+    }
+  ]
+}
