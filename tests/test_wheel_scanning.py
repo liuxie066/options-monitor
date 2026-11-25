@@ -1125,8 +1125,13 @@ def test_wheel_diagnostics_reach_sealed_snapshot_and_brief(tmp_path, direction, 
     assert available and views[0]["candidate_diagnostics"] == diagnostics
     from src.application.daily_decision_brief_renderer import render_fixed_report
     message = render_fixed_report({"account": "lx", "market": "US", "wheel_batches": views})
-    assert expected in message
-    assert f"1 份 {direction.title()}" in message
+    if kind == "no_bid":
+        assert expected not in message
+        assert f"1 份 {direction.title()}" not in message
+    else:
+        assert expected in message
+        assert f"1 份 {direction.title()}" in message
+    assert "排除说明" not in message
     assert "暂停建议" not in message
 
 
