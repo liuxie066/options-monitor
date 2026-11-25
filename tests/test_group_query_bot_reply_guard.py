@@ -223,6 +223,17 @@ def test_conditional_roll_replies_must_state_the_unverified_coverage():
     assert "missing_unverified_conditions" in vague.reasons
 
 
+def test_conditional_roll_generic_nonadvice_does_not_verify_stock_coverage():
+    verdict = _check(
+        "股票已经充分覆盖，可以移仓；不构成正式账户建议；"
+        "费用按模型估算，不是账户实际扣费。",
+        method="evaluate_roll_up", data=ROLL_DATA, user_text="NVDA 上移")
+
+    assert not verdict.ok, verdict
+    assert verdict.reasons == ("missing_unverified_conditions",)
+    assert "股票覆盖未经核实" in correction_message(verdict)
+
+
 def test_unable_replies_must_give_the_reason():
     card = fact_card("query_candidates", UNABLE_CANDIDATES)
     bare = check_result_reply(

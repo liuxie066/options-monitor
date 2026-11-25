@@ -25,8 +25,9 @@ ESTIMATE_TOKENS = ("估算", "预估", "估计")
 NON_ACCOUNT_TOKENS = (
     "非实际", "不是实际", "非账户", "不是账户", "不代表实际", "以账户为准",
 )
+# A generic non-advice disclaimer does not state that coverage is unverified.
 UNVERIFIED_TOKENS = (
-    "未核验", "未经核实", "未核实", "没有核实", "待核实", "未经确认", "不构成",
+    "未核验", "未经核实", "未核实", "没有核实", "待核实", "未经确认",
 )
 COVERAGE_TOKENS = ("覆盖", "股数", "正股", "股票")
 GENERIC_REASON_TOKENS = (
