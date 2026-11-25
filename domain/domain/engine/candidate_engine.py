@@ -399,7 +399,8 @@ def validate_opening_quote_freshness(
         raise CandidateCalculationError(
             REJECT_EVIDENCE_UNAVAILABLE,
             "OpenD option snapshot receipt timestamp is missing or invalid",
-            metric_value={"snapshot_received_at_utc": raw.get("snapshot_received_at_utc")},
+            metric_value={"snapshot_received_at_utc": raw.get("snapshot_received_at_utc"),
+                          "reason_code": "option_snapshot_receipt_missing"},
             threshold="present UTC receipt",
         )
     decision_now = _decision_now(now_utc)
@@ -408,14 +409,14 @@ def validate_opening_quote_freshness(
         raise CandidateCalculationError(
             REJECT_EVIDENCE_UNAVAILABLE,
             "OpenD option snapshot receipt is in the future",
-            metric_value={"snapshot_age_seconds": snapshot_age},
+            metric_value={"snapshot_age_seconds": snapshot_age, "reason_code": "option_snapshot_receipt_in_future"},
             threshold=">= 0",
         )
     if snapshot_age > int(max_snapshot_age_seconds):
         raise CandidateCalculationError(
             REJECT_EVIDENCE_UNAVAILABLE,
             "OpenD option snapshot is stale relative to the decision moment",
-            metric_value={"snapshot_age_seconds": snapshot_age},
+            metric_value={"snapshot_age_seconds": snapshot_age, "reason_code": "option_snapshot_stale"},
             threshold=int(max_snapshot_age_seconds),
         )
 
@@ -535,7 +536,8 @@ def validate_option_contract_evidence(
         raise CandidateCalculationError(
             REJECT_EVIDENCE_UNAVAILABLE,
             "OpenD underlier source timestamp is missing or invalid",
-            metric_value={"spot_observed_at_utc": spot_observed_text or None},
+            metric_value={"spot_observed_at_utc": spot_observed_text or None,
+                          "reason_code": "underlier_update_time_missing_or_invalid"},
             threshold="present timezone-aware source time",
         )
     spot_age = (decision_now - spot_observed).total_seconds()
@@ -543,7 +545,7 @@ def validate_option_contract_evidence(
         raise CandidateCalculationError(
             REJECT_EVIDENCE_UNAVAILABLE,
             "OpenD underlier source timestamp is in the future",
-            metric_value={"spot_age_seconds": spot_age},
+            metric_value={"spot_age_seconds": spot_age, "reason_code": "underlier_update_time_in_future"},
             threshold=">= 0",
         )
     # Spot source age has its own fixed limit, independent of option receipt age.
@@ -551,7 +553,7 @@ def validate_option_contract_evidence(
         raise CandidateCalculationError(
             REJECT_EVIDENCE_UNAVAILABLE,
             "OpenD underlier quote is stale relative to the decision moment",
-            metric_value={"spot_age_seconds": spot_age},
+            metric_value={"spot_age_seconds": spot_age, "reason_code": "underlier_quote_stale"},
             threshold=300,
         )
 

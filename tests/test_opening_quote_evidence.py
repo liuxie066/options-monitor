@@ -382,12 +382,23 @@ def test_double_zero_stale_receipt_and_closed_market_stay_unavailable():
 
 @pytest.mark.parametrize("side", ["buy", "sell"])
 def test_double_zero_normalization_cannot_authorize_either_order_side(side):
+    from conftest import phase2_opening_row
     from domain.domain.engine.candidate_engine import CandidateCalculationError, validate_option_contract_evidence
     observation = _us_option(snapshot_row=_snapshot(bid_price=0, ask_price=0), **_RECEIPT)
-    with pytest.raises(CandidateCalculationError):
-        validate_option_contract_evidence({"opening_contract_status": observation.status,
-            "opening_contract_reason_codes": list(observation.reason_codes), "bid": observation.bid,
-            "ask": observation.ask}, mode="put", quote_side=side, now_utc=_US_NOW)
+    row = phase2_opening_row({"symbol": "NVDA", "option_type": "put", "dte": 30,
+        "strike": 100, "spot": 110, "bid": observation.bid, "ask": observation.ask,
+        "multiplier": 100, "opening_contract_status": observation.status,
+        "opening_contract_reason_codes": list(observation.reason_codes),
+        "snapshot_received_at_utc": _RECEIPT["snapshot_received_at_utc"],
+        "spot_observed_at_utc": _RECEIPT["snapshot_received_at_utc"]})
+    with pytest.raises(CandidateCalculationError) as caught:
+        validate_option_contract_evidence(row, mode="put", quote_side=side, now_utc=_US_NOW)
+    assert caught.value.reason == "contract_ineligible"
+    assert caught.value.metric_value == {"status": "ineligible", "reason_codes": list(observation.reason_codes)}
+    positive_ask = _us_option(snapshot_row=_snapshot(bid_price=0, ask_price=1), **_RECEIPT)
+    buyback = {**row, "ask": positive_ask.ask,
+               "opening_contract_reason_codes": list(positive_ask.reason_codes)}
+    assert validate_option_contract_evidence(buyback, mode="put", quote_side="buy", now_utc=_US_NOW)["ask"] == 1
 
 
 def test_option_observation_zero_bid_does_not_mask_other_unavailable_evidence() -> None:

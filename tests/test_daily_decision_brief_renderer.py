@@ -555,6 +555,24 @@ def test_wheel_quote_gap_survives_settlement_reason_and_card_budget():
     assert "2026-12-30" in rendered
 
 
+@pytest.mark.parametrize("render", [render_fixed_report, render_fixed_report_card_markdown, render_fixed_report_text])
+@pytest.mark.parametrize("overflow", [False, True])
+def test_hidden_wheel_card_retains_missing_record_and_overflow_notices(render, overflow):
+    brief = _brief()
+    brief["wheel_batches"] = [{"symbol": "NVDA", "direction": "call", "wheel_branch_id": "waiting",
+        "recommended_contracts": 0, "reason_code": "option_close_settlement_pending",
+        "candidate_evidence_reason": "partial_data", "candidate_diagnostics": [
+            {"outcome": "unavailable", "reason_code": "option_ask_missing_or_invalid",
+             "expiration": f"2026-12-{day}", "contract_count": 1} for day in range(20, 25)
+        ] if overflow else []}]
+    limits = {"max_total_items": 1}
+    view = build_daily_brief_user_view(brief, delivery_kind="fixed_report", limits=limits,
+                                      context=_scheduled_context())
+    assert not view["wheel_batches"]
+    message = render(brief, limits=limits, context=_scheduled_context())
+    assert ("另有 1 项诊断" if overflow else "本次记录未提供具体缺项") in message
+
+
 def test_wheel_recommendation_alert_groups_only_selected_branches() -> None:
     brief = _same_wheel_call_recommendations()
     identities = []
