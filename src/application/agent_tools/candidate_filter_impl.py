@@ -80,11 +80,7 @@ def _candidate_page(rows: list[dict[str, Any]], payload: dict[str, Any], *,
             details={"reason": exc.code}) from None
 
 
-def _local_timezone() -> timezone:
-    return datetime.now().astimezone().tzinfo or timezone.utc
-
-
-def _event_local_date(event: Mapping[str, Any], tz: timezone) -> date | None:
+def _event_local_date(event: Mapping[str, Any], tz: timezone | None) -> date | None:
     raw = str(event.get("created_at_utc") or "").strip()
     if not raw:
         return None
@@ -122,7 +118,7 @@ def _resolve_notification_run(
     base: Path,
     account: str,
     notification_date: date,
-    tz: timezone,
+    tz: timezone | None,
     conversation_id: str | None = None,
 ) -> NotificationRunResolution:
     from src.application.agent_tools.project import _QUERY_CONTEXT
@@ -184,7 +180,7 @@ def _resolve_notification_run(
         return resolution
     first_segment_at = result.get("first_segment_at_utc")
     if first_segment_at:
-        start = datetime.combine(notification_date, datetime.min.time(), tzinfo=tz)
+        start = datetime.combine(notification_date, datetime.min.time(), tzinfo=tz).astimezone()
         if start < datetime.fromisoformat(first_segment_at):
             resolution["reason"] = "notification_audit_incomplete"
     return resolution
@@ -284,7 +280,8 @@ def candidate_filter_explain_tool(
             message="notification_date requires run_selector=latest_notification",
             hint="Pass run_selector=latest_notification to resolve a run from delivered notifications.",
         )
-    tz = _local_timezone()
+    # None asks the OS to resolve its local offset at each historical instant.
+    tz = None
     try:
         notification_date = (
             date.fromisoformat(raw_notification_date)

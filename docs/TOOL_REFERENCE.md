@@ -212,6 +212,8 @@ warning，但不会创建数据库、迁移 schema 或重建 projection。Tool G
 的 `ok` 表示工具执行成功；readiness 结论以 `data.summary.ok` 为准。对应的人类
 `om healthcheck` / `om doctor` 命令会在 readiness 为 false 时返回非零退出码。
 
+`healthcheck` 传给 Futu doctor 的 `timeout_sec` 形成一次单调时钟截止时间，覆盖 OpenD 探测、重试等待及逐标的字段查询；后续阶段只使用剩余预算。超时后停止新诊断工作并关闭已创建的 SDK 资源；资源清理和其他 healthcheck 步骤不承诺在该预算内结束。
+
 ### Runtime 状态
 
 本地 checkout：
@@ -367,7 +369,7 @@ bid/ask、Delta、IV 没有独立源时间，不能宣称为精确收盘价或�
 
 `candidate_filter_explain` 还支持从通知投递证据定位轮次：`run_selector=latest_notification`
 解析该账户在 `notification_date`（ISO 日期，默认按运行时主机本地时区的今天）实际送达的
-最近一次通知对应的 run；找不到匹配通知时 fail-closed 返回 `DEPENDENCY_MISSING`
+最近一次通知对应的 run；历史事件和查询日边界按各自日期的主机时区规则换算（包括夏令时），不套用今天的固定 UTC 偏移。找不到匹配通知时 fail-closed 返回 `DEPENDENCY_MISSING`
 （`details.reason=no_notification_run`），不会静默回退到其他轮次。
 
 ### 扫描

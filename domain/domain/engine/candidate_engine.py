@@ -1241,7 +1241,8 @@ def evaluate_opening_candidate_policy(
             ("iv_rv_ratio", iv_rv_ratio, resolved_min_iv_rv_ratio, None, REJECT_RISK_IV_RV_RATIO),
             ("iv_minus_rv", iv_minus_rv, resolved_min_iv_minus_rv, None, REJECT_RISK_IV_MINUS_RV),
             ("abs_delta", abs(delta) if delta is not None and not delta_unavailable else None,
-             None, resolved_max_abs_delta, REJECT_RISK_DELTA_UNAVAILABLE if delta_unavailable else REJECT_RISK_DELTA),
+             validate_max_abs_delta(min_abs_delta), resolved_max_abs_delta,
+             REJECT_RISK_DELTA_UNAVAILABLE if delta_unavailable else REJECT_RISK_DELTA),
         ):
             if lower is None and upper is None:
                 continue

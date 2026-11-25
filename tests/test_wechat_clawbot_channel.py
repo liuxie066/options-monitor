@@ -397,10 +397,10 @@ def test_wechat_clawbot_refreshes_notification_binding_from_inbound_message(tmp_
             {
                 "bindings": {
                     "ops": {
-                        "to_user_id": "stale_user",
+                        "to_user_id": "user_1",
                         "context_token": "stale_ctx",
-                        "group_id": "stale_group",
-                        "chat_key": "stale_chat",
+                        "group_id": "group_1",
+                        "chat_key": "group_1",
                         "last_message_id": "msg_old",
                     },
                     "other": {
@@ -446,10 +446,10 @@ def test_wechat_clawbot_refreshes_notification_binding_from_successful_reply(tmp
     state_dir.mkdir()
     _wechat_binding(
         state_dir,
-        to_user_id="stale_user",
+        to_user_id="user_1",
         context_token="stale_ctx",
-        group_id="stale_group",
-        chat_key="stale_chat",
+        group_id="group_1",
+        chat_key="group_1",
         last_message_id="msg_old",
     )
 
@@ -716,10 +716,10 @@ def test_wechat_clawbot_poll_once_routes_inbound_and_replies(tmp_path: Path) -> 
     config_path = _wechat_config_path(tmp_path)
     _wechat_binding(
         state_dir,
-        to_user_id="stale_user",
+        to_user_id="user_1",
         context_token="ctx_old",
-        group_id="stale_group",
-        chat_key="stale_chat",
+        group_id="group_1",
+        chat_key="group_1",
     )
     calls: list[tuple[str, dict]] = []
     replies: list[dict[str, object]] = []
@@ -825,9 +825,9 @@ def test_wechat_clawbot_poll_once_persists_failed_reply_receipt(tmp_path: Path) 
     config_path = _wechat_config_path(tmp_path)
     _wechat_binding(
         state_dir,
-        to_user_id="stale_user",
+        to_user_id="user_1",
         context_token="ctx_old",
-        group_id="stale_group",
+        group_id="group_1",
     )
 
     class FakeClient(_PollReplyClient):
@@ -1312,7 +1312,7 @@ def test_wechat_clawbot_poll_once_stays_silent_for_unauthorized_sender(tmp_path:
 def test_wechat_clawbot_poll_once_replies_to_non_silent_permission_denied(tmp_path: Path) -> None:
     state_dir = _wechat_state_dir(tmp_path)
     config_path = _wechat_config_path(tmp_path)
-    _wechat_binding(state_dir, to_user_id="stale_user", context_token="ctx_old")
+    _wechat_binding(state_dir, to_user_id="user_1", context_token="ctx_old")
     replies: list[dict[str, object]] = []
 
     class FakeClient(_PollReplyClient):
@@ -2060,3 +2060,76 @@ def _enabled_bot_fixture(tmp_path, monkeypatch):
     path = tmp_path / "test-bot-default.json"
     path.write_text('{"bot":{"enabled":true}}')
     monkeypatch.setattr("src.application.bot.control.config_loader.default_bot_config_path", lambda **kwargs: path)
+
+
+@pytest.mark.parametrize("refresh", ["inbound", "reply", "all"])
+@pytest.mark.parametrize("incoming", [
+    {"from_user_id": "user_b", "group_id": "group_a"},
+    {"from_user_id": "user_a", "group_id": "group_b"},
+    {"from_user_id": "user_a"},
+    {"from_user_id": "user_a", "group_id": "group_a", "chat_key": "different"},
+])
+def test_context_refresh_preserves_bound_recipient(tmp_path, refresh, incoming):
+    state_dir = _wechat_state_dir(tmp_path)
+    _wechat_binding(state_dir, to_user_id="user_a", context_token="ctx_a",
+                    group_id="group_a", chat_key="group_a")
+    before = (state_dir / "bindings.json").read_bytes()
+    message = {**incoming, "context_token": "ctx_b", "message_id": "msg_b"}
+    notifications = {"wechat_clawbot_state_dir": str(state_dir)}
+    if refresh == "all":
+        result = refresh_wechat_clawbot_bindings_from_message(
+            base=tmp_path, label="ops", state_dir=str(state_dir), message=message)
+    else:
+        fn = (refresh_wechat_clawbot_binding_from_reply if refresh == "reply"
+              else refresh_wechat_clawbot_binding_from_inbound_message)
+        extra = {"reply_status": {"attempted": True, "ok": True}} if refresh == "reply" else {}
+        result = fn(base=tmp_path, target="wechat:ops", message=message,
+                    notifications=notifications, **extra)
+    assert result["updated_count"] == 0
+    assert (state_dir / "bindings.json").read_bytes() == before
+    from src.application.channels.wechat_clawbot.notification import send_wechat_clawbot_message
+    calls = []
+    class Client:
+        def __init__(self, **kwargs): pass
+        def send_text_message(self, **kwargs):
+            calls.append(kwargs)
+            return {"ret": 0, "message_id": "notification_1"}
+    sent = send_wechat_clawbot_message(base=tmp_path, channel="wechat_clawbot",
+        target="wechat:ops", message="fixture", notifications=notifications, client_factory=Client)
+    assert sent["ok"]
+    assert calls[0]["to_user_id"] == "user_a"
+    assert calls[0]["group_id"] == "group_a"
+    assert calls[0]["context_token"] == "ctx_a"
+
+
+def test_allowed_other_sender_cannot_redirect_scheduled_notifications(tmp_path):
+    from src.application.channels.wechat_clawbot.notification import send_wechat_clawbot_message
+    state_dir = _wechat_state_dir(tmp_path)
+    _wechat_binding(state_dir, to_user_id="user_a", context_token="ctx_a")
+    before = (state_dir / "bindings.json").read_bytes()
+    sent = []
+
+    class Client(_PollReplyClient):
+        def get_updates(self, **kwargs):
+            return {"ret": 0, "get_updates_buf": "buf_2",
+                    "msgs": [_wechat_flat_inbound_message("/status")]}
+        def send_text_message(self, **kwargs):
+            sent.append(kwargs)
+            return {"ret": 0, "message_id": "sent"}
+
+    out = poll_wechat_clawbot_once(
+        base=tmp_path, label="ops", state_dir=str(state_dir),
+        config_path=str(_wechat_config_path(tmp_path)),
+        bot_config_path=str(_write_minimal_bot_config(tmp_path)),
+        audit_db=str(tmp_path / "audit.sqlite3"),
+        allowed_senders="wechat:user_a,wechat:user_1", client_factory=Client,
+        execute_tool_fn=_wechat_execute)
+    assert out["data"]["reply_count"] == 1
+    assert sent[0]["to_user_id"] == "user_1"
+    assert (state_dir / "bindings.json").read_bytes() == before
+    result = send_wechat_clawbot_message(
+        base=tmp_path, channel="wechat_clawbot", target="wechat:ops", message="fixture",
+        notifications={"wechat_clawbot_state_dir": str(state_dir)}, client_factory=Client)
+    assert result["ok"]
+    assert sent[-1]["to_user_id"] == "user_a"
+    assert sent[-1]["context_token"] == "ctx_a"

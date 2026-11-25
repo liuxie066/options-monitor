@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from src.infrastructure.net_port import port_open
+from src.infrastructure.fetch_control import check_fetch_control, wait_fetch_control
 
 
 @dataclass
@@ -138,12 +139,22 @@ def _looks_like_disconnect_error(msg: str) -> bool:
     return any(k in sl for k in keys)
 
 
-def get_global_state_once(host: str, port: int) -> dict:
+def _port_open_before_deadline(host, port, *, deadline=None):
+    check_fetch_control(deadline)
+    kwargs = {"timeout": min(0.8, max(0.0, deadline - time.monotonic()))} if deadline is not None else {}
+    result = port_open(host, port, **kwargs)
+    check_fetch_control(deadline)
+    return result
+
+
+def get_global_state_once(host: str, port: int, *, deadline: float | None = None) -> dict:
     from src.infrastructure.futu_gateway import build_futu_quote_context
 
-    ctx = build_futu_quote_context(host=host, port=int(port))
+    check_fetch_control(deadline)
+    ctx = build_futu_quote_context(host=host, port=int(port), **({"deadline": deadline} if deadline is not None else {}))
     try:
         ret, data = ctx.get_global_state()
+        check_fetch_control(deadline)
         if ret != 0:
             raise RuntimeError(f"get_global_state ret={ret} data={data}")
         if not isinstance(data, dict):
@@ -156,11 +167,12 @@ def get_global_state_once(host: str, port: int) -> dict:
             pass
 
 
-def get_global_state(host: str, port: int, *, retry_once: bool = True, ensure: bool = False) -> tuple[dict | None, str | None, str | None]:
+def get_global_state(host: str, port: int, *, retry_once: bool = True, ensure: bool = False, deadline: float | None = None) -> tuple[dict | None, str | None, str | None]:
     try:
-        st = get_global_state_once(host, port)
+        st = get_global_state_once(host, port, **({"deadline": deadline} if deadline is not None else {}))
         return (st, None, None)
     except Exception as exc:
+        check_fetch_control(deadline)
         err1 = f"get_global_state failed: {type(exc).__name__}: {exc}"
         code1, _ = classify_watchdog_result(None, err1)
         if code1 in {"OPEND_NEEDS_PHONE_VERIFY", "OPEND_NEEDS_PIC_VERIFY", "OPEND_LOGIN_INVALID"}:
@@ -173,29 +185,34 @@ def get_global_state(host: str, port: int, *, retry_once: bool = True, ensure: b
         if code1 == "OPEND_RATE_LIMIT":
             return (None, err1, "no_retry_rate_limit")
         if retry_once and _looks_like_disconnect_error(err1):
-            if ensure and not port_open(host, port):
-                ok, _msg = try_start_opend()
+            if ensure and not _port_open_before_deadline(host, port, deadline=deadline):
+                ok, _msg = try_start_opend(**({"deadline": deadline} if deadline is not None else {}))
                 if ok:
-                    time.sleep(1.0)
-            time.sleep(0.3)
+                    wait_fetch_control(1.0, deadline=deadline)
+            wait_fetch_control(0.3, deadline=deadline)
             try:
-                st2 = get_global_state_once(host, port)
+                st2 = get_global_state_once(host, port, **({"deadline": deadline} if deadline is not None else {}))
                 return (st2, None, "retry_once")
             except Exception as exc2:
+                check_fetch_control(deadline)
                 err2 = f"get_global_state failed after retry: {type(exc2).__name__}: {exc2}"
                 return (None, err1 + " | " + err2, "retry_once_failed")
         return (None, err1, None)
 
 
-def try_start_opend() -> tuple[bool, str]:
+def try_start_opend(*, deadline: float | None = None) -> tuple[bool, str]:
+    check_fetch_control(deadline)
     start_sh = str(os.environ.get("OPEND_START_SCRIPT") or "").strip()
     if not start_sh:
         return (False, "OPEND_START_SCRIPT is not configured")
     try:
-        proc = subprocess.run(["bash", start_sh], capture_output=True, text=True, timeout=20)
+        proc = subprocess.run(["bash", start_sh], capture_output=True, text=True,
+                              timeout=min(20, max(0.0, deadline - time.monotonic())) if deadline is not None else 20)
+        check_fetch_control(deadline)
         out = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
         return (proc.returncode == 0, out[-500:])
     except Exception as exc:
+        check_fetch_control(deadline)
         return (False, f"start_opend exception: {type(exc).__name__}: {exc}")
 
 
@@ -208,25 +225,26 @@ def _port_retry_loop(
     retry_interval_sec: float,
     retry_timeout_sec: float,
     success_threshold: int,
+    deadline: float | None = None,
 ) -> bool:
     firstfail = time.time()
     h.firstfailts = firstfail
     h.retrycount = 0
 
     if ensure:
-        ok_start, _msg = try_start_opend()
+        ok_start, _msg = try_start_opend(**({"deadline": deadline} if deadline is not None else {}))
         h.startedbywatchdog = ok_start
         h.action_taken = "start_opend" if ok_start else "start_opend_failed"
 
     consecutive_success = 0
-    deadline = firstfail + retry_timeout_sec
+    retry_until = firstfail + retry_timeout_sec
 
-    while time.time() < deadline:
-        remaining = deadline - time.time()
+    while time.time() < retry_until:
+        remaining = retry_until - time.time()
         sleep_duration = min(retry_interval_sec, max(0.0, remaining))
-        time.sleep(sleep_duration)
+        wait_fetch_control(sleep_duration, deadline=deadline)
         h.retrycount += 1
-        if port_open(host, port):
+        if _port_open_before_deadline(host, port, deadline=deadline):
             consecutive_success += 1
             if consecutive_success >= success_threshold:
                 h.recoveredts = time.time()
@@ -251,13 +269,14 @@ def run_watchdog_check(
     required_capability: str = "both",
     expected_account_ids: list[str] | tuple[str, ...] | None = None,
     trd_env: str = "REAL",
+    deadline: float | None = None,
 ) -> Health:
     capability = str(required_capability or "").strip().lower()
     if capability not in {"quote", "broker", "both"}:
         raise ValueError("required_capability must be quote, broker, or both")
     h = Health(ok=False, ports_open=False)
 
-    if not port_open(host, port):
+    if not _port_open_before_deadline(host, port, deadline=deadline):
         h.ports_open = False
         if retry_enabled:
             recovered = _port_retry_loop(
@@ -268,6 +287,7 @@ def run_watchdog_check(
                 retry_interval_sec=retry_interval_sec,
                 retry_timeout_sec=retry_timeout_sec,
                 success_threshold=success_threshold,
+                deadline=deadline,
             )
             if not recovered:
                 h.error = f"OpenD port not open: {host}:{port}"
@@ -275,15 +295,15 @@ def run_watchdog_check(
                 return h
         else:
             if ensure:
-                ok, _msg = try_start_opend()
+                ok, _msg = try_start_opend(**({"deadline": deadline} if deadline is not None else {}))
                 h.action_taken = "start_opend" if ok else "start_opend_failed"
                 if ok:
-                    deadline = time.time() + 8.0
-                    while time.time() < deadline and not port_open(host, port):
-                        time.sleep(0.8)
+                    start_until = time.time() + 8.0
+                    while time.time() < start_until and not _port_open_before_deadline(host, port, deadline=deadline):
+                        wait_fetch_control(0.8, deadline=deadline)
                 else:
-                    time.sleep(1.0)
-            if not port_open(host, port):
+                    wait_fetch_control(1.0, deadline=deadline)
+            if not _port_open_before_deadline(host, port, deadline=deadline):
                 h.error = f"OpenD port not open: {host}:{port}"
                 h.error_code, h.message = classify_watchdog_result(None, h.error)
                 return h
@@ -303,7 +323,9 @@ def run_watchdog_check(
                 expected_account_ids=list(expected_account_ids or []),
                 trd_env=str(trd_env),
                 is_option_chain_cache_enabled=False,
+                **({"deadline": deadline} if deadline is not None else {}),
             )
+            check_fetch_control(deadline)
             h.ok = True
             h.state = {
                 "program_status_type": "READY",
@@ -312,6 +334,7 @@ def run_watchdog_check(
             }
             h.message = "OpenD broker capability healthy"
         except Exception as exc:
+            check_fetch_control(deadline)
             h.error = f"broker readiness failed: {type(exc).__name__}: {exc}"
             h.error_code, h.message = classify_watchdog_result(None, h.error)
         finally:
@@ -320,7 +343,9 @@ def run_watchdog_check(
         return h
 
     try:
-        st, err, action = get_global_state(host, port, retry_once=True, ensure=bool(ensure))
+        st, err, action = get_global_state(host, port, retry_once=True, ensure=bool(ensure),
+                                           **({"deadline": deadline} if deadline is not None else {}))
+        check_fetch_control(deadline)
         h.action_taken = action
         if err:
             h.error = err
@@ -351,6 +376,7 @@ def run_watchdog_check(
         else:
             h.error_code, h.message = classify_watchdog_result(h.state, h.error)
     except Exception as exc:
+        check_fetch_control(deadline)
         h.error = f"get_global_state wrapper failed: {type(exc).__name__}: {exc}"
         h.error_code, h.message = classify_watchdog_result(h.state, h.error)
 

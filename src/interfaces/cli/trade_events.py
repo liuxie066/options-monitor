@@ -325,7 +325,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.trd_env is not None:
                 if not args.config_key:
                     raise ValueError("Futu environment repair requires --config-key")
-                _, cfg = load_runtime_config({"config_key": args.config_key, "config_path": args.config_path})
+                _, cfg = load_runtime_config(config_key=args.config_key, config_path=args.config_path)
                 overrides["futu_environment_evidence"] = collect_futu_environment_evidence(
                     repo, event_id=args.event_id, config=cfg, market=args.config_key)
             payload = (

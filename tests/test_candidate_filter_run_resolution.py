@@ -561,3 +561,37 @@ def test_notification_audit_corruption_blocks_older_delivered_source(tmp_path: P
     assert out["ok"] is False, out
     assert out["error"]["code"] == "DEPENDENCY_MISSING", out
     assert out["error"]["details"]["reason"] == "notification_audit_incomplete"
+
+
+@pytest.mark.parametrize("zone,current,event,day", [
+    ("America/New_York", "2026-11-25T12:00:00+00:00", "2026-11-01T04:30:00+00:00", "2026-11-01"),
+    ("America/New_York", "2026-07-01T12:00:00+00:00", "2026-03-08T04:30:00+00:00", "2026-03-07"),
+    ("Asia/Shanghai", "2026-11-25T12:00:00+00:00", "2026-11-01T17:00:00+00:00", "2026-11-02"),
+    ("UTC", "2026-11-25T12:00:00+00:00", "2026-11-01T04:30:00+00:00", "2026-11-01"),
+])
+def test_public_notification_date_uses_historical_local_offset(tmp_path, monkeypatch, zone, current, event, day):
+    import time
+    from src.application.agent_tools import candidate_filter_impl as impl
+    if not hasattr(time, "tzset"):
+        pytest.skip("requires OS local timezone control")
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = datetime.fromisoformat(current)
+            return value.astimezone(tz) if tz is not None else value.astimezone().replace(tzinfo=None)
+    try:
+        with monkeypatch.context() as patch:
+            patch.setenv("TZ", zone)
+            time.tzset()
+            patch.setattr(impl, "datetime", Clock)
+            _seal_run(tmp_path, "historical")
+            _write_delivered(tmp_path, run_id="historical", event_at_utc=datetime.fromisoformat(event))
+            out = _query(tmp_path, notification_date=day)
+            assert out["ok"] is True, out
+            assert out["meta"]["source_files"][0]["run_resolution"]["resolved_run_id"] == "historical"
+            # A day preceding retained evidence remains incomplete, without naive/aware comparison failure.
+            missing = _query(tmp_path, notification_date="2026-01-01")
+            assert missing["ok"] is False
+            assert missing["error"]["code"] == "DEPENDENCY_MISSING"
+    finally:
+        time.tzset()

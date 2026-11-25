@@ -1436,3 +1436,84 @@ def test_failed_candidate_projection_still_fails_closed(tmp_path, monkeypatch):
         _body({"symbol": "US.NVDA", "strategy": "short_put", "limit": 5}))
     assert status == 503
     assert envelope["error"]["code"] == "DEPENDENCY_UNAVAILABLE"
+
+
+def _roll_regression_plan(tmp_path, direction):
+    from test_group_query_bot_scenario_contract import _build, _scenario
+    scenario = _scenario(operation=direction)
+    scenario.pop("opening_premium")
+    old, newer = _scenario_rows()
+    scenario["search_bounds"] = {"max_new_expiration": "2027-01-15"}
+    if direction == "roll-up":
+        scenario["position"]["contract"]["option_type"] = "call"
+        old.update(option_type="call", contract_symbol="US.NVDA261218C180000")
+        newer.update(option_type="call", strike=200.0, contract_symbol="US.NVDA270115C200000")
+    return _build(tmp_path, scenario), old, newer
+
+
+@pytest.mark.parametrize("failure", ["closed", "stale", "suspended"])
+def test_roll_up_unavailable_keeps_conditional_contract_and_original_reason(tmp_path, failure):
+    from om_group_query_bot.render import render_roll, result_contract_error
+    plan, old, newer = _roll_regression_plan(tmp_path, "roll-up")
+    if failure == "closed":
+        old.update(opening_contract_status="market_closed", underlier_observation_status="market_closed")
+    elif failure == "stale":
+        old["snapshot_received_at_utc"] = "2026-11-01T05:59:00+00:00"
+    else:
+        old["option_sec_status"] = "SUSPENDED"
+        old["opening_contract_status"] = "ineligible"
+    result = _evaluate_scenario(plan=plan, rows=[old, newer], original=old,
+        contract_evidence=_contract_evidence(plan, old), now=NOW, limit=5,
+        effective_scope=_effective_scope(plan))
+    assert result["outcome"] == "unable"
+    assert result_contract_error("evaluate_roll_up", result) is None
+    assert result["stock_coverage"]["verification_status"] == "not_verified"
+    assert result["reason_codes"]
+    assert "合同不一致" not in render_roll(result)
+    if failure == "closed":
+        assert result["reason_codes"] == ["market_closed"]
+
+
+@pytest.mark.parametrize("direction", ["roll-down", "roll-up"])
+@pytest.mark.parametrize("bad", ["stale", "missing_bid", "missing_ask", "economic"])
+@pytest.mark.parametrize("mixed", [False, True])
+def test_roll_coverage_distinguishes_unknown_from_economic_exclusion(tmp_path, direction, bad, mixed):
+    plan, old, newer = _roll_regression_plan(tmp_path, direction)
+    bad_row = dict(newer, contract_symbol=newer["contract_symbol"] + "-other")
+    if bad == "stale":
+        bad_row["snapshot_received_at_utc"] = "2026-11-01T05:59:00+00:00"
+    elif bad == "missing_bid":
+        bad_row["bid"] = None
+    elif bad == "missing_ask":
+        bad_row["ask"] = None
+    else:
+        bad_row.update(bid=0.05, ask=0.06)
+    rows = [old, bad_row, *([newer] if mixed else [])]
+    result = _evaluate_scenario(plan=plan, rows=rows, original=old,
+        contract_evidence=_contract_evidence(plan, old), now=NOW, limit=5,
+        effective_scope=_effective_scope(plan))
+    assert result["coverage"]["complete"] is (bad == "economic")
+    assert result["coverage"]["candidate_count"] == (2 if mixed else 1)
+    assert result["outcome"] == ("found" if mixed else "none" if bad == "economic" else "unable")
+    if bad != "economic":
+        assert result["coverage"]["unassessed"] == 1
+        assert result["status"] == "partial"
+
+
+@pytest.mark.parametrize("direction", ["roll-down", "roll-up"])
+def test_mixed_roll_evidence_gap_reaches_both_renderers(tmp_path, direction):
+    from om_group_query_bot.render import fact_card, render_roll
+    plan, old, newer = _roll_regression_plan(tmp_path, direction)
+    stale = dict(newer, contract_symbol=newer["contract_symbol"] + "-other",
+                 snapshot_received_at_utc="2026-11-01T05:59:00+00:00")
+    kwargs = dict(plan=plan, original=old, contract_evidence=_contract_evidence(plan, old),
+                  now=NOW, limit=5, effective_scope=_effective_scope(plan))
+    valid = _evaluate_scenario(rows=[old, newer], **kwargs)
+    partial = _evaluate_scenario(rows=[old, newer, stale], **kwargs)
+    assert partial["outcome"] == "found"
+    assert partial["reason_codes"]
+    method = "evaluate_roll_up" if direction == "roll-up" else "evaluate_roll_down"
+    assert render_roll(partial) != render_roll(valid)
+    assert fact_card(method, partial) != fact_card(method, valid)
+    assert "原因：" in render_roll(partial)
+    assert "原因：" in fact_card(method, partial)

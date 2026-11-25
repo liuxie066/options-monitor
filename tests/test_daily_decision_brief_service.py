@@ -107,6 +107,7 @@ def _write_close_report(
 
 def _config(*, timezone_name: str = "America/New_York") -> dict:
     return {
+        "close_advice": {"enabled": True},
         "schedule": {
             "timezone": timezone_name,
             "run_window": {"start": "09:30", "end": "16:00", "breaks": []},
@@ -3605,3 +3606,49 @@ def test_wheel_gap_deduplication_preserves_directions():
          "direction": direction, "status": "failed", "reason": "wheel_scan_failed"} for direction in ("call", "put")]},
         run_id="run-1", account="lx", market="US", data_gaps=gaps)
     assert {gap["direction"] for gap in _dedupe_gaps(gaps)} == {"call", "put"}
+
+
+@pytest.mark.parametrize("source", ["missing", "invalid", "corrupt_manifest", "foreign_account", "wrong_run",
+                                    "empty", "disabled", "disabled_leftover", "omitted"])
+def test_close_source_state_survives_assembly_and_both_renderers(tmp_path, source):
+    from src.application.daily_decision_brief_renderer import (
+        build_daily_brief_user_view, render_fixed_report_card_markdown, render_fixed_report_text,
+    )
+    account_dir = _write_labeled_put_candidates(tmp_path)
+    config = _config()
+    if source in {"empty", "corrupt_manifest", "foreign_account", "wrong_run"}:
+        _write_close_report(account_dir, [])
+        manifest = account_dir / "close_advice.manifest.json"
+        if source == "corrupt_manifest":
+            manifest.write_text("{broken")
+        elif source in {"foreign_account", "wrong_run"}:
+            payload = json.loads(manifest.read_text())
+            payload["accounts" if source == "foreign_account" else "run_id"] = ["other"] if source == "foreign_account" else "other"
+            manifest.write_text(json.dumps(payload))
+    elif source == "disabled_leftover":
+        _write_close_report(account_dir, [{"account": "lx", "symbol": "NVDA", "market": "US",
+            "option_type": "put", "position_lot_id": "disabled-lot", "recommendation_state": "hold"}])
+    elif source == "invalid":
+        (account_dir / "close_advice.csv").write_text("account,symbol\nlx,NVDA\n")
+    if source.startswith("disabled"):
+        config["close_advice"]["enabled"] = False
+    elif source == "omitted":
+        config.pop("close_advice")
+    brief = _assemble(tmp_path, config=config)
+    assert brief["candidates"]["sell_put"]
+    gaps = [gap for gap in brief["data_gaps"] if gap.get("strategy_family") == "close_advice"]
+    unavailable = source in {"missing", "invalid", "corrupt_manifest", "foreign_account", "wrong_run"}
+    assert bool(gaps) is unavailable
+    view = build_daily_brief_user_view(brief)
+    assert view["position_source_unavailable"] is unavailable
+    assert view["position_total"] == 0
+    if source in {"disabled", "disabled_leftover", "omitted"}:
+        assert next(row for row in brief["source_artifacts"] if row["kind"] == "close_advice")["status"] == "disabled"
+    for render in (render_fixed_report_text, render_fixed_report_card_markdown):
+        message = render(brief)
+        if unavailable:
+            assert "暂无法评估（证据不足）" in message
+            assert "暂无操作建议" not in message
+            assert "汇总｜共 0 条" not in message
+        else:
+            assert "暂无操作建议" in message

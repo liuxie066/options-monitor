@@ -344,15 +344,21 @@ def assemble_daily_decision_brief(
         "assemble", operation="candidate_sources", started=checkpoint_started,
     )
     checkpoint_started = monotonic()
-    close_rows, close_available = _load_close_advice(
-        path=run_account_dir / "close_advice.csv",
-        run_account_dir=run_account_dir,
-        market=market_norm,
-        account=account_norm,
-        run_id=run_id_norm,
-        source_artifacts=source_artifacts,
-        data_gaps=data_gaps,
-    )
+    close_enabled = bool((config_map.get("close_advice") or {}).get("enabled", False))
+    if close_enabled:
+        close_rows, close_available = _load_close_advice(
+            path=run_account_dir / "close_advice.csv",
+            run_account_dir=run_account_dir,
+            market=market_norm,
+            account=account_norm,
+            run_id=run_id_norm,
+            source_artifacts=source_artifacts,
+            data_gaps=data_gaps,
+        )
+    else:
+        close_rows, close_available = [], False
+        source_artifacts.append({"kind": "close_advice", "path": "close_advice.csv",
+                                 "status": "disabled", "row_count": 0})
     daily_brief_checkpoint(
         "assemble", operation="close_advice_rows", started=checkpoint_started,
     )

@@ -141,6 +141,8 @@ notifications:
 绑定的 service profile 中明确选择的另一收信渠道，并将该 profile 版本纳入确认摘要；
 已有 `channels` 后只以根层开关为准，authoring 中明确关闭的收信选择优先。
 
+微信既有通知绑定只在用户、群及会话身份均匹配时刷新 context token。允许发送命令的其他用户仍可在原会话收到回复，但不会改写定时通知接收人；变更接收人须走显式绑定流程。
+
 ### Portfolio Exposure 的 Holdings 来源配置
 
 `portfolio.holdings.enabled` 是“全部指派后分布”的 PM 非富途资产补充开关，默认关闭。关闭时查询不读取 PM；开启时以账户配置的直接券商股票、现金与 OM 期权账本为基线，仅从 PM `holdings_scope=non_futu` 估值证据补充同账户非富途资产。PM 的富途副本及同账户已直接读取的长桥镜像不重复计入；其他 PM 现金只参与资产分布，不增加直接券商的期权资金覆盖。

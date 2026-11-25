@@ -136,6 +136,35 @@ def comment(root, config, folder, deadline, command, *, kind, number, body, purp
     return ledger[token]
 
 
+def validate_not_worthwhile_scope(root, config, folder, deadline, command, number):
+    """Bind a queued rejection to current discussion and ownership before closing."""
+    row = read_json(root / "issue-state.json", {"issues": {}})["issues"].get(str(number), {})
+    if (row.get("outcome") != "not_worthwhile" or row.get("disposition") != "reply"
+            or row.get("review_outcome") not in issue_intake.OUTCOMES - {"blocked", "needs_decision"}
+            or row.get("triage", {}).get("decision") != "not_worthwhile"
+            or row["triage"].get("third_party_service") is not False
+            or row.get("fingerprint_version") != 3 or not row.get("input_digest")):
+        raise ValueError("rejection lacks current review input identity; fresh issue review required")
+    api = issue_intake.github_api(config,
+        lambda argv, **kwargs: execute(config, folder, deadline, command, argv), deadline)
+    current = api(f"issues/{number}")
+    if (current.get("number") != number or "pull_request" in current or current.get("state") != "open"
+            or current.get("html_url") != f"https://github.com/{config['repository']}/issues/{number}"):
+        raise ValueError("rejection target is not this repository's open issue")
+    if current.get("assignees") != []:
+        raise ValueError("issue ownership requires a separate closing decision")
+    comments = api(f"issues/{number}/comments?per_page=100", pages=True)
+    timeline = api(f"issues/{number}/timeline?per_page=100", pages=True)
+    open_prs = api("pulls?state=open&per_page=100", pages=True)
+    own_ids = issue_intake.own_comment_ids(root, number, comments)
+    linked = issue_intake.linked_prs(current, [entry for entry in comments if entry.get("id") not in own_ids],
+                                     timeline, open_prs, config["repository"], api)
+    if any(pr.get("state") == "open" for pr in linked):
+        raise ValueError("linked open pull request owns this work")
+    if issue_intake.issue_input_digest(current, linked, comments, ignored_comment_ids=own_ids) != row["input_digest"]:
+        raise ValueError("issue discussion or linked PR changed; fresh issue review required")
+
+
 def close_not_worthwhile(root, config, folder, deadline, command, posted, reason):
     """Close only after the triage reply and closure explanation are read back."""
     if posted.get("status") != "posted":
@@ -155,8 +184,10 @@ def close_not_worthwhile(root, config, folder, deadline, command, posted, reason
             raise ValueError("closure target does not match the handled issue")
         requested = bool(ledger[token].get("close_requested_at"))
         if target["state"] == "open":
+            validate_not_worthwhile_scope(root, config, folder, deadline, command, number)
             explanation = f"按 not_worthwhile 分诊结论关闭：{reason}\n\n分诊评论：{posted['url']}"
             comment(root, config, folder, deadline, command, kind="issue", number=number, body=explanation)
+            validate_not_worthwhile_scope(root, config, folder, deadline, command, number)
             ledger = read_json(ledger_path, {})
             ledger[token]["close_requested_at"] = repair.timestamp()
             save_json(ledger_path, ledger)
