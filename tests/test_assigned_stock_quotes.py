@@ -4,6 +4,17 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from datetime import datetime
+from src.application.opening_quote_evidence import normalize_underlier_observation
+
+
+def _ready(price=98.0):
+    return normalize_underlier_observation(
+        code='US.NVDA', market='US',
+        snapshot_row={'code': 'US.NVDA', 'last_price': price, 'update_time': '2026-11-25 09:59:30',
+                      'sec_status': 'NORMAL', 'suspension': False},
+        market_state_row={'code': 'US.NVDA', 'market_state': 'MORNING'},
+        now_utc=datetime.fromisoformat('2026-11-25T15:00:00+00:00'))
 
 
 class _ListGateway:
@@ -45,23 +56,22 @@ def test_refresh_assigned_stock_quote_snapshots_reuses_gateway(monkeypatch, tmp_
 
     monkeypatch.setattr(mod, "build_ready_futu_quote_gateway", _build_gateway)
 
+    monkeypatch.setattr(mod, "get_underlier_observations", lambda gw, codes, **kw:
+                        calls.append({"codes": codes}) or {codes[0]: _ready()})
     result = _refresh(mod, cfg={"symbols": [{"symbol": "NVDA",
                                              "fetch": {"source": "futu", "host": "127.0.0.2", "port": 22222}}]},
-                      base_dir=tmp_path, now_ms=lambda: 1780000000000)
+                      base_dir=tmp_path, now_ms=lambda: 1795618800000)
 
     assert calls[0]["gateway_kwargs"]["host"] == "127.0.0.2"
     assert calls[0]["gateway_kwargs"]["port"] == 22222
     assert calls[1]["codes"] == ["US.NVDA"]
     assert gateway.closed is True
-    assert result.quote_snapshots == [
-        {
-            "symbol": "NVDA",
-            "spot": 98.0,
-            "quote_time_ms": 1780000000000,
-            "quote_source": "opend_realtime",
-            "quote_status": "fresh",
-        }
-    ]
+    quote = result.quote_snapshots[0]
+    assert quote['symbol'] == 'NVDA' and quote['spot'] == 98.0
+    assert quote['quote_time_ms'] == 1795618770000
+    assert quote['quote_observed_at_ms'] == 1795618800000
+    assert quote['quote_source'] == 'opend_realtime' and quote['quote_status'] == 'ready'
+    assert mod.assigned_stock_quote_is_usable(quote, 1795618800000)
     assert result.diagnostics["status"] == "ok"
     assert result.warnings == []
 
@@ -82,21 +92,22 @@ def test_refresh_assigned_stock_quote_snapshots_separates_alias_and_state_base_d
 
     class _Underlier:
         code = "US.NVDA"
+        market = "US"
 
     def _normalize_underlier(symbol: str, *, base_dir: Path) -> _Underlier:
         calls.append({"stage": "normalize", "symbol": symbol, "base_dir": base_dir})
         return _Underlier()
 
-    def _get_spot_opend(_gateway: Any, code: str, **kwargs: Any) -> float:
-        calls.append({"stage": "snapshot", "code": code, "base_dir": kwargs.get("base_dir")})
-        return 101.0
+    def _observe(_gateway: Any, codes: list[str], **kwargs: Any):
+        calls.append({"stage": "snapshot", "code": codes[0], "base_dir": kwargs.get("base_dir")})
+        return {codes[0]: _ready(101.0)}
 
     monkeypatch.setattr(mod, "build_ready_futu_quote_gateway", lambda **_kwargs: _Gateway())
     monkeypatch.setattr(mod, "normalize_underlier", _normalize_underlier)
-    monkeypatch.setattr(mod, "get_spot_opend", _get_spot_opend)
+    monkeypatch.setattr(mod, "get_underlier_observations", _observe)
 
     result = _refresh(mod, cfg={"symbols": [{"symbol": "NVDA", "fetch": {"source": "futu"}}]},
-                      base_dir=alias_base_dir, state_base_dir=state_base_dir)
+                      base_dir=alias_base_dir, state_base_dir=state_base_dir, now_ms=lambda: 1795618800000)
 
     assert result.diagnostics["status"] == "ok"
     assert calls == [
@@ -122,7 +133,7 @@ def test_refresh_assigned_stock_quote_snapshots_degrades_when_price_missing(monk
     assert result.quote_snapshots == []
     assert result.diagnostics["status"] == "missing_quote"
     assert result.diagnostics["missing_symbols"] == ["NVDA"]
-    assert result.diagnostics["errors"][0]["error_code"] == "MISSING_PRICE"
+    assert result.diagnostics["errors"][0]["error_code"] == "quote_price_invalid"
     assert result.warnings == ["assigned stock quote refresh missing: NVDA"]
 
 

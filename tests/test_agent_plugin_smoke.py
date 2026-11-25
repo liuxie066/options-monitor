@@ -1301,6 +1301,7 @@ def _assigned_stock_refresh_case(monkeypatch, tmp_path, *, elapsed_ms=1000, outc
     from src.application.ledger.commands import record_manual_assignment
     from src.application.agent_tools import operations_impl
     from src.application.positions import assigned_stock_quotes
+    from src.application import opend_market_snapshot_fetching
     from src.application.tool_execution import execute_tool
 
     def ms(value):
@@ -1348,7 +1349,15 @@ def _assigned_stock_refresh_case(monkeypatch, tmp_path, *, elapsed_ms=1000, outc
             case.clock_ms = initial_ms + elapsed_ms
             if case.on_snapshot is not None:
                 case.on_snapshot()
-            return pd.DataFrame([] if outcome == "missing" else [{"code": list(codes)[0], "last_price": 120.0}])
+            return pd.DataFrame([] if outcome == "missing" else [{
+                "code": list(codes)[0], "last_price": 120.0,
+                "update_time": datetime.fromtimestamp(case.quote_ms / 1000, timezone.utc).isoformat(),
+                "sec_status": "NORMAL", "suspension": False,
+            }])
+
+        def get_market_state(self, codes):
+            case.calls.append(("state", list(codes)))
+            return [{"code": code, "market_state": "MORNING"} for code in codes]
 
         def close(self):
             case.calls.append(("close",))
@@ -1365,6 +1374,7 @@ def _assigned_stock_refresh_case(monkeypatch, tmp_path, *, elapsed_ms=1000, outc
         )
 
     monkeypatch.setattr(operations_impl, "datetime", Clock)
+    monkeypatch.setattr(opend_market_snapshot_fetching, "datetime", Clock)
     monkeypatch.setattr(assigned_stock_quotes, "build_ready_futu_quote_gateway", gateway)
     _patch_agent_tool_dependencies(monkeypatch, refresh_assigned_stock_quotes=refresh)
     case.facts = lambda: {
@@ -1404,7 +1414,7 @@ def test_assigned_stock_current_refresh_uses_new_quote(monkeypatch, tmp_path, el
     assert row["spot"] == 120.0
     assert row["remaining_market_value"] == 12000
     assert row["assigned_stock_unrealized_pnl"] == 2000
-    assert [call[0] for call in case.calls] == ["gateway", "snapshot", "close"]
+    assert [call[0] for call in case.calls] == ["gateway", "snapshot", "state", "close"]
     assert case.calls[1][1] == ["US.NVDA"]
     assert case.facts() == before
 
@@ -1436,7 +1446,7 @@ def test_assigned_stock_refresh_preserves_quote_cutoff_controls(monkeypatch, tmp
         assert [call[0] for call in case.calls] == ["gateway"]
         assert data["quote_refresh"]["status"] == "source_unavailable"
     else:
-        assert [call[0] for call in case.calls] == ["gateway", "snapshot", "close"]
+        assert [call[0] for call in case.calls] == ["gateway", "snapshot", "state", "close"]
     if mode == "historical":
         assert data["quote_refresh"]["status"] == "skipped_historical_as_of"
     assert case.facts() == before

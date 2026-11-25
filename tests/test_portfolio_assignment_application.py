@@ -11,6 +11,25 @@ from src.application import portfolio_assignment_scenario as application
 from cash_evidence_helpers import cash_portfolio, cash_config
 
 
+def _observed(code, price, observed_at, *, state='MORNING', sec_status='NORMAL'):
+    from src.application.opening_quote_evidence import normalize_underlier_observation
+    return normalize_underlier_observation(
+        code=code, market='US',
+        snapshot_row={'code': code, 'last_price': price, 'update_time': observed_at,
+                      'sec_status': sec_status, 'suspension': False},
+        market_state_row={'code': code, 'market_state': state},
+        now_utc=application.datetime.now(timezone.utc))
+
+
+def _calendar(days, *, complete=True):
+    return {'retcode': 0, 'coverage_complete': complete, 'pagination_complete': True, 'page_count': 1,
+            'rows': [{'time': day, 'trade_date_type': 'WHOLE'} for day in days]}
+
+
+def _daily(code, price, day):
+    return {'data': [{'code': code, 'time_key': day + ' 00:00:00', 'close': price}], 'page_req_key': None}
+
+
 @pytest.fixture(autouse=True)
 def cash_runtime(monkeypatch, tmp_path):
     class Clock(datetime):
@@ -444,7 +463,11 @@ def test_query_holiday_fx_supports_cash_valuation_and_coverage(monkeypatch):
 def test_futu_quote_adapter_uses_opend_snapshot_and_scenario_fx(monkeypatch):
     calls = []
     monkeypatch.setattr(application, "exchange_rate_observation_status", lambda *_args, **_kwargs: "ready")
-    gateway = SimpleNamespace(close=lambda: calls.append("closed"))
+    gateway = SimpleNamespace(
+        close=lambda: calls.append("closed"),
+        get_trading_days_with_receipt=lambda **kw: _calendar(['2026-07-23', '2026-07-24']),
+        request_history_kline=lambda **kw: _daily(kw['code'], 45, '2026-07-23') if kw['code'] == 'US.TSLA'
+                                        else {'data': [], 'page_req_key': None})
     monkeypatch.setattr(
         application,
         "resolve_futu_quote_route",
@@ -457,32 +480,10 @@ def test_futu_quote_adapter_uses_opend_snapshot_and_scenario_fx(monkeypatch):
         assert codes == ["US.NVDA", "US.TSLA", "US.AAPL", "US.MSFT"]
         assert kwargs["market"] == "US"
         return {
-            "US.NVDA": SimpleNamespace(
-                code="US.NVDA", market="US", sec_status="NORMAL", suspension=False,
-                status="ready",
-                reason_code=None,
-                last_price=120,
-                observed_at_utc="2026-07-24T01:00:00Z",
-                age_seconds=10,
-            ),
-            "US.TSLA": SimpleNamespace(
-                code="US.TSLA", market="US", sec_status="NORMAL", suspension=False,
-                status="market_closed",
-                reason_code="market_closed",
-                last_price=50,
-                observed_at_utc="2026-07-23T20:00:00Z",
-                age_seconds=18000,
-            ),
-            "US.AAPL": SimpleNamespace(
-                code="US.AAPL", market="US", sec_status="HALT", suspension=False,
-                status="market_closed", reason_code="market_closed", last_price=200,
-                observed_at_utc="2026-07-23T20:00:00Z", age_seconds=18000,
-            ),
-            "US.MSFT": SimpleNamespace(
-                code="US.MSFT", market="US", sec_status="NORMAL", suspension=False,
-                status="market_closed", reason_code="market_closed", last_price=300,
-                observed_at_utc="2026-07-14T20:00:00Z", age_seconds=10 * 86400,
-            ),
+            'US.NVDA': _observed('US.NVDA', 120, '2026-07-24T00:59:50Z'),
+            'US.TSLA': _observed('US.TSLA', 50, '2026-07-23T20:00:00Z', state='CLOSED'),
+            'US.AAPL': _observed('US.AAPL', 200, '2026-07-23T20:00:00Z', state='CLOSED', sec_status='HALT'),
+            'US.MSFT': _observed('US.MSFT', 300, '2026-07-14T20:00:00Z', state='CLOSED'),
         }
 
     monkeypatch.setattr(application, "get_underlier_observations_opend", fetch_observations)
@@ -499,12 +500,16 @@ def test_futu_quote_adapter_uses_opend_snapshot_and_scenario_fx(monkeypatch):
 
     assert calls == ["closed"]
     assert [(item["code"], item["price_native"], item["price_cny"]) for item in quotes] == [
-        ("NVDA", "120", "864.0"),
-        ("TSLA", "50", "360.0"),
+        ("NVDA", "120.0", "864.00"),
+        ("TSLA", "45", "324.0"),
     ]
-    assert all(item["source"] == "futu_opend_market_snapshot" for item in quotes)
-    assert quotes[1]["is_stale"] is True
-    assert any("quote is dated" in warning for warning in warnings)
+    assert quotes[0]['source'] == 'futu_opend_market_snapshot'
+    assert quotes[1]['source'] == 'futu_opend_daily_close'
+    assert quotes[1]['observed_at'] == '2026-07-23T20:00:00+00:00'
+    assert quotes[1]['market_evidence']['closed_market_carry']['schema_version'] == 'om.closed-market-carry.v2'
+    assert len(warnings) == 2
+    assert quotes[1]["is_stale"] is False
+    assert not any("quote is dated" in warning for warning in warnings)
     assert any("AAPL: Futu quote unavailable" in warning for warning in warnings)
     assert any("MSFT: Futu quote unavailable" in warning for warning in warnings)
 
@@ -929,82 +934,65 @@ def test_assignment_evaluates_cash_after_provider_returns(tmp_path, monkeypatch,
     assert list(tmp_path.iterdir()) == []
 
 
-@pytest.mark.parametrize("observed_at,calendar_rows,complete,expected_stale", [
-    ("2026-07-23T20:00:00Z", ["2026-07-23"], True, False),
-    ("2026-07-22T20:00:00Z", ["2026-07-22", "2026-07-23"], True, True),
-    ("2026-07-22T20:00:00Z", ["2026-07-22"], True, False),
-    ("2026-07-23T20:00:00Z", ["2026-07-23"], False, True),
-    ("2026-07-23T20:00:00Z", [], True, True),
+@pytest.mark.parametrize('observed_at,complete,bar_day,available', [
+    ('2026-07-23T20:00:00Z', True, '2026-07-23', True),
+    ('2026-07-22T20:00:00Z', True, '2026-07-23', True),
+    ('2026-07-22T20:00:00Z', True, '2026-07-22', False),
+    ('2026-07-23T20:00:00Z', False, '2026-07-23', False),
 ])
-def test_closed_market_valuation_requires_latest_complete_calendar(
-    monkeypatch, observed_at, calendar_rows, complete, expected_stale,
-):
+def test_closed_market_valuation_requires_completed_daily_close(monkeypatch, observed_at, complete, bar_day, available):
     calls = []
     class Gateway:
         def close(self):
-            calls.append("closed")
+            calls.append('closed')
         def get_trading_days_with_receipt(self, **kwargs):
             calls.append(kwargs)
-            return {"retcode": 0, "coverage_complete": complete, "pagination_complete": True, "page_count": 1,
-                    "rows": [{"time": day, "trade_date_type": "WHOLE"} for day in calendar_rows]}
-    monkeypatch.setattr(application, "build_ready_futu_quote_gateway", lambda **kwargs: Gateway())
-    monkeypatch.setattr(application, "resolve_futu_quote_route", lambda config: SimpleNamespace(ok=True, status="ok", host="127.0.0.1", port=11111))
-    observation = SimpleNamespace(code="US.TSLA", market="US", sec_status="NORMAL", suspension=False,
-        status="market_closed", reason_code="market_closed", last_price=50, observed_at_utc=observed_at,
-        age_seconds=(application.datetime.now(timezone.utc) - datetime.fromisoformat(observed_at.replace("Z", "+00:00"))).total_seconds())
-    monkeypatch.setattr(application, "get_underlier_observations_opend", lambda *args, **kwargs: {"US.TSLA": observation})
-    context = cash_portfolio({"cash_by_currency": {"CNY": 10000}, "source_observed_at": "2026-07-24T01:00:00Z", "exchange_rates": {"rates": {"USDCNY": 7.2}}}, evaluated_at=application.datetime.now(timezone.utc))
-    from src.infrastructure import exchange_rates as fx
-    monkeypatch.setattr(fx, "_utc_now", lambda: application.datetime.now(timezone.utc))
-    quoted = "2026-07-23T16:00:00Z"
-    fx_snapshot = {"calendar": fx.CALENDAR_EVIDENCE, "pairs": {
-        pair: {"rate": rate, "source": "tencent_quote", "quote_at_utc": quoted, "observed_at_utc": quoted}
-        for pair, rate in (("USDCNY", 7.2), ("HKDCNY", 0.92))}}
-    evidence = application.prepare_position_sizing_evidence(
-        context=context, runtime_config={**cash_config(), "symbols": {"TSLA": {}}}, account="lx",
-        fx_observation=fx_snapshot,
-    )["position_sizing_evidence"]
-    assert evidence["quotes"], evidence.get("warnings")
-    quote = evidence["quotes"][0]
-    assert quote["is_stale"] is expected_stale
-    assert evidence["status"] == ("partial" if expected_stale else "complete"), evidence.get("warnings")
-    assert evidence["freshness"]["trust_status"] == ("partial" if expected_stale else "trusted")
-    if not expected_stale:
-        assert quote["valuation_quality"] == "closed_market_carried"
-        assert quote["observed_at"] == observed_at
-        assert quote["trading_calendar"]["latest_trading_date"] == calendar_rows[-1]
-        from src.application.short_vol_risk_context import build_portfolio_risk_context
-        from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-        from domain.domain.short_vol_assessment import portfolio_concentration_fields
-        risk = build_portfolio_risk_context(
-            portfolio_ctx={**context, "position_sizing_evidence": evidence, "option_ctx": {
-                "context_status": "available", "decision_snapshot_status": "trusted", "assignment_positions": []}},
-            exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=1 / 7.2)))
-        fields = portfolio_concentration_fields(
-            {"symbol": "TSLA", "strike": 45, "multiplier": 100, "currency": "USD", "net_income_cny": 50},
-            mode="put", risk_ctx=risk)
-        assert fields["symbol_concentration_current"] == 0
-        assert fields["symbol_concentration_after"] is not None
-        assert f"closed_market_quote:US:{observed_at}" in fields["portfolio_risk_warnings"]
-    assert calls[-1] == "closed"
-    assert calls[0] == {"market": "US", "start": "2026-07-16", "end": "2026-07-23"}
+            return _calendar(['2026-07-22', '2026-07-23', '2026-07-24'], complete=complete)
+        def request_history_kline(self, **kwargs):
+            calls.append(kwargs)
+            return _daily('US.TSLA', 45, bar_day)
+    monkeypatch.setattr(application, 'build_ready_futu_quote_gateway', lambda **kw: Gateway())
+    monkeypatch.setattr(application, 'resolve_futu_quote_route', lambda cfg: SimpleNamespace(ok=True, status='ok', host='offline', port=11111))
+    observation = _observed('US.TSLA', 50, observed_at, state='CLOSED')
+    monkeypatch.setattr(application, 'get_underlier_observations_opend', lambda *a, **kw: {'US.TSLA': observation})
+    quotes, warnings = application._read_futu_quotes(
+        ['TSLA'], runtime_config={}, contexts={'lx': {}}, fx_observation={'rates': {'USDCNY': 7.2}})
+    assert bool(quotes) is available
+    if available:
+        quote = quotes[0]
+        assert quote['price_native'] == '45' and quote['price_cny'] == '324.0'
+        assert quote['observed_at'] == '2026-07-23T20:00:00+00:00'
+        assert quote['quote_observation']['observed_at_utc'] == observation.observed_at_utc
+        assert quote['valuation_quality'] == 'closed_market_carried' and not quote['is_stale']
+        assert quote['trading_calendar']['latest_trading_date'] == '2026-07-23'
+        assert not warnings
+    else:
+        assert any('quote unavailable' in warning for warning in warnings)
+    assert calls[-1] == 'closed'
+    assert calls[0] == {'market': 'US', 'start': '2026-07-09', 'end': '2026-08-06'}
 
 
-def test_closed_market_recent_quote_does_not_need_calendar(monkeypatch):
+def test_closed_market_recent_quote_still_requires_verified_close(monkeypatch):
+    calls = []
     class Gateway:
         def close(self):
             pass
         def get_trading_days_with_receipt(self, **kwargs):
-            pytest.fail("recent quote does not need historical calendar")
-    monkeypatch.setattr(application, "build_ready_futu_quote_gateway", lambda **kwargs: Gateway())
-    monkeypatch.setattr(application, "resolve_futu_quote_route", lambda config: SimpleNamespace(ok=True, status="ok", host="127.0.0.1", port=11111))
-    monkeypatch.setattr(application, "get_underlier_observations_opend", lambda *args, **kwargs: {
-        "US.TSLA": SimpleNamespace(code="US.TSLA", market="US", sec_status="NORMAL", suspension=False,
-            status="market_closed", reason_code="market_closed", last_price=50,
-            observed_at_utc="2026-07-24T00:59:59Z", age_seconds=1)})
+            calls.append('calendar')
+            return _calendar(['2026-07-23', '2026-07-24'])
+        def request_history_kline(self, **kwargs):
+            calls.append('daily')
+            return _daily('US.TSLA', 44, '2026-07-23')
+    monkeypatch.setattr(application, 'build_ready_futu_quote_gateway', lambda **kw: Gateway())
+    monkeypatch.setattr(application, 'resolve_futu_quote_route', lambda cfg: SimpleNamespace(ok=True, status='ok', host='offline', port=11111))
+    monkeypatch.setattr(application, 'get_underlier_observations_opend', lambda *a, **kw: {
+        'US.TSLA': _observed('US.TSLA', 50, '2026-07-24T00:59:59Z', state='CLOSED')})
     quotes, warnings = application._read_futu_quotes(
-        ["TSLA"], runtime_config={}, contexts={"lx": {}}, fx_observation={"rates": {"USDCNY": 7.2}})
-    assert not quotes[0]["is_stale"] and not warnings
+        ['TSLA'], runtime_config={}, contexts={'lx': {}}, fx_observation={'rates': {'USDCNY': 7.2}})
+    assert calls == ['calendar', 'daily']
+    assert quotes[0]['price_native'] == '44'
+    assert quotes[0]['observed_at'] == '2026-07-23T20:00:00+00:00'
+    assert not warnings
 
 
 def _consumer_stock_evidence(monkeypatch, entry, context, *, quote_reader=None):

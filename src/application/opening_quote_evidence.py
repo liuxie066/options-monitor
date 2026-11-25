@@ -566,3 +566,72 @@ def normalize_option_observation(
         snapshot_multiplier=snapshot_multiplier,
         multiplier=multiplier,
     )
+
+
+def stock_valuation_quote_unavailable_reason(
+    snapshot: Mapping[str, Any], valuation_at_ms: int, *, expected_currency: str | None = None,
+) -> str | None:
+    """Revalidate original observations with the canonical quote-age policy.
+
+    Closed quotes without an explicit validated carry receipt remain unavailable;
+    receiving them today must not make their market time fresh.
+    """
+    from decimal import Decimal, InvalidOperation
+    from domain.domain.ledger.position_fields import norm_symbol
+
+    try:
+        spot = Decimal(str(snapshot.get("spot")))
+        if not spot.is_finite() or spot <= 0 or not norm_symbol(snapshot.get("symbol")):
+            return 'quote_price_or_symbol_invalid'
+    except (InvalidOperation, ValueError, TypeError):
+        return 'quote_price_invalid'
+    from domain.domain.symbol_identity import symbol_currency
+
+    currency = expected_currency or symbol_currency(norm_symbol(snapshot.get("symbol")))
+    if snapshot.get("currency") and snapshot["currency"] != currency:
+        return 'quote_currency_mismatch'
+    market_evidence = snapshot.get("market_evidence")
+    if isinstance(market_evidence, dict):
+        from domain.domain.performance.strategy_evaluation import eligible_stock_marks
+
+        try:
+            marks = eligible_stock_marks(market=market_evidence, at_ms=valuation_at_ms)
+            matched = any(
+                norm_symbol(mark.get("symbol")) == norm_symbol(snapshot.get("symbol"))
+                and mark.get("currency") == currency
+                and Decimal(str(mark.get("price"))) == Decimal(str(snapshot.get("spot")))
+                and int(snapshot.get("quote_time_ms")) == int(
+                    mark["effective_at_ms"] if mark.get("effective_at_ms") is not None
+                    else mark["available_at_ms"])
+                for mark in marks
+            )
+            return None if matched else 'quote_mark_price_currency_or_time_mismatch'
+        except (ValueError, TypeError, InvalidOperation) as exc:
+            return str(exc) or 'quote_market_evidence_invalid'
+    evidence = snapshot.get("quote_observation")
+    if not isinstance(evidence, Mapping):
+        # Frozen inputs must explicitly carry a qualification receipt, not just
+        # a scalar with a caller-selected 'fresh' label.
+        return 'quote_qualification_receipt_missing'
+    try:
+        if (symbol_currency(norm_symbol(evidence.get("code"))) != currency
+                or norm_symbol(evidence.get("code")) != norm_symbol(snapshot.get("symbol"))
+                or Decimal(str(evidence.get("last_price"))) != spot):
+            return 'quote_observation_identity_or_price_mismatch'
+        market_stamp = datetime.fromisoformat(str(evidence.get("observed_at_utc")))
+        if market_stamp.utcoffset() is None or int(market_stamp.timestamp() * 1000) != int(snapshot.get("quote_time_ms")):
+            return 'quote_observation_time_mismatch'
+    except (ValueError, TypeError, InvalidOperation):
+        return 'quote_observation_invalid'
+    observation = normalize_underlier_observation(
+        code=str(evidence.get("code") or ""), market=str(evidence.get("market") or ""),
+        snapshot_row={"code": evidence.get("code"), "last_price": evidence.get("last_price"),
+                      "update_time": evidence.get("update_time"), "sec_status": evidence.get("sec_status"),
+                      "suspension": evidence.get("suspension")},
+        market_state_row={"code": evidence.get("code"), "market_state": evidence.get("market_state")},
+        now_utc=datetime.fromtimestamp(valuation_at_ms / 1000, timezone.utc),
+    )
+    if observation.status != "ready" or observation.observed_at_utc is None:
+        return observation.reason_code or observation.status
+    return (None if int(datetime.fromisoformat(observation.observed_at_utc).timestamp() * 1000) == int(snapshot["quote_time_ms"])
+            else 'quote_observation_time_mismatch')

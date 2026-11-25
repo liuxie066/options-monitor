@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date, datetime, time
-from typing import Any, Iterable
+from datetime import date, datetime, time, timezone
+from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo
 
 TIMING_POLICY_SCHEMA = "lifecycle_timing_policy.v1"
@@ -44,6 +44,58 @@ INSTRUMENT_POLICY_REGISTRY: dict[str, dict[str, Any]] = {
         "half_trade_session_close": "12:00:00",
     },
 }
+
+
+_REGULAR_SESSION_HOURS = {
+    "US": {"WHOLE": ((time(9, 30), time(16)),), "MORNING": ((time(9, 30), time(13)),)},
+    "HK": {
+        "WHOLE": ((time(9, 30), time(12)), (time(13), time(16))),
+        "MORNING": ((time(9, 30), time(12)),), "AFTERNOON": ((time(13), time(16)),),
+    },
+}
+
+
+def _session_calendar_date(value: Any) -> date:
+    if not isinstance(value, str):
+        raise ValueError("calendar_invalid")
+    try:
+        day = date.fromisoformat(value)
+    except ValueError:
+        raise ValueError("calendar_invalid") from None
+    if day.isoformat() != value:
+        raise ValueError("calendar_invalid")
+    return day
+
+
+def regular_trading_intervals(
+    calendar: Mapping[str, Any], *, market: str, source_date: date, current_date: date,
+) -> list[tuple[date, datetime, datetime]]:
+    """Native complete-calendar sessions shared by references and valuations."""
+    if not isinstance(calendar, Mapping) or market not in _REGULAR_SESSION_HOURS:
+        raise ValueError("calendar_invalid")
+    if calendar.get("coverage_complete") is not True or calendar.get("pagination_complete") is not True:
+        raise ValueError("calendar_incomplete")
+    start = _session_calendar_date(calendar.get("request_start"))
+    end = _session_calendar_date(calendar.get("request_end"))
+    if start > end:
+        raise ValueError("calendar_invalid")
+    if start >= source_date or end < current_date:
+        raise ValueError("calendar_coverage_insufficient")
+    sessions = calendar.get("sessions")
+    if not isinstance(sessions, Mapping):
+        raise ValueError("calendar_invalid")
+    zone = ZoneInfo(INSTRUMENT_POLICY_REGISTRY[f"{market}:standard_equity_option"]["timezone"])
+    intervals = []
+    for raw_day, kind in sessions.items():
+        day = _session_calendar_date(raw_day)
+        if not start <= day <= end or not isinstance(kind, str) or kind not in {"WHOLE", "MORNING", "AFTERNOON"}:
+            raise ValueError("calendar_invalid")
+        if kind not in _REGULAR_SESSION_HOURS[market]:
+            raise ValueError("calendar_day_type_unsupported")
+        for opening, closing in _REGULAR_SESSION_HOURS[market][kind]:
+            intervals.append((day, datetime.combine(day, opening, zone).astimezone(timezone.utc),
+                              datetime.combine(day, closing, zone).astimezone(timezone.utc)))
+    return sorted(intervals)
 
 
 def canonical_hash(value: Any) -> str:
