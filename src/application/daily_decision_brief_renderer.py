@@ -2075,7 +2075,9 @@ def _wheel_diagnostic_signature(row: Mapping[str, Any]) -> tuple[Any, ...] | Non
 def _wheel_candidate_diagnostic_details(row: Mapping[str, Any]) -> list[str]:
     diagnostics = row.get("candidate_diagnostics")
     if not isinstance(diagnostics, list) or not diagnostics:
-        if row.get("reason_code") in {"partial_data", "data_unavailable", "wheel_candidate_data_unavailable"} and not row.get("required_data_coverage"):
+        if {row.get("reason_code"), row.get("candidate_evidence_reason")} & {
+            "partial_data", "data_unavailable", "wheel_candidate_data_unavailable"
+        } and not row.get("required_data_coverage"):
             return ["数据说明：本次记录未提供具体缺项"]
         return []
     labels = {
@@ -2084,6 +2086,11 @@ def _wheel_candidate_diagnostic_details(row: Mapping[str, Any]) -> list[str]:
         "bid_missing_or_invalid": "买价缺失或无效",
         "ask_missing_or_invalid": "卖价缺失或无效",
         "option_snapshot_stale": "期权报价过期",
+        "option_snapshot_receipt_missing": "期权报价接收时间缺失或无效",
+        "option_snapshot_receipt_in_future": "期权报价接收时间晚于决策时间",
+        "underlier_update_time_missing_or_invalid": "正股行情时间缺失或无效",
+        "underlier_update_time_in_future": "正股行情时间晚于决策时间",
+        "underlier_quote_stale": "正股行情过期",
         "underlier_observation_unavailable": "正股行情不可用",
         "option_snapshot_identity_mismatch": "期权行情身份不符",
         "option_multiplier_conflict": "合约乘数冲突",
@@ -2143,12 +2150,16 @@ def _wheel_gap_reminders(brief: Mapping[str, Any]) -> list[str]:
         for reason in reasons:
             if isinstance(reason, str) and reason in gap_reasons:
                 grouped.setdefault(reason, set()).add(subject)
+        for detail in _wheel_candidate_diagnostic_details(row):
+            if detail.startswith("数据说明："):
+                grouped.setdefault(detail, set()).add(subject)
     reminders = []
     for reason, subjects in sorted(grouped.items()):
         shown = "、".join(sorted(subjects)[:3])
         if len(subjects) > 3:
             shown += f"（另有 {len(subjects) - 3} 个标的/方向，共 {len(subjects)} 个）"
-        reminders.append("缺口摘要：" + shown + " · " + _wheel_reason_text(reason))
+        description = reason if reason.startswith("数据说明：") else _wheel_reason_text(reason)
+        reminders.append("缺口摘要：" + shown + " · " + description)
     # Branch cards share the account display quota; real scan gaps must remain
     # visible even when allocation/settlement replaces their primary reason.
     for row in brief.get("wheel_batches") or []:

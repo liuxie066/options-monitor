@@ -131,7 +131,7 @@ def _historical_input_variant(value, *, delta, mode=None):
     opposite-direction assignments, so all numeric sizing facts stay compared.
     Strike rejects now name their direction; the archived ``hard_strike`` is
     projected only when metric/threshold prove the violated bound. Archived bytes
-    remain unchanged.
+    remain unchanged. Stale snapshot errors also require the new specific reason.
     """
     if isinstance(value, dict):
         if "delta" in value:
@@ -155,6 +155,12 @@ def _historical_input_variant(value, *, delta, mode=None):
                 out[key] = _historical_input_variant(
                     child, delta=delta, mode=resolved_mode
                 )
+        if (value.get("reason") == "evidence_unavailable"
+                and value.get("message") == "OpenD option snapshot is stale relative to the decision moment"):
+            metric = out["metric_value"]
+            out["metric_value"] = {**metric, "metric_value": {
+                **metric["metric_value"], "reason_code": "option_snapshot_stale",
+            }}
         return out
     if isinstance(value, list):
         return [_historical_input_variant(child, delta=delta, mode=mode) for child in value]
