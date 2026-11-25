@@ -671,3 +671,34 @@ def test_historical_wheel_retained_void_still_checks_account_identity():
         model.build_wheel_read_model_from_rows(
             {"trade_events": [item.to_dict() for item in (opened, assigned, void)]},
             account="lx", as_of_ms=4000)
+
+
+@pytest.mark.parametrize("scope", ["eligible", "other_account", "other_symbol", "full", "residual", "rejected", "owned"])
+def test_multi_call_possible_occupancy_preserves_scope_and_whole_lot_linkage(scope):
+    from domain.domain.wheel.projection import _project_wheel_call_linkage_candidates
+    batch = {"stock_lot_id": "stock", "account": "lx", "symbol": "NVDA",
+             "lifecycle_status": "active", "integrity_status": "trusted",
+             "shares_remaining": 100, "active_option_committed_shares": 0,
+             "batch_generation_hash": "generation"}
+    fields = {"open_event_id": "open", "position_side": "short", "status": "open",
+              "contracts_open": 3, "multiplier": 100,
+              "contract_key": {"account": "lx", "underlying_symbol": "NVDA", "option_type": "call"}}
+    rejected = []
+    if scope == "other_account":
+        batch["account"] = "sy"
+    elif scope == "other_symbol":
+        batch["symbol"] = "FUTU"
+    elif scope == "full":
+        batch["active_option_committed_shares"] = 100
+    elif scope == "residual":
+        batch["shares_remaining"] = 99
+    elif scope == "rejected":
+        rejected = [{"event_type": "wheel_call_linkage_rejected", "stock_lot_id": "stock",
+                     "payload": {"call_open_event_id": "open"}}]
+    elif scope == "owned":
+        fields.update(strategy="wheel", leg_role="wheel_call", source_stock_lot_id="other-stock")
+    for include_candidates in (False, True):
+        matched = set()
+        assert _project_wheel_call_linkage_candidates([batch], [{"record_id": "lot", "fields": fields}],
+            rejected, _matched_stock_lots=matched, _include_candidates=include_candidates) == []
+        assert matched == ({"stock"} if scope == "eligible" else set())

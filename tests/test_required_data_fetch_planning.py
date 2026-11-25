@@ -473,12 +473,15 @@ def test_wheel_prefetch_demand_is_added_only_for_enabled_ready_branches(call_pha
     )
 
     assert [item["symbol"] for item in merged["symbols"]] == ["NVDA"]
-    assert merged["symbols"][0]["_wheel_call"] == {
-        "enabled": True,
-        "min_dte": 30,
-        "max_dte": 45,
-        "requires_realized_volatility": True,
-    }
+    if call_phase == "ready":
+        assert merged["symbols"][0]["_wheel_call"] == {
+            "enabled": True,
+            "min_dte": 30,
+            "max_dte": 45,
+            "requires_realized_volatility": True,
+        }
+    else:
+        assert "_wheel_call" not in merged["symbols"][0]
     assert merged["symbols"][0]["_wheel_put"] == {
         "enabled": True,
         "min_dte": 7,

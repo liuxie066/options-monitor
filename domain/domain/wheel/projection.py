@@ -22,7 +22,7 @@ from domain.domain.ledger.position_fields import (
     strategy_metadata_fields_from_payload,
 )
 from domain.domain.symbol_identity import symbol_market
-from domain.domain.strategy_membership import strategy_metadata_has_owner, validate_attribution_decision
+from domain.domain.strategy_membership import strategy_metadata_has_owner, validate_attribution_decision, POSITION_LOT_STRATEGY_PATCH_FIELDS
 from domain.domain.wheel_call_allocation import parse_wheel_call_allocations
 from domain.domain.trade_contract_identity import contract_share_quantity
 
@@ -711,6 +711,46 @@ def _put_linkage_candidate_id(open_event_id: str, branch_id: str) -> str:
     return f"wheel-put-linkage:{digest}"
 
 
+def ordinary_attribution_decision(events: Sequence[Mapping[str, Any]], lot_id: str, *,
+    metadata: Mapping[str, Mapping[str, Any]], accepted: set[str], allow_rule: bool = False,
+) -> dict[str, Any] | None:
+    for event in reversed(events):
+        raw = event.get("raw_payload") or {}
+        if (event.get("event_type") == "adjust" and event.get("target_lot_id") == lot_id
+                and any(key in (raw.get("patch") or {}) for key in POSITION_LOT_STRATEGY_PATCH_FIELDS)):
+            if "attribution_decision" in raw and event["event_id"] not in accepted:
+                continue
+            if (event.get("source") == "trade_attribution"
+                and (raw.get("attribution_origin") == "manual" or allow_rule
+                     and raw.get("attribution_origin") == "rule" and event["event_id"] in accepted
+                     and (raw.get("attribution_decision") or {}).get("manual") is False)
+                and raw.get("attribution_action") == "ordinary"
+                and raw.get("actor") and raw.get("attribution_request_id")):
+                if raw.get("attribution_decision"):
+                    current = metadata.get(lot_id, {})
+                    if any(current.get(key) != raw["patch"].get(key) for key in POSITION_LOT_STRATEGY_PATCH_FIELDS):
+                        return None
+                return dict(event)
+            return None
+    return None
+
+
+def confirmed_ordinary_lot_ids(trade_events: Sequence[Mapping[str, Any]]) -> set[str]:
+    """Exclude durable manual ordinary decisions, not inferred CC leg labels."""
+    active = sorted(_active_trade_events(trade_events),
+                    key=lambda row: (int(row.get("event_time_ms") or 0), str(row.get("event_id") or "")))
+    candidates = {str(row.get("target_lot_id") or "") for row in active
+                  if row.get("event_type") == "adjust"
+                  and (row.get("raw_payload") or {}).get("attribution_action") == "ordinary"
+                  and (row.get("raw_payload") or {}).get("attribution_origin") == "manual"}
+    if not candidates:
+        return set()
+    accepted: set[str] = set()
+    metadata = lot_strategy_metadata_from_trade_events(active, accepted_proof_event_ids=accepted)
+    return {lot_id for lot_id in candidates if lot_id and ordinary_attribution_decision(
+        active, lot_id, metadata=metadata, accepted=accepted)}
+
+
 def project_wheel_call_linkage_candidates(
     wheel_batches: Sequence[Mapping[str, Any]],
     unlinked_short_call_lots: Sequence[Mapping[str, Any]],
@@ -728,6 +768,7 @@ def _project_wheel_call_linkage_candidates(
     effective_linkages: Sequence[Mapping[str, Any]],
     *,
     _matched_stock_lots: set[str] | None = None,
+    _include_candidates: bool = False,
     _validated_call_inputs: set[tuple[Any, ...]] | None = None,
 ) -> list[dict[str, Any]]:
     rejected = {
@@ -786,7 +827,7 @@ def _project_wheel_call_linkage_candidates(
                     available_by_batch[batch_key] = shares_remaining
             except (TypeError, ValueError):
                 continue
-            if required_shares <= 0 or shares_remaining < required_shares:
+            if required_shares <= 0 or shares_remaining < multiplier:
                 continue
             if stable_call is None:
                 stable_call = {
@@ -805,7 +846,11 @@ def _project_wheel_call_linkage_candidates(
             if _matched_stock_lots is not None and type(generation_hash) is str:
                 generation_hash.encode("utf-8")
                 lot_id.encode("utf-8")
+                # A multi-contract Call may occupy this batch without fitting here in full.
                 _matched_stock_lots.add(lot_id)
+                if not _include_candidates:
+                    continue
+            if shares_remaining < required_shares:
                 continue
             candidates.append(
                 {
@@ -873,6 +918,7 @@ def project_wheel_linkage_candidates(
     rejected_linkages: Sequence[Mapping[str, Any]],
     *,
     _unresolved_branch_ids: set[str] | None = None,
+    _include_candidates: bool = False,
     _validated_call_inputs: set[tuple[Any, ...]] | None = None,
     _normalization_memo: _WheelEventNormalizationMemo | None = None,
 ) -> list[dict[str, Any]]:
@@ -907,6 +953,7 @@ def project_wheel_linkage_candidates(
             unlinked_short_option_lots,
             effective_linkages,
             _matched_stock_lots=matched_stock_lots,
+            _include_candidates=_include_candidates,
             _validated_call_inputs=_validated_call_inputs,
         )
     ]
@@ -1029,7 +1076,8 @@ def project_wheel_linkage_candidates(
             str(item["wheel_branch_id"]).strip() for item in [*call_candidates, *put_candidates]
         )
         _unresolved_branch_ids.discard("")
-        return []
+        if not _include_candidates:
+            return []
     return sorted(
         [*call_candidates, *put_candidates],
         key=lambda item: (
@@ -1109,6 +1157,7 @@ def project_wheel_lifecycles(
 
     strategy_by_lot_id = (_strategy_by_lot_id if _strategy_by_lot_id is not None
                           else lot_strategy_metadata_from_trade_events(strategy_trade_events))
+    ordinary_lot_ids = confirmed_ordinary_lot_ids(strategy_trade_events)
     lots = [
         (
             str(row.get("record_id") or "").strip(),
@@ -1250,17 +1299,17 @@ def project_wheel_lifecycles(
                 or str(fields.get("position_side") or "").strip().lower() != "short"
                 or _contracts_open(fields) <= 0
                 or strategy_metadata_has_owner(fields)
+                or call_lot_id in ordinary_lot_ids
                 or str(fields.get("open_event_id") or "").strip()
                 in rejected_call_event_ids
             ):
                 continue
             try:
-                required = _contracts_open(fields) * int(
-                    float(fields.get("multiplier") or 0)
-                )
+                call_multiplier = int(float(fields.get("multiplier") or 0))
+                required = _contracts_open(fields) * call_multiplier
             except (TypeError, ValueError):
                 continue
-            if shares_remaining is not None and 0 < required <= shares_remaining:
+            if shares_remaining is not None and required > 0 and 0 < call_multiplier <= shares_remaining - locked_shares:
                 unresolved_lots.append((call_lot_id, fields))
         unresolved_call_lot_ids = sorted(call_lot_id for call_lot_id, _fields in unresolved_lots)
         if manual_events and (active_call_lot_ids or active_intent_ids):
@@ -1984,7 +2033,7 @@ def project_wheel_branches(
 
 
 def project_wheel_coverage(branch: Mapping[str, Any], *, for_scan: bool = False) -> dict[str, Any]:
-    """Quantity coverage; Call scan eligibility is separate from attribution."""
+    """Quantity coverage and batch eligibility; unresolved ownership blocks scanning."""
     def quantity(value: Any) -> int | None:
         try:
             number = Decimal(str(value))
@@ -2007,7 +2056,7 @@ def project_wheel_coverage(branch: Mapping[str, Any], *, for_scan: bool = False)
     reasons = []
     if target is None or committed is None or reserved is None or not multiplier:
         reasons.append("coverage_quantity_unavailable")
-    if branch.get("phase") == "linkage_unresolved" and not (for_scan and direction == "call"):
+    if branch.get("phase") == "linkage_unresolved":
         reasons.append("linkage_unresolved")
     if branch.get("integrity_status") != "trusted":
         reasons.extend(branch.get("reason_codes") or ["wheel_integrity_conflict"])

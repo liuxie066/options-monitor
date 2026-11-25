@@ -37,7 +37,7 @@ from domain.domain.wheel import (
     lot_strategy_metadata_from_trade_events,
     merge_lot_strategy_metadata,
 )
-from domain.domain.wheel.projection import _WheelEventNormalizationMemo
+from domain.domain.wheel.projection import _WheelEventNormalizationMemo, confirmed_ordinary_lot_ids
 from src.application.ledger.event_codec import (
     iter_import_stored_trade_events,
     stored_trade_event_to_ledger_event,
@@ -736,8 +736,10 @@ def _build_wheel_read_model_base(
             _include_projection_hash=not attribution_only,
             _normalization_memo=normalization_memo,
         )
+    ordinary_lot_ids = confirmed_ordinary_lot_ids(trade_events)
     return {
         "account": account_value, "as_of_ms": instant,
+        "linkage_position_lots": [row for row in position_lots if row["record_id"] not in ordinary_lot_ids],
         "position_lots": position_lots, "assigned_stock": assigned_stock,
         "wheel_events": wheel_events, "wheel_branches": wheel_branches,
         "batches": [] if attribution_only else _legacy_call_batches(wheel_branches),
@@ -750,7 +752,7 @@ def _historical_unresolved_branch_ids(
 ) -> set[str]:
     unresolved: set[str] = set()
     project_wheel_linkage_candidates(
-        branches, base["position_lots"], base["wheel_events"], _unresolved_branch_ids=unresolved,
+        branches, base["linkage_position_lots"], base["wheel_events"], _unresolved_branch_ids=unresolved,
         _validated_call_inputs=historical_rows.validated_call_inputs if historical_rows is not None else None,
         _normalization_memo=normalization_memo,
     )
@@ -833,11 +835,11 @@ def _render_wheel_read_model(
         unresolved_branch_ids = _historical_unresolved_branch_ids(wheel_branches, base, historical_rows)
         linkage_candidates = []
     else:
-        linkage_candidates = project_wheel_linkage_candidates(wheel_branches, position_lots, wheel_events)
-        unresolved_branch_ids = {
-            str(item.get("wheel_branch_id") or "").strip() for item in linkage_candidates
-        }
-        unresolved_branch_ids.discard("")
+        unresolved_branch_ids: set[str] = set()
+        linkage_candidates = project_wheel_linkage_candidates(
+            wheel_branches, base["linkage_position_lots"], wheel_events,
+            _unresolved_branch_ids=unresolved_branch_ids, _include_candidates=True,
+        )
     for projection in [*batches, *wheel_branches]:
         _mark_unresolved_linkage(projection, unresolved_branch_ids)
     lots_by_id = {str(row["record_id"]): row["fields"] for row in position_lots}
