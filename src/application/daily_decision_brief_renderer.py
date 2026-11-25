@@ -1396,8 +1396,8 @@ def _business_deadline(row: Mapping[str, Any]) -> datetime | None:
 
 def _has_position_reminder(row: Mapping[str, Any]) -> bool:
     return (
-        _lower(row.get("decision_basis")) == "near_expiry_far_otm_hold"
-        or any(row.get(key) for key in ("last_trading_at_utc", "assignment_deadline_at_utc", "event_at_utc"))
+        _lower(row.get("recommendation_state")) != "hold"
+        and any(row.get(key) for key in ("last_trading_at_utc", "assignment_deadline_at_utc", "event_at_utc"))
     )
 
 
