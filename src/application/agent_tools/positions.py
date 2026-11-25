@@ -1155,7 +1155,7 @@ OPTION_POSITIONS_READ_TOOL = build_agent_tool(
         "Canonical history: action=events,limit=1..20; descending trade time, signed-snapshot next_cursor, "
         "keep selectors unchanged. Above20: disclose limit and offer pages; never clamp. Report has_more or "
         "snapshot_exhausted. Missing/expired cursor: restart, possible overlaps. "
-        "Latest N closes: events,position_effect=close,limit=N; omit account for authorized-account total. "
+        "latest N closed trades: events,position_effect=close,limit=N; omit account for authorized-account total. "
         "expired_position_marked_open means local inconsistency, not broker settlement/assignment/liquidation/pending order. "
         "cash_secured_amount is assignment collateral, not profit/cash/loss. Only assigned-stock adds read-only price evidence. "
         "Put assignment P&L: action=assigned-stock with assignment_year/month or paired start/end dates. "
