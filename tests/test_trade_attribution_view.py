@@ -1052,12 +1052,8 @@ def test_put_intent_consumption_releases_cash_before_final_capacity_check(tmp_pa
 def test_capacity_worker_uses_shared_cash_reader_without_writes(tmp_path, monkeypatch, cached):
     import json
     import src.application.wheel.capacity as capacity
-    import src.application.portfolio_context_service as service
     from cash_evidence_helpers import cash_config, cash_portfolio
 
-    # Exercise the injected cash reader without requiring the broker plugin.
-    monkeypatch.setattr(service, "resolve_broker_portfolio_provider",
-                        lambda _config, *, account, futu_provider: futu_provider)
     portfolio = cash_portfolio({"cash_by_currency": {"USD": 500}, "exchange_rates": {"stale": True}})
     state = tmp_path / "output_accounts/lx/state"
     state.mkdir(parents=True)
@@ -1075,6 +1071,10 @@ def test_capacity_worker_uses_shared_cash_reader_without_writes(tmp_path, monkey
     def fx(**kw):
         assert kw == {"cache_path": tmp_path / "output_shared/state/rate_cache.json", "write_cache": False}
         raise RuntimeError("FX unavailable")
+    # This test covers the shared reader and no-write contract, with a fake
+    # broker provider; plugin availability has its own contract tests.
+    monkeypatch.setattr("src.application.portfolio_context_service.resolve_broker_portfolio_provider",
+                        lambda _config, *, account, futu_provider: futu_provider)
     monkeypatch.setattr(capacity, "fetch_futu_portfolio_context", fetch)
     monkeypatch.setattr(capacity, "current_exchange_rate_snapshot", fx)
     class Connection:
@@ -1085,7 +1085,7 @@ def test_capacity_worker_uses_shared_cash_reader_without_writes(tmp_path, monkey
     connection = Connection()
     capacity._attribution_capacity_worker(connection, cash_config(), "lx", tmp_path)
     assert connection.closed
-    assert connection.result["portfolio"]["cash_snapshot"]["status"] == "fresh"
+    assert connection.result["portfolio"]["cash_snapshot"]["status"] == "fresh", connection.result["portfolio"]
     assert connection.result["portfolio"]["exchange_rates"] is None
     assert len(calls) == (0 if cached else 1)
     assert {str(p.relative_to(tmp_path)): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
