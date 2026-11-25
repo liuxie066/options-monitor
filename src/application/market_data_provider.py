@@ -24,6 +24,7 @@ __all__ = [
     "open_quote_gateway",
     "resolve_quote_route",
     "get_stock_spot",
+    "get_stock_valuation_quote",
     "get_trading_days_with_receipt",
     "get_market_state",
     "get_quote_rights",
@@ -137,3 +138,7 @@ def fetch_option_chains(*, market_data_provider="opend", **kwargs):
 
 def prefetch_market_earnings_calendars(*, market_data_provider="opend", **kwargs):
     return provider_by_name(market_data_provider).prefetch_earnings_calendars(**kwargs)
+
+
+def get_stock_valuation_quote(*args, market_data_provider="opend", **kwargs):
+    return provider_by_name(market_data_provider).get_stock_valuation_quote(*args, **kwargs)

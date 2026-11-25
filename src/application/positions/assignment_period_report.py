@@ -18,7 +18,7 @@ from src.application.runtime_paths import resolve_runtime_root
 from src.application.ledger import api as ledger_api
 from src.application.performance.adapters import ledger_performance_inputs_from_rows
 from src.application.positions.assigned_stock_view import build_assigned_stock_view
-from src.application.positions.assigned_stock_quotes import assigned_stock_quote_is_usable
+from src.application.positions.assigned_stock_quotes import assigned_stock_quote_is_usable, assigned_stock_quote_unavailable_reason
 from src.application.trades.account_mapping import resolve_futu_account_mapping
 from src.application.trades.inbox import read_stock_sell_observations
 from src.infrastructure.exchange_rates import current_exchange_rate_snapshot, project_exchange_rate_snapshot
@@ -123,6 +123,9 @@ def _period_leaf(row: dict[str, Any]) -> dict[str, Any]:
         'spot', 'quote', 'reasons', 'valuation_basis', 'confirmed', 'provisional',
     }
     result = {key: value for key, value in row.items() if key in fields}
+    # Lifecycle dates use the exchange timezone; period selection and display
+    # share Asia/Shanghai without changing the underlying assignment instant.
+    result['assigned_date'] = datetime.fromtimestamp(row['assigned_at_ms'] / 1000, _SHANGHAI).date().isoformat()
     quote = row['quote']
     remaining = row['book_shares_remaining']
     pending = row['quantity_status'] in {'pending', 'unknown'}
@@ -317,6 +320,25 @@ def build_assignment_period_report(repo, payload, *, cfg, refresh_assigned_stock
             if not confirmed and not is_pending else None)
         row['strike'] = events.get(row['source_assignment_event_id'], {}).get('strike')
         rows.append(_period_leaf(row))
+    if refresh.get('enabled'):
+        # Acquisition may precede FX retrieval and final valuation. Reconcile
+        # refresh diagnostics with the marks actually accepted at that time.
+        requested = list(dict.fromkeys(r['symbol'] for r in needed))
+        accepted = {r['symbol'] for r in rows if r['quote']}
+        refresh['received_symbols'] = refresh.get('received_symbols', refresh.get('refreshed_symbols', []))
+        refresh['qualified_symbols'] = [s for s in requested if s in accepted]
+        refresh['refreshed_symbols'] = list(refresh['qualified_symbols'])
+        refresh['missing_symbols'] = [s for s in requested if s not in accepted]
+        refresh['valuation_at_ms'] = valuation_at
+        refresh['qualification_gaps'] = {}
+        for symbol in refresh['missing_symbols']:
+            failures = {assigned_stock_quote_unavailable_reason(q, valuation_at) or 'quote_scope_mismatch'
+                        for q in quote_rows if q.get('symbol') == symbol}
+            failures.update(e.get('message') or e.get('error_code') for e in refresh.get('errors', [])
+                            if e.get('code') == symbol and (e.get('message') or e.get('error_code')))
+            refresh['qualification_gaps'][symbol] = sorted(failures or {'qualified_quote_missing'})
+        if refresh.get('status') not in {'source_error', 'source_unavailable'}:
+            refresh['status'] = ('partial' if refresh['missing_symbols'] else 'ok') if refresh['qualified_symbols'] else 'missing_quote'
     summary = summarize_lots(rows, empty_is_zero=not inputs.diagnostics and not reviews and not source_gaps and not pending)
     summary['cny_estimate'] = _fx_summary(summary, fx, valuation_at)
     accounts = []
@@ -341,7 +363,8 @@ def build_assignment_period_report(repo, payload, *, cfg, refresh_assigned_stock
             if r.get('stock_lot_id') in {lot['stock_lot_id'] for lot in rows}],
         'scope_reviews': reviews, 'assigned_stock_review_rows': reviews, 'quote_refresh': refresh,
         'coverage': {'status': 'partial' if inputs.diagnostics or observations.get('source_history') != 'complete'
-                     or pending or source_gaps or reviews else 'complete', 'ledger_read': 'gap' if inputs.diagnostics else 'complete',
+                     or pending or source_gaps or reviews or any(r['quote_status'] == 'missing_quote' for r in rows)
+                     else 'complete', 'ledger_read': 'gap' if inputs.diagnostics else 'complete',
                      'source_history': observations.get('source_history', 'unknown')},
         'pagination': {'has_more': False, 'source': 'full_snapshot'},
         'freshness': {'status': 'observed', 'ledger_read_at_ms': raw.get('source', {}).get('read_at_ms'),

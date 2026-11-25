@@ -147,6 +147,20 @@
 
 显式休市估值合同：市场对象可附 `closed_market_carry`，包含版本 `om.closed-market-carry.v1`、原观察毫秒及按市场固定的原生日历回执。`legacy_market` / `value_portfolio` 验证原观察为最后交易日的收盘观察、其报价当时有效、日历在本次估值时已知且覆盖完整、到估值日之间没有遗漏交易日；日历不要求早于原报价，原价和原有效/接收/失效时间保留，FX 仍按估值时点选择。原 `trading_calendar_dates` 移至 `domain/domain/performance/strategy_evaluation.py`，行情模块保持同名显式导入，避免维护第二套回执解析。`tests/test_closed_market_valuation.py` 覆盖开市缺价、跨漏采日、原价失效、日历可知时间及缺口、半日市和夏令时。OB 回测指标不回迁；实际估值仍需逐项验证输入资格。
 
+正股当前收盘估值的 v2 凭证由同一 owner 的 `completed_stock_close_reference` /
+`completed_daily_close_market` 构造并经 `eligible_stock_marks` 复验；它保留本次取得
+未复权日线的真实 available 时间，支持当天收盘后及次日盘前，下一正常开盘即失效。
+原生日历时段共用 `domain/domain/lifecycle_timing.py::regular_trading_intervals`，
+候选休市参考与估值不各建一份时段表。取数归共享
+`opend_market_snapshot_fetching.py::get_stock_valuation_quote`，经
+`market_data_provider.get_stock_valuation_quote` 与 market-opend 插件路由；
+`get_underlier_spot_quote` 默认也采用此选择。接货报表、组合估值及当前绩效正股取价
+复用同一收盘逻辑，`opening_quote_evidence.stock_valuation_quote_unavailable_reason`
+复验原始凭证。原始 `get_underlier_observation(s)` 仍保留 market_closed，
+不将收盘价升级成交易/扫描可用的 ready 观测；低层裸快照字段读取不承担估值资格。
+不在离线核心读取 OpenD 或账本。见 [接货报价合同](ASSIGNED_STOCK_RETURN_DESIGN.md#as-of报价与历史)
+及 `tests/test_assigned_stock_completed_close.py`；已有 v1 语义不放宽。
+
 2026-10-31 用户另行接受历史封存OM规范化日历及原始回执未留存限制。`closed_market_carry.calendars[market]` 可显式使用 `om.legacy-normalized-calendar.v1`，绑定 `snapshot_original.raw_json/sha256`、与原件一致的 `source_observed_at_utc` 和 `native_receipt_status=not_retained`。同一owner核验旧 `sell_put_top1_market_calendar_snapshot.v2` 的原字节、内容及旧publisher规范化来源摘要，仍检查市场、交易时段、覆盖和可知时间；不重建券商回执，不改变原生日历合同，不补齐缺失行情。OB报告须保留来源限制；历史固定 overlay、wheel 和报告仍按原版本解释，不由新源码改写。
 
 `summarize_evaluation` / `compare_evaluations` 及其 `_v2` 接口、专用辅助代码与公式测试已从当前 OM 源码移除，不提供兼容转发。调用方须使用 OptionBench 的 csp_metrics 模块，公式回归由 OB 维护；OM 不反向依赖 OB。`tests/test_strategy_evaluation_owner.py` 验证退役接口不可用以及估值/现金基础仍可用。历史固定 wheel 和报告不改写；需要旧接口的外部调用方必须迁移或继续使用其显式固定的历史版本。OM 生产绩效及期间现金流 owner 不受影响。

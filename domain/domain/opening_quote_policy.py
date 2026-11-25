@@ -8,12 +8,13 @@ stable ValueError reason codes without replacing provider source times.
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timezone
+from datetime import datetime, timezone
 import math
 from numbers import Real
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
+from domain.domain.lifecycle_timing import regular_trading_intervals as _calendar_intervals
 
 _MARKET_TIMEZONES = {
     "US": ZoneInfo("America/New_York"),
@@ -37,67 +38,6 @@ _INACTIVE_MARKET_STATES = frozenset(
         "OVERNIGHT",
     }
 )
-_SESSION_HOURS = {
-    "US": {
-        "WHOLE": ((time(9, 30), time(16)),),
-        "MORNING": ((time(9, 30), time(13)),),
-    },
-    "HK": {
-        "WHOLE": ((time(9, 30), time(12)), (time(13), time(16))),
-        "MORNING": ((time(9, 30), time(12)),),
-        "AFTERNOON": ((time(13), time(16)),),
-    },
-}
-
-
-def _calendar_date(value: Any) -> date:
-    if not isinstance(value, str):
-        raise ValueError("calendar_invalid")
-    try:
-        day = date.fromisoformat(value)
-    except ValueError:
-        raise ValueError("calendar_invalid") from None
-    if day.isoformat() != value:
-        raise ValueError("calendar_invalid")
-    return day
-
-
-def _calendar_intervals(
-    calendar: Mapping[str, Any],
-    *,
-    market: str,
-    source_date: date,
-    current_date: date,
-) -> list[tuple[date, datetime, datetime]]:
-    if not isinstance(calendar, Mapping):
-        raise ValueError("calendar_invalid")
-    if calendar.get("coverage_complete") is not True or calendar.get("pagination_complete") is not True:
-        raise ValueError("calendar_incomplete")
-    request_start = _calendar_date(calendar.get("request_start"))
-    request_end = _calendar_date(calendar.get("request_end"))
-    if request_start > request_end:
-        raise ValueError("calendar_invalid")
-    if request_start >= source_date or request_end < current_date:
-        raise ValueError("calendar_coverage_insufficient")
-    sessions = calendar.get("sessions")
-    if not isinstance(sessions, Mapping):
-        raise ValueError("calendar_invalid")
-    intervals = []
-    for raw_day, day_type in sessions.items():
-        day = _calendar_date(raw_day)
-        if not request_start <= day <= request_end:
-            raise ValueError("calendar_invalid")
-        if not isinstance(day_type, str) or day_type not in {"WHOLE", "MORNING", "AFTERNOON"}:
-            raise ValueError("calendar_invalid")
-        if day_type not in _SESSION_HOURS[market]:
-            raise ValueError("calendar_day_type_unsupported")
-        for opening, closing in _SESSION_HOURS[market][day_type]:
-            start = datetime.combine(day, opening, _MARKET_TIMEZONES[market]).astimezone(timezone.utc)
-            end = datetime.combine(day, closing, _MARKET_TIMEZONES[market]).astimezone(timezone.utc)
-            intervals.append((day, start, end))
-    return sorted(intervals)
-
-
 def resolve_closed_market_reference(
     *,
     observation: Mapping[str, Any],

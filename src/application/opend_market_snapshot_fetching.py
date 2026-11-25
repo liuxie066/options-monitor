@@ -633,16 +633,30 @@ def get_underlier_spot_quote(
     )
     try:
         effective_base_dir = Path(base_dir) if base_dir is not None else REPO_ROOT
-        return get_spot_opend_quote(
-            gateway,
-            normalize_underlier(symbol, base_dir=effective_base_dir).code,
-            base_dir=effective_base_dir,
-            snapshot_max_wait_sec=snapshot_max_wait_sec,
-            snapshot_window_sec=snapshot_window_sec,
-            snapshot_max_calls=snapshot_max_calls,
-            rate_limited_call=rate_limited_opend_call,
-            **controls,
-        )
+        from src.application.opening_quote_evidence import stock_valuation_quote_unavailable_reason
+        from domain.domain.ledger.position_fields import norm_symbol
+
+        underlier = normalize_underlier(symbol, base_dir=effective_base_dir)
+        snapshot_limit = OpenDFetchLimits.from_flat_kwargs(
+            snapshot_max_wait_sec=snapshot_max_wait_sec, snapshot_window_sec=snapshot_window_sec,
+            snapshot_max_calls=snapshot_max_calls).market_snapshot
+        observations = get_underlier_observations_opend(
+            gateway, [underlier.code], market=underlier.market, base_dir=effective_base_dir,
+            snapshot_limit=snapshot_limit, snapshot_batch_size=1, **controls)
+        observed = observations.get(underlier.code)
+        if observed is None:
+            return None
+        now_ms = lambda: int(datetime.now(timezone.utc).timestamp() * 1000)
+        quote = get_stock_valuation_quote(
+            gateway, symbol=norm_symbol(symbol), underlier=underlier, observation=observed,
+            base_dir=effective_base_dir, calendar_cache={},
+            history_limit=OpenDFetchLimits.from_flat_kwargs().history_kline, now_ms=now_ms, **controls)
+        if stock_valuation_quote_unavailable_reason(quote, now_ms(), expected_currency=underlier.currency):
+            return None
+        received_at = datetime.fromtimestamp(quote['quote_observed_at_ms'] / 1000, timezone.utc).isoformat()
+        return {**quote, 'price': quote['spot'], 'effective_at_ms': quote['quote_time_ms'],
+                '_snapshot_received_at_utc': received_at}
+
     finally:
         try:
             gateway.close()
@@ -1252,3 +1266,84 @@ def _to_float(value: Any) -> float | None:
         return float(value)
     except Exception:
         return None
+
+
+def _completed_close_quote(*, symbol, underlier, evidence, observation_received, gateway, calendars,
+                              state_base_dir, limits, now_ms, deadline=None, cancelled=None):
+    """Acquire only the one completed unadjusted day selected by the domain."""
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+    from domain.domain.lifecycle_timing import INSTRUMENT_POLICY_REGISTRY
+    from domain.domain.performance.strategy_evaluation import completed_stock_close_reference, completed_daily_close_market
+    check_fetch_control(deadline, cancelled)
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
+    market = underlier.market
+    if market not in calendars:
+        now = datetime.fromtimestamp(now_ms() / 1000, timezone.utc)
+        zone = ZoneInfo(INSTRUMENT_POLICY_REGISTRY[f"{market}:standard_equity_option"]["timezone"])
+        today = now.astimezone(zone).date()
+        start, end = today - timedelta(days=14), today + timedelta(days=14)
+        raw = rate_limited_opend_call(
+            base_dir=state_base_dir, endpoint='trading_days', **limits.call_kwargs(), **controls,
+            call=lambda: gateway.get_trading_days_with_receipt(market=market, start=start.isoformat(),
+                                                      end=end.isoformat(), **controls))
+        rows = raw.get('rows')
+        if hasattr(rows, 'to_dict'):
+            rows = rows.to_dict('records')
+        calendars[market] = {'start': start.isoformat(), 'end': end.isoformat(),
+            'source_observed_at_utc': datetime.fromtimestamp(now_ms() / 1000, timezone.utc).isoformat(),
+            'receipt': {**raw, 'rows': rows}}
+    calendar = calendars[market]
+    reference = completed_stock_close_reference(symbol=symbol, calendar=calendar, at_ms=now_ms())
+    request = {'code': underlier.code, 'start': reference['session_date'], 'end': reference['session_date'],
+               'ktype': 'K_DAY', 'autype': 'NONE', 'max_count': 2}
+    response = rate_limited_opend_call(
+        base_dir=state_base_dir, endpoint='history_kline', **limits.call_kwargs(), **controls,
+        call=lambda: gateway.request_history_kline(**request, **controls))
+    check_fetch_control(deadline, cancelled)
+    received = int(now_ms())
+    if not isinstance(response, dict) or 'page_req_key' not in response or response['page_req_key'] not in (None, '', b''):
+        raise ValueError('completed_close_history_pagination_incomplete')
+    rows = response.get('data')
+    if hasattr(rows, 'to_dict'):
+        rows = rows.to_dict('records')
+    receipt = {'source': 'futu.request_history_kline', 'request': request, 'retcode': 0,
+               'page_count': 1, 'pagination_complete': True, 'rows': rows, 'received_at_ms': received}
+    market_evidence = completed_daily_close_market(symbol=symbol, calendar=calendar, receipt=receipt,
+        observation=evidence, observation_received_at_ms=observation_received, at_ms=received)
+    mark = market_evidence['stocks'][0]
+    return {'symbol': symbol, 'currency': mark['currency'], 'spot': rows[0]['close'],
+            'quote_time_ms': mark['effective_at_ms'], 'quote_observed_at_ms': received,
+            'quote_source': 'opend_unadjusted_daily_close', 'quote_status': 'closed_market_carry',
+            'price_field': 'close', 'market_evidence': market_evidence, 'quote_observation': evidence}
+
+
+
+def get_stock_valuation_quote(
+    gateway, *, symbol, underlier, observation, base_dir, calendar_cache,
+    history_limit, now_ms, deadline=None, cancelled=None,
+):
+    """Resolve a received stock observation into a valuation quote.
+
+    Live observations retain their market time. Closed observations use only the
+    last completed unadjusted daily close proved by the provider's calendar.
+    This does not change raw observation readiness used by trading and scans.
+    Callers keep the original observation even if close acquisition raises.
+    """
+    check_fetch_control(deadline, cancelled)
+    evidence = observation.to_dict()
+    received = int(now_ms())
+    quote_source = "opend_realtime"
+    if evidence.get("status") == "market_closed":
+        return _completed_close_quote(
+            symbol=symbol, underlier=underlier, evidence=evidence,
+            observation_received=received, gateway=gateway, calendars=calendar_cache,
+            state_base_dir=base_dir, limits=history_limit, now_ms=now_ms,
+            deadline=deadline, cancelled=cancelled,
+        )
+    market_at = evidence.get("observed_at_utc")
+    market_ms = int(datetime.fromisoformat(str(market_at)).timestamp() * 1000) if market_at else None
+    return {"symbol": symbol, "spot": evidence.get("last_price"),
+            "quote_time_ms": market_ms, "quote_observed_at_ms": received,
+            "quote_source": quote_source, "quote_status": evidence.get("status"),
+            "price_field": "last_price", "quote_observation": evidence}

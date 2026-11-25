@@ -17,7 +17,8 @@ from domain.domain.fx_quote_policy import CALENDAR_EVIDENCE, quote_quality
 from domain.domain.ledger.cash_facts import cash_facts_for_trade_event
 from domain.domain.money import quantize_money, to_decimal
 from domain.domain.option_lifecycle import INSTRUMENT_POLICY_REGISTRY
-from domain.domain.symbol_identity import OPTION_CODE_RE, symbol_market
+from domain.domain.symbol_identity import OPTION_CODE_RE, symbol_market, symbol_currency, futu_underlier_code
+from domain.domain.lifecycle_timing import regular_trading_intervals
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.performance.cash_conversion import (
     HISTORICAL_BUSINESS_DAY_FX_CARRY_FORWARD_METHOD,
@@ -223,7 +224,7 @@ def _closed_market_observation(carry, market, at_ms):
     if original >= at_ms:
         raise ValueError("closed market carry must follow original observation")
     start, end, source_time, rows = _closed_calendar(carry["calendars"][market], market)
-    known = datetime.fromisoformat(source_time.replace("Z", "+00:00"))
+    known = datetime.fromisoformat(_text(source_time, "calendar observed time").replace("Z", "+00:00"))
     if known.utcoffset() is None or known.timestamp() * 1000 > at_ms:
         raise ValueError("closed market calendar not known at valuation")
     policy = INSTRUMENT_POLICY_REGISTRY[f"{market}:standard_equity_option"]
@@ -251,6 +252,123 @@ def _closed_market_observation(carry, market, at_ms):
     return original
 
 
+def completed_stock_close_reference(*, symbol: str, calendar: dict, at_ms: int) -> dict:
+    """Latest fully ended daily session and exclusive next-open boundary.
+
+    Reuse native calendar qualification and the same session intervals as
+    closed-market candidate references. Lunch is not a completed trading day.
+    """
+    _integer(at_ms, "at_ms", minimum=1)
+    market = symbol_market(symbol)
+    if market not in {"HK", "US"} or not isinstance(calendar, dict) or calendar.get("schema_version") is not None:
+        raise ValueError("completed_close_requires_native_calendar")
+    start, end, source_time, rows = _closed_calendar(calendar, market)
+    known = datetime.fromisoformat(_text(source_time, "calendar observed time").replace("Z", "+00:00"))
+    if known.utcoffset() is None or known.timestamp() * 1000 > at_ms:
+        raise ValueError("completed_close_calendar_in_future")
+    now = datetime.fromtimestamp(at_ms / 1000, timezone.utc)
+    zone = ZoneInfo(INSTRUMENT_POLICY_REGISTRY[f"{market}:standard_equity_option"]["timezone"])
+    today = now.astimezone(zone).date()
+    intervals = regular_trading_intervals({
+        "request_start": start.isoformat(), "request_end": end.isoformat(),
+        "coverage_complete": True, "pagination_complete": True,
+        "sessions": {(r.get("time") or r.get("date") or r.get("trade_date")):
+                     str(r["trade_date_type"]).strip().upper() for r in rows},
+    }, market=market, source_date=today, current_date=today)
+    sessions = {}
+    for day, opening, closing in intervals:
+        first, last = sessions.get(day, (opening, closing))
+        sessions[day] = min(first, opening), max(last, closing)
+    if any(first <= now < last for first, last in sessions.values()):
+        raise ValueError("completed_close_regular_session_not_ended")
+    completed = [(day, last) for day, (_, last) in sessions.items() if last <= now]
+    if not completed:
+        raise ValueError("completed_close_session_unavailable")
+    day, closing = max(completed)
+    following = [first for date_, (first, _) in sessions.items() if date_ > day]
+    if not following:
+        raise ValueError("completed_close_next_open_unavailable")
+    return {"market": market, "session_date": day.isoformat(),
+            "effective_at_ms": int(closing.timestamp() * 1000),
+            "valid_until_ms": int(min(following).timestamp() * 1000)}
+
+
+def _completed_daily_close_mark(carry: dict, *, symbol: str, at_ms: int) -> dict:
+    if set(carry) != {"schema_version", "observation_at_ms", "calendars", "daily_close", "session_observation"}:
+        raise ValueError("completed_close_carry_schema_invalid")
+    market = symbol_market(symbol)
+    if not isinstance(carry["calendars"], dict) or set(carry["calendars"]) != {market}:
+        raise ValueError("completed_close_calendar_market_mismatch")
+    reference = completed_stock_close_reference(symbol=symbol, calendar=carry["calendars"][market], at_ms=at_ms)
+    receipt, observation = carry["daily_close"], carry["session_observation"]
+    if not isinstance(receipt, dict) or not isinstance(observation, dict) or not isinstance(receipt.get("request"), dict):
+        raise ValueError("completed_close_receipt_schema_invalid")
+    request = receipt["request"]
+    code = futu_underlier_code(symbol)
+    if (receipt.get("source") != "futu.request_history_kline" or request.get("code") != code
+            or request.get("ktype") != "K_DAY" or request.get("autype") != "NONE"
+            or request.get("start") != reference["session_date"] or request.get("end") != request["start"]
+            or type(receipt.get("retcode")) is not int or receipt["retcode"] != 0
+            or receipt.get("pagination_complete") is not True or type(receipt.get("page_count")) is not int
+            or receipt["page_count"] != 1 or not isinstance(receipt.get("rows"), list)
+            or len(receipt["rows"]) != 1):
+        raise ValueError("completed_close_receipt_incomplete_or_mismatched")
+    received = _integer(receipt.get("received_at_ms"), "close received time", minimum=1)
+    if not reference["effective_at_ms"] <= received <= at_ms:
+        raise ValueError("completed_close_received_time_invalid")
+    # A non-continuous snapshot alone is insufficient (e.g. halt, auction,
+    # missing state or future timestamp). It only witnesses a safe closed state;
+    # the price itself comes from the completed, unadjusted daily request.
+    zone = ZoneInfo(INSTRUMENT_POLICY_REGISTRY[f"{market}:standard_equity_option"]["timezone"])
+    next_open = datetime.fromtimestamp(reference["valid_until_ms"] / 1000, zone)
+    today = datetime.fromtimestamp(at_ms / 1000, zone).date()
+    opening_auction = observation.get("market_state") == "AUCTION" and next_open.date() == today
+    if (observation.get("code") != code or observation.get("market") != market
+            or observation.get("sec_status") != "NORMAL" or observation.get("suspension") is not False
+            or (not opening_auction and observation.get("market_state") not in {
+                "CLOSED", "REST", "WAITING_OPEN", "PRE_MARKET_BEGIN", "PRE_MARKET_END",
+                "AFTER_HOURS_BEGIN", "AFTER_HOURS_END", "AFTERNOON_END",
+                "NIGHT_OPEN", "NIGHT_END", "NIGHT", "OVERNIGHT_BEGIN", "OVERNIGHT_END", "OVERNIGHT"})):
+        raise ValueError("completed_close_session_observation_invalid")
+    observed = datetime.fromisoformat(str(observation.get("observed_at_utc")).replace("Z", "+00:00"))
+    state_received = _integer(observation.get("received_at_ms"), "state received time", minimum=1)
+    if (observed.utcoffset() is None or observed.timestamp() * 1000 > state_received
+            or state_received > received):
+        raise ValueError("completed_close_observation_in_future")
+    bar = receipt["rows"][0]
+    currency = symbol_currency(symbol)
+    if not isinstance(bar, dict) or bar.get("code") != code or (bar.get("currency") and bar["currency"] != currency):
+        raise ValueError("completed_close_bar_identity_mismatch")
+    label = datetime.fromisoformat(str(bar.get("time_key")))
+    label = label.replace(tzinfo=zone) if label.utcoffset() is None else label.astimezone(zone)
+    if (label.date().isoformat() != reference["session_date"]
+            or label.timestamp() * 1000 > reference["effective_at_ms"]):
+        raise ValueError("completed_close_bar_time_invalid")
+    price = _nonnegative(bar.get("close"), "daily close")
+    if price <= 0 or _integer(carry["observation_at_ms"], "close observation", minimum=1) != reference["effective_at_ms"]:
+        raise ValueError("completed_close_price_or_time_invalid")
+    return {"symbol": symbol, "currency": currency, "price": str(price),
+            "source": receipt["source"], "effective_at_ms": reference["effective_at_ms"],
+            "available_at_ms": received, "valid_until_ms": reference["valid_until_ms"]}
+
+
+def completed_daily_close_market(*, symbol: str, calendar: dict, receipt: dict,
+                                 observation: dict, observation_received_at_ms: int, at_ms: int) -> dict:
+    """Build, then independently revalidate, a current stock-only close carry.
+
+    Historical effective time and actual source receipt time remain separate;
+    v1 archived close observations keep their original stricter contract.
+    """
+    reference = completed_stock_close_reference(symbol=symbol, calendar=calendar, at_ms=at_ms)
+    carry = {"schema_version": "om.closed-market-carry.v2", "observation_at_ms": reference["effective_at_ms"],
+             "calendars": {reference["market"]: deepcopy(calendar)}, "daily_close": deepcopy(receipt),
+             "session_observation": {**deepcopy(observation), "received_at_ms": observation_received_at_ms}}
+    mark = _completed_daily_close_mark(carry, symbol=symbol, at_ms=at_ms)
+    result = {"stocks": [mark], "options": [], "fx": [], "closed_market_carry": carry}
+    eligible_stock_marks(market=result, at_ms=at_ms)
+    return result
+
+
 def _market(market, at_ms):
     _integer(at_ms, "at_ms", minimum=1)
     carry = market.get("closed_market_carry") if isinstance(market, dict) else None
@@ -259,6 +377,9 @@ def _market(market, at_ms):
         raise ValueError("market must contain exactly stocks/options/fx")
     if any(not isinstance(market[key], list) for key in ("stocks", "options", "fx")):
         raise ValueError("market values must be lists")
+    completed_close = isinstance(carry, dict) and carry.get("schema_version") == "om.closed-market-carry.v2"
+    if completed_close and (len(market["stocks"]) != 1 or market["options"]):
+        raise ValueError("completed_close_requires_one_stock_and_no_options")
     chosen = {}
     for kind, identity in (("stocks", "symbol"), ("options", "contract_id")):
         rows, seen = {}, {}
@@ -277,7 +398,12 @@ def _market(market, at_ms):
                     asset_market = contract["market"] if contract else None
                 else:
                     asset_market = symbol_market(row[identity])
-                use_at = _closed_market_observation(carry, asset_market, at_ms)
+                if completed_close:
+                    expected = _completed_daily_close_mark(carry, symbol=row[identity], at_ms=at_ms)
+                    if raw != expected:
+                        raise ValueError("completed_close_mark_differs_from_source")
+                else:
+                    use_at = _closed_market_observation(carry, asset_market, at_ms)
             row["currency"] = _currency(row["currency"])
             _text(row["source"], "source")
             available, until = (_integer(row[key], key, minimum=1) for key in ("available_at_ms", "valid_until_ms"))
@@ -977,6 +1103,8 @@ __all__ = [
     "bind_cash_conversions",
     "legacy_market",
     "eligible_stock_marks",
+    "completed_stock_close_reference",
+    "completed_daily_close_market",
     "resize_execution",
     "close_execution",
 ]
