@@ -238,9 +238,12 @@ def _tool_payload(
     if intent_name == "position_query":
         return {**base, "action": "list", "query": PositionQuery.from_payload(arguments).to_payload()}
     if intent_name == "assigned_stock_position_query":
-        status = str(arguments.get("assigned_stock_status") or arguments.get("status") or "open").strip().lower()
+        has_period = any(key in arguments for key in (
+            "assignment_year", "assignment_month", "assignment_start_date", "assignment_end_date",
+        ))
+        status = str(arguments.get("assigned_stock_status") or arguments.get("status") or ("all" if has_period else "open")).strip().lower()
         payload = {**base, "action": "assigned-stock", "refresh_quotes": arguments.get("refresh_quotes") is not False}
-        for key in ("account", "symbol", "stock_lot_id"):
+        for key in ("account", "symbol", "stock_lot_id", "assignment_year", "assignment_month", "assignment_start_date", "assignment_end_date"):
             if arguments.get(key):
                 payload[key] = arguments[key]
         if status and status != "all":

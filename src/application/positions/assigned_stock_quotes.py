@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -11,6 +12,7 @@ from src.application.market_data_provider import (
     resolve_quote_route as resolve_futu_quote_route,
     open_quote_gateway as build_ready_futu_quote_gateway,
     get_stock_spot as get_spot_opend,
+    get_underlier_observations,
 )
 from src.application.opend_fetch_config import resolve_opend_fetch_limits
 from src.application.opend_utils import normalize_underlier
@@ -61,6 +63,7 @@ def refresh_assigned_stock_quote_snapshots(
     base_dir: Path | None = None,
     state_base_dir: Path | None = None,
     now_ms: Callable[[], int] = _now_ms,
+    preserve_evidence: bool = False,
 ) -> AssignedStockQuoteRefreshResult:
     """Fetch realtime stock spot snapshots for open assigned-stock lots.
 
@@ -154,6 +157,27 @@ def refresh_assigned_stock_quote_snapshots(
         for symbol in symbols:
             try:
                 underlier = normalize_underlier(symbol, base_dir=effective_base_dir)
+                if preserve_evidence:
+                    observations = get_underlier_observations(
+                        gateway, [underlier.code], market=underlier.market,
+                        base_dir=effective_state_base_dir, snapshot_limit=limits,
+                        snapshot_batch_size=1, **provider_kwargs,
+                    )
+                    observation = observations.get(underlier.code)
+                    if observation is None:
+                        diagnostics["missing_symbols"].append(symbol)
+                        continue
+                    evidence = observation.to_dict()
+                    market_at = evidence.get("observed_at_utc")
+                    market_ms = int(datetime.fromisoformat(str(market_at)).timestamp() * 1000) if market_at else None
+                    quote_snapshots.append({
+                        "symbol": symbol, "spot": evidence.get("last_price"),
+                        "quote_time_ms": market_ms, "quote_observed_at_ms": int(now_ms()),
+                        "quote_source": quote_source, "quote_status": evidence.get("status"),
+                        "price_field": "last_price", "quote_observation": evidence,
+                    })
+                    diagnostics["refreshed_symbols"].append(symbol)
+                    continue
                 spot = get_spot_opend(
                     gateway,
                     underlier.code,
@@ -206,3 +230,57 @@ def refresh_assigned_stock_quote_snapshots(
 
 
 __all__ = ["AssignedStockQuoteRefreshResult", "refresh_assigned_stock_quote_snapshots"]
+
+
+def assigned_stock_quote_is_usable(snapshot: Mapping[str, Any], valuation_at_ms: int) -> bool:
+    """Revalidate original observations with the canonical quote-age policy.
+
+    Closed quotes without an explicit validated carry receipt remain unavailable;
+    receiving them today must not make their market time fresh.
+    """
+    from src.application.opening_quote_evidence import normalize_underlier_observation
+
+    try:
+        spot = Decimal(str(snapshot.get("spot")))
+        if not spot.is_finite() or spot <= 0 or not norm_symbol(snapshot.get("symbol")):
+            return False
+    except (InvalidOperation, ValueError, TypeError):
+        return False
+    market_evidence = snapshot.get("market_evidence")
+    if isinstance(market_evidence, dict):
+        from domain.domain.performance.strategy_evaluation import eligible_stock_marks
+
+        try:
+            marks = eligible_stock_marks(market=market_evidence, at_ms=valuation_at_ms)
+            return any(
+                norm_symbol(mark.get("symbol")) == norm_symbol(snapshot.get("symbol"))
+                and Decimal(str(mark.get("price"))) == Decimal(str(snapshot.get("spot")))
+                for mark in marks
+            )
+        except (ValueError, TypeError, InvalidOperation):
+            return False
+    evidence = snapshot.get("quote_observation")
+    if not isinstance(evidence, Mapping):
+        # Frozen inputs must explicitly carry a qualification receipt, not just
+        # a scalar with a caller-selected 'fresh' label.
+        return False
+    try:
+        if (norm_symbol(evidence.get("code")) != norm_symbol(snapshot.get("symbol"))
+                or Decimal(str(evidence.get("last_price"))) != spot):
+            return False
+        market_stamp = datetime.fromisoformat(str(evidence.get("observed_at_utc")))
+        if market_stamp.utcoffset() is None or int(market_stamp.timestamp() * 1000) != int(snapshot.get("quote_time_ms")):
+            return False
+    except (ValueError, TypeError, InvalidOperation):
+        return False
+    observation = normalize_underlier_observation(
+        code=str(evidence.get("code") or ""), market=str(evidence.get("market") or ""),
+        snapshot_row={"code": evidence.get("code"), "last_price": evidence.get("last_price"),
+                      "update_time": evidence.get("update_time"), "sec_status": evidence.get("sec_status"),
+                      "suspension": evidence.get("suspension")},
+        market_state_row={"code": evidence.get("code"), "market_state": evidence.get("market_state")},
+        now_utc=datetime.fromtimestamp(valuation_at_ms / 1000, timezone.utc),
+    )
+    if observation.status != "ready" or observation.observed_at_utc is None:
+        return False
+    return int(datetime.fromisoformat(observation.observed_at_utc).timestamp() * 1000) == int(snapshot["quote_time_ms"])

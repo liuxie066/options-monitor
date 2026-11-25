@@ -453,6 +453,134 @@ def read_trade_source_evidence(
     return out
 
 
+def read_stock_sell_observations(
+    path: str | Path,
+    *,
+    futu_account_mapping: dict[str, str],
+    config: dict[str, Any] | None = None,
+    accounts: Iterable[str] | None = None,
+    symbols: Iterable[str] | None = None,
+    repo_base: Path | None = None,
+    runtime_root: str | Path | None = None,
+) -> dict[str, Any]:
+    """Discover stock sales, including observations that never became a sale fact.
+
+    This is a source observation, not a declaration of complete broker history.
+    In particular handled/skipped rows must not be excluded: older intake may
+    have handled an unmatched sale without adding an assigned-stock event.
+    """
+    from src.application.trades.normalizer import normalize_trade_deal
+    from domain.domain.option_position_identity import normalize_broker
+
+    inbox_path = Path(path)
+    read_at = time.time_ns() // 1_000_000
+    result: dict[str, Any] = {
+        "observations": [], "coverage": "unknown", "source_history": "unknown",
+        "read_at_ms": read_at, "diagnostics": [],
+        "source": {"identity": str(inbox_path.resolve()), "read_at_ms": read_at},
+    }
+    if not inbox_path.exists():
+        result["diagnostics"].append({"code": "stock_sell_source_unavailable"})
+        return result
+    account_scope = {str(a).strip().lower() for a in accounts} if accounts is not None else None
+    symbol_scope = {str(s).strip().upper() for s in symbols} if symbols is not None else None
+    with closing(sqlite3.connect(f"{inbox_path.resolve().as_uri()}?mode=ro", uri=True)) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("BEGIN")
+        rows = conn.execute("SELECT * FROM trade_inbox ORDER BY received_at_ms, inbox_id").fetchall()
+    for row in rows:
+        payload = json.loads(row["payload_json"])
+        if not isinstance(payload, dict):
+            raise ValueError("stock sell source payload must be an object")
+        deal = normalize_trade_deal(
+            payload, futu_account_mapping=futu_account_mapping,
+            config=config, repo_base=repo_base, runtime_root=runtime_root,
+            allow_opend_refresh=False,
+        )
+        if deal.asset_type != "stock" or deal.side != "sell":
+            continue
+        if symbol_scope is not None and deal.symbol not in symbol_scope:
+            continue
+        if not deal.internal_account:
+            # Do not expose a possibly different account's source identifiers.
+            result["diagnostics"].append({"code": "stock_sell_account_unverified", "symbol": deal.symbol})
+            continue
+        if account_scope is not None and deal.internal_account not in account_scope:
+            continue
+        normalization = dict(deal.normalization_diagnostics or {})
+        if (deal.execution_input or {}).get("errors"):
+            result["diagnostics"].append({"code": "stock_sell_identity_invalid", "account": deal.internal_account,
+                                           "symbol": deal.symbol})
+            continue
+        stored = dict(row)
+        receipt = json.loads(stored.get("result_json") or "{}")
+        if not isinstance(receipt, dict):
+            raise ValueError("stock sell source result must be an object")
+        result["observations"].append({
+            "source_id": str(stored["inbox_id"]), "account": deal.internal_account,
+            "broker": normalize_broker(deal.broker), "symbol": deal.symbol, "currency": deal.currency,
+            "shares": deal.contracts, "price": deal.price, "trade_time_ms": deal.trade_time_ms,
+            "source_deal_id": deal.deal_id, "futu_account_id": deal.futu_account_id,
+            "broker_deal_key": stored.get("broker_deal_key"),
+            "result_status": stored.get("result_status"), "result_reason": stored.get("result_reason"),
+            "diagnostics": dict(receipt.get("diagnostics") or {}),
+            "normalization_diagnostics": normalization,
+        })
+    if runtime_root is not None and account_scope is not None:
+        state_sources = []
+        for account in sorted(account_scope):
+            state_path = Path(runtime_root) / "output_shared/state/trade_intake" / account / "state.json"
+            if not state_path.exists():
+                result["diagnostics"].append({"code": "stock_sell_state_unavailable", "account": account})
+                continue
+            state_bytes = state_path.read_bytes()
+            state = json.loads(state_bytes)
+            if not isinstance(state, dict):
+                raise ValueError("stock sell state must be an object")
+            state_sources.append({"account": account, "read_at_ms": time.time_ns() // 1_000_000,
+                                  "sha256": hashlib.sha256(state_bytes).hexdigest()})
+            for bucket in ("unresolved_deal_ids", "failed_deal_ids"):
+                entries = state.get(bucket)
+                if not isinstance(entries, dict):
+                    result["diagnostics"].append({"code": "stock_sell_state_incomplete", "account": account})
+                    continue
+                for identity, entry in entries.items():
+                    if not isinstance(entry, dict):
+                        raise ValueError("stock sell state entry must be an object")
+                    if entry.get("action") != "assigned_stock_sale":
+                        continue
+                    if entry.get("account") not in (None, account):
+                        result["diagnostics"].append({"code": "stock_sell_state_account_conflict", "account": account})
+                        continue
+                    physical_id = entry.get("futu_account_id")
+                    if physical_id and futu_account_mapping.get(str(physical_id)) != account:
+                        result["diagnostics"].append({"code": "stock_sell_state_account_unverified", "account": account})
+                        continue
+                    diagnostics = dict(entry.get("diagnostics") or {})
+                    candidates = diagnostics.get("candidates") or []
+                    candidate_symbols = {str(c.get("symbol")) for c in candidates if isinstance(c, dict) and c.get("symbol")}
+                    symbol = next(iter(candidate_symbols)) if len(candidate_symbols) == 1 else None
+                    if symbol_scope is not None and symbol is not None and symbol not in symbol_scope:
+                        continue
+                    # Keep the pending source even if its old state omitted time
+                    # or quantity; the query must then use the narrowest proven
+                    # account/symbol scope rather than invent zero sold shares.
+                    result["observations"].append({
+                        "source_id": f"state:{account}:{bucket}:{identity}", "account": account,
+                        "broker": "富途", "symbol": symbol, "currency": entry.get("currency"),
+                        "shares": entry.get("shares"), "trade_time_ms": entry.get("trade_time_ms"),
+                        "source_deal_id": entry.get("source_deal_id"),
+                        "futu_account_id": entry.get("futu_account_id"),
+                        "broker_deal_key": entry.get("broker_deal_key"),
+                        "result_status": entry.get("status"), "result_reason": entry.get("reason"),
+                        "diagnostics": diagnostics,
+                    })
+        result["state_sources"] = state_sources
+    result["coverage"] = "unknown" if result["diagnostics"] else "complete"
+    return result
+
+
 
 def _insert_trade_payload_evidence(
     conn: sqlite3.Connection,
@@ -4098,6 +4226,7 @@ __all__ = [
     "mark_settlement_attempt_provider_started",
     "reconcile_settlement_attempt_invocation",
     "read_trade_source_evidence",
+    "read_stock_sell_observations",
     "record_trade_payload_refresh_intent",
     "replace_finished_settlement_attempt_provider_invocation",
     "release_settlement_provider_batch_claim",

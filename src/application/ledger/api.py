@@ -95,6 +95,7 @@ from src.application.ledger.external_event_key import (
     read_execution_event_candidates,
 )
 from src.application.ledger.read_only_evidence import (
+    read_assigned_stock_query_inputs,
     read_trade_intake_recovery_snapshot,
     open_option_execution_preview_repo,
     verify_trade_receipt_projection,
@@ -503,6 +504,7 @@ __all__ = [
     "CURRENT_DECISION_POSITION_FIELDS",
     "CURRENT_DECISION_READ_SCHEMA",
     "AssignedStockEventLog",
+    "read_assigned_stock_query_inputs",
     "assigned_stock_event_log",
     "accept_option_close_evidence",
     "adopt_existing_combo_identity",

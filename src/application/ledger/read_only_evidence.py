@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import time
 from contextlib import closing, contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -47,6 +48,22 @@ def open_trade_reconciliation_evidence_repo(
 ) -> Any:
     """Open the minimal ledger evidence surface in SQLite query-only mode."""
     return _ReadOnlyTradeReconciliationEvidenceRepository(Path(sqlite_path))
+
+
+def read_assigned_stock_query_inputs(repo: Any) -> dict[str, Any]:
+    """Freeze the source events for an assigned-stock query without store writes.
+
+    A shared Python input object is insufficient: both event logs must be read
+    from one SQLite transaction, including when an intake correction commits
+    between the two SELECTs. Missing or malformed source tables fail explicitly.
+    """
+    reader = getattr(repo, "read_assigned_stock_query_inputs", None)
+    if callable(reader):
+        return reader()
+    path = getattr(repo, "db_path", None) or getattr(repo, "path", None)
+    if path is None:
+        raise ValueError("assigned stock query requires a snapshot-capable ledger")
+    return open_trade_reconciliation_evidence_repo(path).read_assigned_stock_query_inputs()
 
 
 def read_trade_intake_recovery_snapshot(
@@ -99,6 +116,26 @@ class _ReadOnlyTradeReconciliationEvidenceRepository:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA query_only=ON")
         return conn
+
+    def read_assigned_stock_query_inputs(self) -> dict[str, Any]:
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN")
+            if not self._tables_exist(conn, "trade_events", "assigned_stock_events"):
+                raise sqlite3.DatabaseError("assigned stock query requires both source event tables")
+            events = self._read_trade_events(conn, strict=True)
+            stocks = self._read_json_query_from_conn(
+                conn,
+                "SELECT event_json FROM assigned_stock_events ORDER BY trade_time_ms, stock_event_id",
+                (), column="event_json", strict=True,
+            )
+            source = {
+                "identity": str(self.path),
+                "read_at_ms": time.time_ns() // 1_000_000,
+                "coverage": "complete",
+                "row_counts": {"trade_events": len(events), "assigned_stock_events": len(stocks)},
+            }
+        return {"trade_events": events, "account_assigned_stock_events": stocks,
+                "source": source, "diagnostics": []}
 
     @contextmanager
     def observe_data_version(self) -> Iterator[Callable[[], int]]:

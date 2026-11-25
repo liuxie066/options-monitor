@@ -486,6 +486,14 @@ def _option_positions_output_contract(payload: dict[str, Any]) -> dict[str, Any]
     if action == "list":
         return _OPTION_POSITIONS_LIST_OUTPUT_CONTRACT
     if action == "assigned-stock":
+        if any(key in normalized for key in ("assignment_year", "assignment_month", "assignment_start_date", "assignment_end_date")):
+            return {
+                **_OPTION_POSITIONS_ASSIGNED_STOCK_OUTPUT_CONTRACT,
+                "schema_version": "option_positions_read.assignment_period.v1",
+                "fact_fields": ["query", "summary", "accounts", "rows", "coverage", "source", "pagination",
+                                "freshness", "unresolved_stock_sales", "scope_reviews", "quote_refresh"],
+                "missing_data_fields": ["coverage", "rows[].reasons", "scope_reviews"],
+            }
         return _OPTION_POSITIONS_ASSIGNED_STOCK_OUTPUT_CONTRACT
     if action == "events":
         return _OPTION_POSITIONS_EVENTS_OUTPUT_CONTRACT
@@ -1156,7 +1164,12 @@ OPTION_POSITIONS_READ_TOOL = build_agent_tool(
         "An expired_position_marked_open warning identifies a local ledger-state inconsistency only; it does not "
         "prove broker settlement, assignment, liquidation, or a pending order. cash_secured_amount is assignment "
         "collateral, not profit, available cash, or loss. action=assigned-stock can add read-only quote evidence "
-        "for current stock P&L; other actions do not provide market-price P&L evidence."
+        "for current stock P&L; other actions do not provide market-price P&L evidence. "
+        "For assigned Put stock unrealized P&L use assignment_year or assignment_month (Shanghai assignment "
+        "cohort; current holdings and current eligible prices). If the user omits a period for this question, "
+        "supply the current Shanghai YYYY-MM as assignment_month. Never fill as_of_ms for a current query. "
+        "Period queries include fully sold lots and require status=all. Preserve each metric coverage/basis "
+        "and never relabel ledger-only estimates as verified broker holdings."
     ),
     requires=("runtime_config", "sqlite_data_config"),
     capabilities=("option_positions", "read_only", "ledger_diagnostics"),
@@ -1208,6 +1221,10 @@ OPTION_POSITIONS_READ_TOOL = build_agent_tool(
         "side": "list-only short|long selector",
         "strike": "list/events/inspect numeric selector",
         "exp": "events/inspect YYYY-MM-DD selector",
+        "assignment_year": {"type": "integer", "minimum": 1, "maximum": 9999, "description": "Assigned Put stock cohort year; current year is Shanghai YTD, valued currently"},
+        "assignment_month": {"type": "string", "pattern": r"^\d{4}-(0[1-9]|1[0-2])$", "description": "Assigned Put stock cohort YYYY-MM; current month is Shanghai MTD, valued currently"},
+        "assignment_start_date": {"type": "string", "format": "date", "description": "Inclusive Shanghai assignment start date; requires assignment_end_date"},
+        "assignment_end_date": {"type": "string", "format": "date", "description": "Inclusive Shanghai assignment end date; requires assignment_start_date"},
         "stock_lot_id": "assigned-stock selector",
         "quote_snapshots": "assigned-stock optional quote snapshot list/dict; supplying it disables implicit realtime refresh",
         "refresh_quotes": "assigned-stock optional bool; current queries refresh realtime OpenD spot by default, false disables it, true with historical as_of_ms is skipped",
@@ -1238,6 +1255,7 @@ OPTION_POSITIONS_READ_TOOL = build_agent_tool(
         "exp_within_days", "expiration_month", "expiration_exact", "expiration_before",
         "expiration_after", "record_id", "symbol", "option_type", "side", "strike",
         "exp", "stock_lot_id", "refresh_quotes", "as_of_ms", "cursor", "include_total", "position_effect",
+        "assignment_year", "assignment_month", "assignment_start_date", "assignment_end_date",
     ),
     bot_input_schema={
         "type": "object",
@@ -1280,6 +1298,10 @@ OPTION_POSITIONS_READ_TOOL = build_agent_tool(
             "side": {"type": "string", "enum": ["short", "long"]},
             "strike": {"type": "number"},
             "exp": {"type": "string", "format": "date"},
+            "assignment_year": {"type": "integer", "minimum": 1, "maximum": 9999},
+            "assignment_month": {"type": "string", "pattern": r"^\d{4}-(0[1-9]|1[0-2])$"},
+            "assignment_start_date": {"type": "string", "format": "date"},
+            "assignment_end_date": {"type": "string", "format": "date"},
             "stock_lot_id": {"type": "string"},
             "refresh_quotes": {"type": "boolean"},
             "as_of_ms": {"type": "integer"},
