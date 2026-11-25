@@ -95,7 +95,11 @@ def test_metrics_delegate_without_changing_original_numbers_or_rejections(case, 
     actual = adapter.compute_metrics(contract, *args, now_utc=now)
     if "error" in case:
         assert actual is None
-        assert adapter.explain_metrics_rejection(contract, *args, now_utc=now) == case["error"]
+        expected = deepcopy(case["error"])
+        # Retain the historical values and require the added reason end to end.
+        if case["name"].endswith("-stale"):
+            expected["metric_value"]["reason_code"] = "option_snapshot_stale"
+        assert adapter.explain_metrics_rejection(contract, *args, now_utc=now) == expected
     else:
         assert {key: actual[key] for key in case["metrics"]} == case["metrics"]
     assert calls
