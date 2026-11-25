@@ -239,7 +239,9 @@ Control / CLI 边界。
 `assignment_month`（YYYY-MM），或同时指定 `assignment_start_date` /
 `assignment_end_date`（YYYY-MM-DD，用户日期含两端）。三种选择互斥。
 当前年/月按 YTD/MTD，截至请求时刻；过去期间按完整自然期间选批次，均使用
-Asia/Shanghai。期间只选择指派生效批次，持有/已售状态来自本次固定账本，
+Asia/Shanghai。期间明细的 `assigned_date` 也从 `assigned_at_ms` 按同一时区
+生成，包括账户／标的下钻，避免美股当地日期与北京时间跨日时显示不一致。
+不更改指派时间戳或底层生命周期的市场日期。期间只选择指派生效批次，持有/已售状态来自本次固定账本，
 价格为当前合格观察。新期间查询固定 `status=all`，不能与显式 `as_of_ms`
 同时使用。旧无期间参数的通用 assigned-stock 和历史查询保持原语义。
 

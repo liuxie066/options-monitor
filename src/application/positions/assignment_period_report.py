@@ -123,6 +123,9 @@ def _period_leaf(row: dict[str, Any]) -> dict[str, Any]:
         'spot', 'quote', 'reasons', 'valuation_basis', 'confirmed', 'provisional',
     }
     result = {key: value for key, value in row.items() if key in fields}
+    # Lifecycle dates use the exchange timezone; period selection and display
+    # share Asia/Shanghai without changing the underlying assignment instant.
+    result['assigned_date'] = datetime.fromtimestamp(row['assigned_at_ms'] / 1000, _SHANGHAI).date().isoformat()
     quote = row['quote']
     remaining = row['book_shares_remaining']
     pending = row['quantity_status'] in {'pending', 'unknown'}
