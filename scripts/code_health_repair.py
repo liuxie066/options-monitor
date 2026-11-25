@@ -201,7 +201,7 @@ def sandbox_command(config, tree, stage, argv):
     profile = stage / "verification.sb"
     profile.write_text(
         '(version 1)\n(allow default)\n(deny network*)\n(deny file-write*)\n'
-        f'(allow file-write* (subpath {json.dumps(str(stage.resolve()))}) (literal "/dev/null"))\n',
+        f'(allow file-write* (subpath {json.dumps(str(stage.resolve()), ensure_ascii=False)}) (literal "/dev/null"))\n',
         encoding="utf-8",
     )
     return [config["sandbox_exec"], "-f", str(profile), *argv]
