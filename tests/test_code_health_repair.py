@@ -576,6 +576,33 @@ def test_sandbox_denies_network_and_writes_outside_verification_stage(tmp_path):
     assert str(tmp_path.resolve()) in policy
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS Seatbelt")
+@pytest.mark.parametrize("directory", ["ascii stage", '中文 验证é\"\\目录'])
+def test_real_sandbox_verifies_unicode_paths_without_widening_permissions(tmp_path, directory):
+    outside = tmp_path / "outside.txt"
+    outside.write_text("unchanged")
+    test = tmp_path / "test_sandbox_probe.py"
+    test.write_text(
+        "import os, socket\nfrom pathlib import Path\nimport pytest\n"
+        "def test_allowed_write_and_denied_effects():\n"
+        "    allowed = Path(os.environ['TMPDIR']) / '中文.txt'\n"
+        "    allowed.write_text('ok')\n"
+        "    assert allowed.read_text() == 'ok'\n"
+        "    with pytest.raises(PermissionError):\n"
+        f"        Path({str(outside)!r}).write_text('forbidden')\n"
+        "    with socket.socket() as sock, pytest.raises(PermissionError):\n"
+        "        sock.bind(('127.0.0.1', 0))\n",
+        encoding="utf-8",
+    )
+    result = repair.verify_tests(
+        {"verification_python": sys.executable, "sandbox_exec": "/usr/bin/sandbox-exec"},
+        tmp_path, tmp_path / directory, [str(test)], 60,
+    )
+    assert result["exit_code"] == result["failures"] == result["errors"] == result["skipped"] == 0
+    assert len(result["cases"]) == 1
+    assert outside.read_text() == "unchanged"
+
+
 def queued_repairs(tmp_path, count=4):
     """Existing local records only: no repository history, subprocesses or agent execution."""
     root = tmp_path / "state"
