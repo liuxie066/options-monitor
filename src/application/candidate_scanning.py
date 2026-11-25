@@ -213,13 +213,20 @@ def calculation_rejection(normalized_input: Mapping[str, Any], reason: Mapping[s
     opening_status = str(
         normalized_input.get("opening_contract_status") or ""
     ).strip().lower()
+    opening_reason_codes = normalized_input.get("opening_contract_reason_codes")
+    no_bid_evidence = (
+        opening_status == "ineligible"
+        and isinstance(opening_reason_codes, (list, tuple))
+        and "option_no_current_bid" in opening_reason_codes
+    )
     # Precedence list: the first rule whose condition matches wins, and the
     # fallback is the general input-invalid reason.
     reject_reason = REJECT_INPUT_INVALID
     for matched, candidate_reason in (
-        (specific_reason == REJECT_EVIDENCE_UNAVAILABLE, REJECT_EVIDENCE_UNAVAILABLE),
+        (specific_reason == REJECT_EVIDENCE_UNAVAILABLE and no_bid_evidence, REJECT_EVIDENCE_UNAVAILABLE),
         (opening_status == "ineligible", REJECT_CONTRACT_INELIGIBLE),
         (opening_status in {"data_unavailable", "market_closed"}, REJECT_EVIDENCE_UNAVAILABLE),
+        (specific_reason == REJECT_EVIDENCE_UNAVAILABLE, REJECT_EVIDENCE_UNAVAILABLE),
         (specific_reason == REJECT_CONTRACT_INELIGIBLE, REJECT_CONTRACT_INELIGIBLE),
         (specific_reason in _DEFINITIVE_CONTRACT_EVIDENCE_REASONS, REJECT_CONTRACT_INELIGIBLE),
         (opening_status != "ready", REJECT_INPUT_INVALID),
