@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from domain.domain.ledger import ContractKey, TradeEvent
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.performance.adapters import (
@@ -104,6 +106,52 @@ def test_assigned_stock_boundary_projection_restates_later_valid_void(tmp_path) 
 
     assert boundary["assigned_stock_lots"] == []
     assert boundary["assignment_lifecycle_rows"] == []
+
+
+@pytest.mark.parametrize("include_void", [False, True])
+def test_assignment_boundary_metadata_shares_validated_late_void_selection(include_void):
+    from src.application.ledger import api
+
+    opening = _trade(raw_payload={"side": "sell", "strategy": "sell_put"})
+    duplicate = _trade(event_id="replaced-open", raw_payload={"side": "sell", "strategy": "wheel"})
+    events = [opening, duplicate, _assign_put()]
+    if include_void:
+        events.append(_trade(event_id="late-void", event_type="void", event_time_ms=5000,
+            contracts=0, price=0, target_event_id="replaced-open", lot_id=None, raw_payload={}))
+    # A future strategy adjustment must stay outside the selected boundary,
+    # even though a valid later void is deliberately retained by canonical replay.
+    events.append(_trade(event_id="future-adjust", event_type="adjust", event_time_ms=4000,
+        contracts=0, price=0, target_lot_id="lot-put", lot_id=None,
+        raw_payload={"patch": {"strategy": "wheel"}}))
+    rows = {"trade_events": [api.trade_event_application_payload(e.to_dict()) for e in events],
+            "account_assigned_stock_events": []}
+    if not include_void:
+        with pytest.raises(ValueError, match="projection is untrusted: duplicate_lot_id"):
+            api.project_assigned_stock_lifecycle_from_rows(rows, as_of_ms=3000)
+        return
+    result = api.project_assigned_stock_lifecycle_from_rows(rows, as_of_ms=3000)
+    assert len(result["assigned_stock_lots"]) == 1
+    lot = result["assigned_stock_lots"][0]
+    assert lot["strategy"] == "sell_put"
+    assert lot["shares_remaining"] == 100
+
+
+def test_assignment_boundary_does_not_revive_later_voided_strategy_adjustment():
+    from src.application.ledger import api
+
+    events = [
+        _trade(raw_payload={"side": "sell", "strategy": "sell_put"}),
+        _trade(event_id="replaced-adjust", event_type="adjust", event_time_ms=1500,
+            contracts=0, price=0, target_lot_id="lot-put", lot_id=None,
+            raw_payload={"patch": {"strategy": "wheel"}}),
+        _assign_put(),
+        _trade(event_id="late-void", event_type="void", event_time_ms=5000,
+            contracts=0, price=0, target_event_id="replaced-adjust", lot_id=None, raw_payload={}),
+    ]
+    rows = {"trade_events": [api.trade_event_application_payload(e.to_dict()) for e in events],
+            "account_assigned_stock_events": []}
+    result = api.project_assigned_stock_lifecycle_from_rows(rows, as_of_ms=3000)
+    assert result["assigned_stock_lots"][0]["strategy"] == "sell_put"
 
 
 def test_assigned_stock_projection_uses_adjusted_covered_call_identity(tmp_path) -> None:

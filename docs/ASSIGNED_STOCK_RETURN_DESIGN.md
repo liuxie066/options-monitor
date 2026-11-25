@@ -122,6 +122,8 @@ CNY 为 null/partial；禁止用当前汇率补历史缺口。
   `missing_quote` 或 partial。
 - 后来的 void 会通过 canonical replay 影响历史 boundary；调用方不能从当前 lot
   状态手工拼历史结果。
+- 历史数量和策略元数据复用同一份已验证事件选择，保留用于重述该边界的晚到 void；
+  不再次按时间丢弃这些控制记录，也不纳入边界之后的开仓或策略调整。
 
 ## 公开入口
 
