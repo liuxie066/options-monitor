@@ -975,6 +975,15 @@ def assigned_stock_allocation_row(
         "contracts_closed": allocation.contracts,
         "realized_pnl_gross": float(allocation.realized_pnl_gross),
         "realized_pnl_gross_exact": format(allocation.realized_pnl_gross, "f"),
+        "open_amount_gross_exact": format(allocation.open_amount_gross, "f"),
+        "source_option_fee_allocations": [
+            {"allocation_id": allocation.allocation_id, "source_event_id": fact.source_event_id,
+             "component": component, "basis": fact.basis.value,
+             "amount": format(fact.amount, "f") if fact.amount is not None else None,
+             "source": fact.source, "reason": fact.reason}
+            for component, fact in (("option_open", allocation.allocated_open_fee),
+                                    ("option_assignment", allocation.close_fee))
+        ],
         "realized_pnl_net": (
             None
             if allocation.realized_pnl_net is None
@@ -1517,6 +1526,13 @@ def project_assigned_stock_lifecycle(
             "stock_principal_basis_total": assignment_notional,
             "basis_policy": "assignment_stock_cost_basis",
             "option_premium_attribution": option_premium_attribution,
+            "put_open_premium_exact": format(sum(
+                (Decimal(str(row["open_amount_gross_exact"])) for row in option_rows), Decimal(0)
+            ), "f") if all("open_amount_gross_exact" in row for row in option_rows) else None,
+            "source_option_fee_allocations": [
+                dict(fact) for row in option_rows
+                for fact in row.get("source_option_fee_allocations", [])
+            ],
             "option_premium_attribution_exact": format(sum(
                 (Decimal(str(row["realized_pnl_gross_exact"])) for row in option_rows), Decimal(0)
             ), "f") if all("realized_pnl_gross_exact" in row for row in option_rows) else None,
@@ -2129,11 +2145,13 @@ def assigned_put_remaining_economics(
     reasons: list[str] = []
     stock_fact = by_component.get("assignment_stock_fee", {})
     stock_actual = stock_fact.get("basis") == "actual"
-    put_facts = [by_component.get(k, {}) for k in ("put_open_option_fee", "put_assignment_option_fee")]
-    put_actual = all(f.get("basis") == "actual" for f in put_facts)
+    put_facts = list(lot.get("source_option_fee_allocations") or [])
+    put_components = {f.get("component") for f in put_facts}
+    put_actual = (put_components == {"option_open", "option_assignment"}
+                  and all(f.get("basis") == "actual" and f.get("amount") is not None for f in put_facts))
     cost = to_decimal(lot.get("stock_cost_basis_total"), field_name="stock_cost_basis_total")
     remaining_cost = cost * Decimal(remaining) / Decimal(opened)
-    premium_raw = lot.get("option_premium_attribution_exact")
+    premium_raw = lot.get("put_open_premium_exact")
     if premium_raw is None:
         put_actual = False
         reasons.append("exact_put_premium_unavailable")

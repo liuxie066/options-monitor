@@ -239,3 +239,18 @@ def test_closed_market_quote_requires_complete_original_calendar_proof():
     assert assigned_stock_quote_is_usable(quote, valuation)
     market['closed_market_carry']['calendars']['HK']['receipt']['coverage_complete'] = False
     assert not assigned_stock_quote_is_usable(quote, valuation)
+
+
+def test_frozen_market_mark_currency_and_time_must_match_lot_quote():
+    from src.application.positions.assigned_stock_quotes import assigned_stock_quote_is_usable
+
+    at = 1780000000000
+    mark = {'symbol': 'NVDA', 'currency': 'USD', 'price': '100', 'source': 'frozen',
+            'effective_at_ms': at - 10, 'available_at_ms': at - 5, 'valid_until_ms': at + 1000}
+    market = {'stocks': [mark], 'options': [], 'fx': []}
+    quote = {'symbol': 'NVDA', 'spot': '100', 'quote_time_ms': at - 10, 'market_evidence': market}
+    assert assigned_stock_quote_is_usable(quote, at, expected_currency='USD')
+    assert not assigned_stock_quote_is_usable(quote | {'quote_time_ms': at}, at, expected_currency='USD')
+    mark['currency'] = 'HKD'
+    assert not assigned_stock_quote_is_usable(quote, at, expected_currency='USD')
+    assert not assigned_stock_quote_is_usable(quote, at)

@@ -254,7 +254,7 @@ def test_scene_exposes_events_and_assignment_cohort_fields(monkeypatch, tmp_path
     fields = set(description["input_schema"]["properties"])
     assert fields == {"config_key", "action", "broker", "account", "limit", "cursor", "include_total",
                       "position_effect", "symbol", "option_type", "strike", "exp",
-                      "assignment_year", "assignment_month", "assignment_start_date", "assignment_end_date", "refresh_quotes"}
+                      "assignment_year", "assignment_month", "assignment_start_date", "assignment_end_date", "refresh_quotes", "stock_lot_id"}
     assert description["default_input"]["action"] == "events"
     assert all(example["input"]["action"] == "events" for example in description["examples"])
 
@@ -465,11 +465,13 @@ def test_missing_account_still_requires_schema_input(monkeypatch, tmp_path):
 def test_scene_assignment_period_keeps_cross_market_account_authority(monkeypatch, tmp_path):
     _configs, fixed = _scope(tmp_path, monkeypatch, ["us", "hk"])
     payload, error = tools.build_tool_payload(
-        "option_positions_read", {"config_key": "us", "action": "assigned-stock", "assignment_year": 2026},
+        "option_positions_read", {"config_key": "us", "action": "assigned-stock", "assignment_year": 2026,
+                                  "stock_lot_id": "assigned-stock-known-batch"},
         fixed_input=fixed,
     )
     assert error is None, error
     assert payload["assignment_year"] == 2026 and payload["status"] == "all"
+    assert payload["stock_lot_id"] == "assigned-stock-known-batch"
     assert "as_of_ms" not in payload
     rejected, error = tools.build_tool_payload(
         "option_positions_read", {"config_key": "us", "action": "assigned-stock", "assignment_year": 2026},

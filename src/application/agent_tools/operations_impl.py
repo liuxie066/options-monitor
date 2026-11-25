@@ -105,6 +105,13 @@ def normalize_option_positions_read_input(
     if has_period:
         if _scalar_text(normalized.get("action"), default="assigned-stock").lower() != "assigned-stock":
             raise ValueError("assignment period fields require action=assigned-stock")
+        allowed_period_fields = period_fields | {
+            "action", "config_key", "config_path", "data_config", "broker", "account", "symbol",
+            "stock_lot_id", "status", "as_of_ms", "refresh_quotes", "quote_snapshots", "opend_host", "opend_port",
+        }
+        unsupported = sorted(set(normalized) - allowed_period_fields)
+        if unsupported:
+            raise ValueError("unsupported fields for assignment period query: " + ", ".join(unsupported))
         normalized["action"] = "assigned-stock"
         if normalized.get("as_of_ms") not in (None, ""):
             raise ValueError("assignment period queries support current valuation only; omit as_of_ms")
