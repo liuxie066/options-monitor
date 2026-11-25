@@ -42,7 +42,8 @@ def test_core_missing_or_invalid_source_time_fails_before_fee(monkeypatch, mode,
             _row(mode, spot_observed_at_utc=value), mode=mode, now_utc=NOW,
         )
     assert caught.value.reason == "evidence_unavailable"
-    assert set(caught.value.metric_value) == {"spot_observed_at_utc"}
+    assert set(caught.value.metric_value) == {"spot_observed_at_utc", "reason_code"}
+    assert caught.value.metric_value["reason_code"] == "underlier_update_time_missing_or_invalid"
     assert caught.value.threshold == "present timezone-aware source time"
 
 
@@ -53,7 +54,8 @@ def test_missing_source_key_has_no_receipt_or_raw_time_fallback(mode):
     with pytest.raises(engine.CandidateCalculationError) as caught:
         engine.validate_opening_contract_evidence(row, mode=mode, now_utc=NOW)
     assert caught.value.reason == "evidence_unavailable"
-    assert caught.value.metric_value == {"spot_observed_at_utc": None}
+    assert caught.value.metric_value == {"spot_observed_at_utc": None,
+                                       "reason_code": "underlier_update_time_missing_or_invalid"}
 
 
 @pytest.mark.parametrize("mode", ["put", "call"])
@@ -68,7 +70,8 @@ def test_source_age_boundary_ignores_frozen_age_and_preserves_economics(monkeypa
         with pytest.raises(engine.CandidateCalculationError) as caught:
             engine.calculate_opening_candidate_metrics(row, mode=mode, now_utc=NOW)
         assert caught.value.reason == "evidence_unavailable"
-        assert caught.value.metric_value == {"spot_age_seconds": age}
+        assert caught.value.metric_value == {"spot_age_seconds": age, "reason_code": (
+            "underlier_update_time_in_future" if age < 0 else "underlier_quote_stale")}
         assert caught.value.threshold == (">= 0" if age < 0 else 300)
     else:
         normalized = engine.validate_opening_contract_evidence(row, mode=mode, now_utc=NOW)
@@ -126,7 +129,7 @@ def test_option_limit_remains_independent_and_keeps_error_precedence(mode, limit
         with pytest.raises(engine.CandidateCalculationError) as caught:
             engine.validate_opening_contract_evidence(row, mode=mode, now_utc=NOW, max_snapshot_age_seconds=limit)
         assert caught.value.reason == "evidence_unavailable"
-        assert set(caught.value.metric_value) == {field}
+        assert set(caught.value.metric_value) == {field, "reason_code"}
 
 
 @pytest.mark.parametrize("mode", ["put", "call"])
@@ -136,7 +139,8 @@ def test_missing_option_receipt_precedes_invalid_spot(mode):
             _row(mode, snapshot_received_at_utc=None, spot_observed_at_utc=pd.NA), mode=mode, now_utc=NOW,
         )
     assert caught.value.reason == "evidence_unavailable"
-    assert caught.value.metric_value == {"snapshot_received_at_utc": None}
+    assert caught.value.metric_value == {"snapshot_received_at_utc": None,
+                                       "reason_code": "option_snapshot_receipt_missing"}
 
 
 def _normalized_row(mode, *, age_at_fetch, contract):
@@ -241,7 +245,8 @@ def test_missing_normal_producer_and_csv_time_reaches_canonical_rejection(tmp_pa
     rejection = (explain_put(row, now_utc=NOW) if mode == "put"
                  else explain_call(row, avg_cost=90, now_utc=NOW))
     assert rejection["rule"] == "evidence_unavailable"
-    assert rejection["metric_value"] == {"spot_observed_at_utc": None}
+    assert rejection["metric_value"] == {"spot_observed_at_utc": None,
+                                       "reason_code": "underlier_update_time_missing_or_invalid"}
 
 
 @pytest.mark.parametrize("leg", ["put", "call"])

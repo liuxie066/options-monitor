@@ -2075,7 +2075,9 @@ def _wheel_diagnostic_signature(row: Mapping[str, Any]) -> tuple[Any, ...] | Non
 def _wheel_candidate_diagnostic_details(row: Mapping[str, Any]) -> list[str]:
     diagnostics = row.get("candidate_diagnostics")
     if not isinstance(diagnostics, list) or not diagnostics:
-        if row.get("reason_code") in {"partial_data", "data_unavailable", "wheel_candidate_data_unavailable"} and not row.get("required_data_coverage"):
+        if {row.get("reason_code"), row.get("candidate_evidence_reason")} & {
+            "partial_data", "data_unavailable", "wheel_candidate_data_unavailable"
+        } and not row.get("required_data_coverage"):
             return ["数据说明：本次记录未提供具体缺项"]
         return []
     labels = {
@@ -2085,6 +2087,11 @@ def _wheel_candidate_diagnostic_details(row: Mapping[str, Any]) -> list[str]:
         "bid_missing_or_invalid": "买价缺失或无效",
         "ask_missing_or_invalid": "卖价缺失或无效",
         "option_snapshot_stale": "期权报价过期",
+        "option_snapshot_receipt_missing": "期权报价接收时间缺失或无效",
+        "option_snapshot_receipt_in_future": "期权报价接收时间晚于决策时间",
+        "underlier_update_time_missing_or_invalid": "正股行情时间缺失或无效",
+        "underlier_update_time_in_future": "正股行情时间晚于决策时间",
+        "underlier_quote_stale": "正股行情过期",
         "underlier_observation_unavailable": "正股行情不可用",
         "option_snapshot_identity_mismatch": "期权行情身份不符",
         "option_multiplier_conflict": "合约乘数冲突",
@@ -2157,7 +2164,7 @@ def _wheel_gap_reminders(brief: Mapping[str, Any]) -> list[str]:
         if not isinstance(row, Mapping):
             continue
         for detail in _wheel_candidate_diagnostic_details(row):
-            if detail.startswith("缺项："):
+            if detail.startswith(("缺项：", "数据说明：")):
                 reminders.append(f"{_upper(row.get('symbol'))} Wheel {str(row.get('direction') or 'call').title()} · {detail}")
     return list(dict.fromkeys(reminders))
 
