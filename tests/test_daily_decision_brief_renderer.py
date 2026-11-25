@@ -2523,6 +2523,11 @@ def test_wheel_quantity_and_same_candidate_limit_price(direction,status,label):
     rendered=render_fixed_report(brief,limits={"max_items_per_account": 0},context=_scheduled_context())
     assert label in rendered and "100 / 300 股" in rendered
     assert "建议限价｜USD 2.15" in rendered and "2.125" not in rendered
+    if direction == "call":
+        assert "报价采集时间" not in rendered
+        assert "2026-07-31T14:00:00Z" not in rendered
+    else:
+        assert "报价采集时间｜2026-07-31T14:00:00Z" in rendered
     assert "意图预留｜100 股" in rendered and "分支剩余｜100 股" in rendered
     assert "以账户容量检查为准" not in rendered
     brief["wheel_batches"][0].pop("sell_limit")

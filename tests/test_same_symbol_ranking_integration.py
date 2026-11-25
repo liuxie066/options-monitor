@@ -64,10 +64,8 @@ def test_full_group_seal_summary_offline_and_brief_agree(tmp_path, mode, missing
     view = _candidate_view({**target["facts"], "ranking": target["ranking"]}, family=family, rank=2)
     assert view["metrics"]["net_delivery_tier"] == tier
     text = "\n".join(_candidate_metric_details(view, family=family, market="US"))
-    assert ("本组候选净价不完整" if missing else "新档位优先") in text
-    assert "仅计开仓费用" in text
-    if missing:
-        assert "新档位优先" not in text
+    for removed in (tier["message"], "净接货价", "净卖出价", "仅计开仓费用"):
+        assert removed not in text
     # Explanation drift is detected independently of a still-correct ordering.
     target_record = next(r for r in payload["ranked_candidates"] if r["candidate_id"] == target["candidate_id"])
     target_record["ranking"]["net_delivery_tier"]["priority"] = missing
