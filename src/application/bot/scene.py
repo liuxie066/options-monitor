@@ -95,7 +95,7 @@ def build_scene_manifest(
             schema = description["input_schema"]
             fields = {"config_key", "action", "broker", "account", "limit", "cursor", "include_total",
                       "position_effect", "symbol", "option_type", "strike", "exp",
-                      "assignment_year", "assignment_month", "assignment_start_date", "assignment_end_date", "refresh_quotes"}
+                      "assignment_year", "assignment_month", "assignment_start_date", "assignment_end_date", "refresh_quotes", "stock_lot_id"}
             schema["properties"] = {key: value for key, value in schema["properties"].items() if key in fields}
             schema["properties"]["action"]["enum"] = ["events", "assigned-stock"]
             schema["properties"]["action"]["default"] = "events"

@@ -77,6 +77,7 @@ from src.application.ledger.event_codec import (
     valid_void_target_event_id,
 )
 from src.application.ledger.assigned_stock_projection import (
+    qualify_assigned_stock_sell_observations,
     WHEEL_READ_MODEL_SCHEMA,
     resolve_wheel_batch_from_rows,
     resolve_wheel_branch_from_rows,
@@ -676,6 +677,7 @@ __all__ = [
     "project_trade_event_log",
     "project_position_lots_from_trade_facts",
     "project_assigned_stock_lifecycle_from_rows",
+    "qualify_assigned_stock_sell_observations",
     "project_position_lots_and_assigned_stock_from_rows",
     "resolve_position_data_config_path",
     "resolve_position_ledger_sqlite_path",

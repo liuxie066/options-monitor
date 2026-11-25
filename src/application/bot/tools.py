@@ -822,6 +822,87 @@ __all__ = [
 ]
 
 
+def _assignment_period_overview(response: dict[str, Any]) -> dict[str, Any]:
+    """Keep owner-computed totals when verbose batch evidence cannot fit the wire.
+
+    This is a viewing projection: only metadata lists become counts, never
+    financial values. No narrowed subset is summed to reconstruct a total.
+    """
+    data = response["data"]
+    query = data.get("query") or {}
+    rows = data.get("rows") or []
+    compact = {
+        key: data[key] for key in (
+            "schema_version", "action", "query", "summary", "row_count", "matched_count",
+            "coverage", "freshness", "warnings",
+        ) if key in data
+    }
+    compact["source"] = {k: v for k, v in (data.get("source") or {}).items() if k != "intake"}
+    compact["accounts"] = [
+        {k: account[k] for k in ("account", "summary") if k in account}
+        for account in data.get("accounts") or [] if isinstance(account, dict)
+    ]
+    # Detail calls use the same economic cohort and narrower account/symbol.
+    # Requested end is exclusive midnight in Shanghai, before clipping to now.
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    detail_query = {"action": "assigned-stock"}
+    zone = ZoneInfo("Asia/Shanghai")
+    start, end = query.get("start_at_ms"), query.get("requested_end_exclusive_at_ms")
+    if type(start) is int and type(end) is int:
+        detail_query.update({
+            "assignment_start_date": datetime.fromtimestamp(start / 1000, zone).date().isoformat(),
+            "assignment_end_date": (datetime.fromtimestamp(end / 1000, zone).date() - timedelta(days=1)).isoformat(),
+        })
+    batch_index = [{key: row[key] for key in ("stock_lot_id", "account", "symbol") if key in row}
+                   for row in rows[:64] if isinstance(row, dict)]
+    if batch_index:
+        detail_query.update(batch_index[0])
+    compact["batch_index"] = batch_index
+    compact["batch_index_coverage"] = {
+        "status": "complete" if len(batch_index) == len(rows) else "partial",
+        "total_count": len(rows), "returned_count": len(batch_index), "omitted_count": len(rows) - len(batch_index),
+    }
+    compact["detail_projection"] = {
+        "status": "omitted_for_response_budget", "summary_complete": True,
+        "returned_count": 0, "omitted_count": len(rows),
+        "omitted_fields": ["rows", "assigned_stock_lots", "accounts.symbols", "sale_rows", "scope_review_details", "intake_details"],
+        "detail_query": detail_query,
+        "narrow_by": ["account", "symbol", "stock_lot_id"],
+        "instruction": "Totals are the complete owner summary; details omitted. Narrow only to inspect batches; never re-sum narrowed results as the total.",
+    }
+    projected = {**response, "data": compact}
+    if conservative_json_tokens(projected) <= MAX_NATIVE_OBSERVATION_TOKENS:
+        return projected
+
+    def count_indexes(value: Any) -> Any:
+        if isinstance(value, list):
+            return [count_indexes(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        result = {}
+        for key, item in value.items():
+            if key in {"included_lot_ids", "provisional_lot_ids", "omitted_lot_ids"} and isinstance(item, list):
+                result[key.removesuffix("_lot_ids") + "_lot_count"] = len(item)
+            elif key == "omitted_reasons" and isinstance(item, dict):
+                result["omitted_reason_codes"] = sorted({str(reason) for reasons in item.values() for reason in reasons})
+            else:
+                result[key] = count_indexes(item)
+        return result
+
+    projected["data"]["summary"] = count_indexes(compact.get("summary"))
+    projected["data"]["accounts"] = count_indexes(compact.get("accounts"))
+    projected["data"]["detail_projection"]["summary_indexes"] = "summary lot ID lists omitted; exact counts and distinct reason codes retained"
+    while compact["batch_index"] and conservative_json_tokens(projected) > MAX_NATIVE_OBSERVATION_TOKENS:
+        compact["batch_index"].pop()
+        returned = len(compact["batch_index"])
+        compact["batch_index_coverage"].update(
+            status="partial", returned_count=returned, omitted_count=len(rows) - returned,
+        )
+    return projected
+
+
 def model_observation(tool_name: str, response: dict[str, Any]) -> dict[str, Any]:
     """Pass source-owned data once, redacted and bounded; never expire successful reads."""
     clean = _without_model_provenance(redact_value(response))
@@ -844,6 +925,10 @@ def model_observation(tool_name: str, response: dict[str, Any]) -> dict[str, Any
         if type(start) is int and isinstance(data.get("text"), str):
             data["text"] = "\n".join(f"{start + offset}|{line}" for offset, line in enumerate(data["text"].split("\n")))
             data["text_format"] = "line_numbered"
+    if (tool_name == "option_positions_read" and isinstance(data, dict)
+            and data.get("schema_version") == "option_positions_read.assignment_period.v1"
+            and conservative_json_tokens(clean) > MAX_NATIVE_OBSERVATION_TOKENS):
+        clean = _assignment_period_overview(clean)
     if conservative_json_tokens(clean) > MAX_NATIVE_OBSERVATION_TOKENS:
         data = clean.get("data") if isinstance(clean.get("data"), dict) else {}
         return {"ok": False, "tool_name": tool_name, "status": "needs_narrowing",

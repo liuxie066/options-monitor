@@ -215,3 +215,10 @@ Public read-only entry: src/application/ledger/query_api.py, exporting the exist
 经 `trades.inbox.read_stock_sell_observations`。纯金额 owner 为
 `domain/domain/assigned_stock.py::assigned_put_remaining_economics`。原币/CNY、book 与
 核实数量、null/零及来源覆盖契约见 [接货收益](ASSIGNED_STOCK_RETURN_DESIGN.md#put-指派期间当前估值查询)。
+
+期间查询的来源卖出资格由
+`ledger.api.qualify_assigned_stock_sell_observations` 从冻结行集及 canonical 有效投影
+给出；观察去重不写回 intake/state。Bot 的预算投影只省略明细/索引元数据，
+不能重算或删除期间汇总金额。对应回归：
+`tests/test_assigned_stock_observation_qualification.py`、
+`tests/test_assignment_period_entry_contract.py`。

@@ -161,6 +161,7 @@ def test_public_period_schema_to_real_report_refreshes_current_quote(tmp_path, m
     result = execute_tool("option_positions_read", {
         "config_path": str(config), "action": "assigned-stock", "account": "lx",
         "assignment_year": clock.year,
+        **({"opend_host": "diagnostic-only.invalid", "opend_port": 22222} if scenario == "priced" else {}),
     })
     assert result["ok"], result
     assert len(calls) == (0 if scenario in {"sold", "pending"} else 1), json.dumps(result, ensure_ascii=False)
@@ -175,19 +176,33 @@ def test_public_period_schema_to_real_report_refreshes_current_quote(tmp_path, m
         assert row["book_shares_remaining"] == 0
         assert row["stock_unrealized_pnl"] == "0"
         assert row["remaining_pnl_with_put"] == "0"
+        assert row["quote_status"] == "not_required"
+        assert row["assigned_stock_unrealized_pnl"] == "0"
     elif scenario == "pending":
         assert row["book_shares_remaining"] == 100
         assert row["quantity_status"] == "pending"
+        assert row["review_status"] == "pending"
+        assert row["assigned_stock_unrealized_pnl"] is None
         assert row["shares_remaining"] is None
         assert row["stock_unrealized_pnl"] is None
         assert row["remaining_pnl_with_put"] is None
     elif scenario == "priced":
+        assert calls[0][1]["host"] == "diagnostic-only.invalid"
+        assert calls[0][1]["port"] == 22222
         assert row["stock_unrealized_pnl"] == "490"
+        assert row["assigned_stock_unrealized_pnl"] == row["stock_unrealized_pnl"]
+        assert row["quote_status"] == "fresh"
+        assert row["spot_time"] == stamp - 30_000
+        assert row["review_status"] == "partial"
+        assert "lifecycle_pnl_net" not in row
         assert row["quote"]["quote_time_ms"] == stamp - 30_000
         assert row["quantity_status"] == "ledger_only"
         assert result["data"]["summary"]["by_currency"]["USD"]["stock_unrealized_pnl"]["value"] == "490.00"
     elif scenario in {"wrong_account_quote", "wrong_broker_quote"}:
         assert row["spot"] is None
+        assert row["quote_status"] == "missing_quote"
+        assert row["spot_time"] is None
+        assert row["assigned_stock_unrealized_pnl"] is None
         assert row["stock_unrealized_pnl"] is None
     else:
         assert row["remaining_pnl_with_put"] is None
@@ -205,3 +220,91 @@ def test_inbound_period_payload_does_not_inherit_open_or_fill_as_of():
     assert result["assignment_year"] == 2026
     assert result.get("status", "all") == "all"
     assert "as_of_ms" not in result
+
+
+@pytest.mark.parametrize("field,value", [
+    ("option_type", "call"), ("side", "long"), ("strike", 50), ("exp", "2026-12-18"),
+    ("expiration_month", "2026-12"), ("query", {"symbol": "FUTU"}), ("limit", 20),
+    ("cursor", "page"), ("include_total", True), ("position_effect", "close"),
+])
+def test_period_input_rejects_ignored_financial_filters(field, value):
+    from src.application.agent_tool_contracts import AgentToolError
+
+    with pytest.raises(AgentToolError, match="unsupported fields for assignment period query"):
+        OPTION_POSITIONS_READ_TOOL.call({"action": "assigned-stock", "assignment_year": 2026, field: value})
+
+
+@pytest.mark.parametrize("batch_count", [7, 34, 80])
+def test_actual_bot_observation_keeps_complete_period_totals_when_details_exceed_budget(tmp_path, monkeypatch, batch_count):
+    from copy import deepcopy
+    from decimal import Decimal
+    import hashlib
+
+    import src.application.tool_execution as execution
+    from src.application.bot.tools import MAX_NATIVE_OBSERVATION_TOKENS, conservative_json_tokens, model_observation
+    from src.application.positions.assignment_period_report import summarize_lots
+
+    original = execution.execute_tool
+    responses = []
+
+    def capture(*args, **kwargs):
+        response = original(*args, **kwargs)
+        responses.append(response)
+        return response
+
+    monkeypatch.setattr(execution, "execute_tool", capture)
+    test_public_period_schema_to_real_report_refreshes_current_quote(tmp_path, monkeypatch, "priced")
+    response = deepcopy(responses[0])
+    data = response["data"]
+    template = data["rows"][0]
+    rows = []
+    for index in range(batch_count):
+        row = deepcopy(template)
+        row["stock_lot_id"] = "assigned-stock-" + hashlib.sha256(f"batch-{index}".encode()).hexdigest()
+        row["stock_unrealized_pnl"] = str(Decimal(index + 1) / Decimal(10))
+        row["remaining_pnl_with_put"] = None if index == 0 else str(index)
+        row["reasons"] = ["actual_put_fee_missing"] if index == 0 else ["source_history_not_proven"]
+        rows.append(row)
+    # This fixture explicitly models the actual report's repeated evidence shape;
+    # totals are built by the same financial owner before wire projection.
+    data["rows"] = rows
+    data["assigned_stock_lots"] = rows
+    data["row_count"] = data["matched_count"] = batch_count
+    owner_summary = summarize_lots(rows)
+    data["summary"] = owner_summary
+    data["accounts"] = [{"account": "lx", "summary": owner_summary,
+                         "symbols": [{"symbol": "NVDA", "lots": rows, "summary": owner_summary}]}]
+    assert conservative_json_tokens(response) > MAX_NATIVE_OBSERVATION_TOKENS
+    observed = model_observation("option_positions_read", response)
+    assert observed["ok"] is True
+    assert conservative_json_tokens(observed) <= MAX_NATIVE_OBSERVATION_TOKENS
+    projected = observed["data"]
+    for metric in ("stock_unrealized_pnl", "remaining_pnl_with_put"):
+        actual = projected["summary"]["by_currency"]["USD"][metric]
+        owner = owner_summary["by_currency"]["USD"][metric]
+        assert actual["value"] == owner["value"]
+        assert actual["exact_value"] == owner["exact_value"]
+        assert actual["coverage"] == owner["coverage"]
+        assert actual["basis"] == owner["basis"]
+        account_metric = projected["accounts"][0]["summary"]["by_currency"]["USD"][metric]
+        assert account_metric["value"] == owner["value"]
+    assert projected["coverage"] == data["coverage"]
+    assert projected["query"] == data["query"]
+    assert projected["detail_projection"]["summary_complete"] is True
+    assert projected["detail_projection"]["omitted_count"] == batch_count
+    assert projected["detail_projection"]["detail_query"]["assignment_start_date"] == "2026-01-01"
+    assert "stock_lot_id" in projected["detail_projection"]["narrow_by"]
+    assert projected["detail_projection"]["detail_query"]["stock_lot_id"] == rows[0]["stock_lot_id"]
+    index_count = len(projected["batch_index"])
+    assert 0 < index_count <= min(batch_count, 64)
+    assert projected["batch_index_coverage"] == {
+        "status": "complete" if index_count == batch_count else "partial", "total_count": batch_count,
+        "returned_count": index_count, "omitted_count": batch_count - index_count,
+    }
+    if batch_count <= 34:
+        assert index_count == batch_count
+    assert projected["batch_index"] == [
+        {key: row[key] for key in ("stock_lot_id", "account", "symbol")} for row in rows[:index_count]
+    ]
+    assert "rows" not in projected and "assigned_stock_lots" not in projected
+    assert len(data["rows"]) == batch_count  # no mutation of the operator result

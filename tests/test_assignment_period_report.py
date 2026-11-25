@@ -5,7 +5,7 @@ import pytest
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.positions.assignment_period_report import (
-    _affected, _fx_summary, _resolved_observation, assignment_period, summarize_lots,
+    _affected, _fx_summary, assignment_period, summarize_lots,
 )
 
 
@@ -42,16 +42,6 @@ def test_pending_sale_does_not_pollute_future_lot_or_other_account():
     assert not _affected(row, {'trade_time_ms': 10, 'account': 'lx', 'symbol': 'FUTU'})
     assert not _affected(row, {'trade_time_ms': 30, 'account': 'sy', 'symbol': 'FUTU'})
     assert _affected(row, {'trade_time_ms': None, 'account': 'lx', 'symbol': 'FUTU'})
-
-
-def test_resolution_requires_account_execution_and_economic_scope():
-    sale = {'source_deal_id': 'd', 'account': 'lx', 'futu_account_id': '1', 'symbol': 'FUTU',
-            'broker': '富途', 'currency': 'USD', 'shares': 40, 'price': 10, 'trade_time_ms': 100,
-            'target_stock_lot_id': 'lot', 'stock_event_id': 'sale', 'side': 'sell'}
-    assert _resolved_observation(sale, [sale])
-    assert not _resolved_observation({**sale, 'shares': 41}, [sale])
-    assert not _resolved_observation({**sale, 'account': 'sy'}, [sale])
-    assert not _resolved_observation({**sale, 'futu_account_id': None}, [sale])
 
 
 def test_aggregation_preserves_unrounded_values_and_distinguishes_null_zero():
