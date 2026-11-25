@@ -1,0 +1,133 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.64",
+  "base": {
+    "tag": "v4.6.63",
+    "commit": "7386ff8bb94ce14a3f5955f8c5a429d6c8f58261"
+  },
+  "reviewed_head": "983846d7ae17530e28a2b848aae897053955a617",
+  "commits": [
+    {
+      "sha": "00d5bfee1c89390d7a780a76a91372384d6cb4f9",
+      "subject": "fix(wheel): distinguish quote exclusions from missing candidate evidence"
+    },
+    {
+      "sha": "952f37086ed386424f38ed4fe8a0404aeba40c2f",
+      "subject": "docs: restore historical 4.6.28 release notes"
+    },
+    {
+      "sha": "cdc4f7b0fd46d1d4fd3dc8d786182866f8b73256",
+      "subject": "fix(candidate): retain no-bid staleness precedence"
+    },
+    {
+      "sha": "5ed3e515f4811c7b5f5287c906c46b2ec16a6ceb",
+      "subject": "Merge pull request #1270 from liuxie066/fix/restore-4.6.28-release-notes-20261125"
+    },
+    {
+      "sha": "9af01a13e007971452fbc5523b0438821cd21caa",
+      "subject": "Merge branch 'main' of https://github.com/liuxie066/options-monitor into cindy/cheerful-panini"
+    },
+    {
+      "sha": "ec8b43462d89935a582d3679653b232d1751b26c",
+      "subject": "fix(notify): preserve near-expiry hold evidence in reminders"
+    },
+    {
+      "sha": "3cb43783b7ea20acf1f52f2c406c7a38f11d52b5",
+      "subject": "Merge pull request #1271 from liuxie066/cindy/sincere-hawking"
+    },
+    {
+      "sha": "3822a4c518c969a7830d02e7312733b5eb108c74",
+      "subject": "Merge origin/main into cindy/cheerful-panini"
+    },
+    {
+      "sha": "983846d7ae17530e28a2b848aae897053955a617",
+      "subject": "Merge pull request #1269 from liuxie066/cindy/cheerful-panini"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "补回 4.6.28 遗漏的滚仓刷新和期权生命周期修复说明，恢复历史发布记录。",
+      "commits": [
+        "952f37086ed386424f38ed4fe8a0404aeba40c2f",
+        "5ed3e515f4811c7b5f5287c906c46b2ec16a6ceb"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Wheel 将证据完整且未过期的零买卖价合约归为无当前买盘，正常跳过分支不再误报为数据缺失；简报展示具体缺项、涉及合约数和到期日，并保留有效推荐及真实缺口保护。",
+      "commits": [
+        "00d5bfee1c89390d7a780a76a91372384d6cb4f9",
+        "cdc4f7b0fd46d1d4fd3dc8d786182866f8b73256",
+        "9af01a13e007971452fbc5523b0438821cd21caa",
+        "3822a4c518c969a7830d02e7312733b5eb108c74",
+        "983846d7ae17530e28a2b848aae897053955a617"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "临期低 Delta 持仓提醒保留策略理由、剩余交易日和 Delta，不再因未提供可选截止时刻误报“时间待核实”；真正无法评估的持仓仍保留缺口说明。",
+      "commits": [
+        "ec8b43462d89935a582d3679653b232d1751b26c",
+        "3cb43783b7ea20acf1f52f2c406c7a38f11d52b5"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "952f37086ed386424f38ed4fe8a0404aeba40c2f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1270"
+      ]
+    },
+    {
+      "commit": "5ed3e515f4811c7b5f5287c906c46b2ec16a6ceb",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1270"
+      ]
+    },
+    {
+      "commit": "ec8b43462d89935a582d3679653b232d1751b26c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1271"
+      ]
+    },
+    {
+      "commit": "3cb43783b7ea20acf1f52f2c406c7a38f11d52b5",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1271"
+      ]
+    },
+    {
+      "commit": "00d5bfee1c89390d7a780a76a91372384d6cb4f9",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1269"
+      ]
+    },
+    {
+      "commit": "cdc4f7b0fd46d1d4fd3dc8d786182866f8b73256",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1269"
+      ]
+    },
+    {
+      "commit": "9af01a13e007971452fbc5523b0438821cd21caa",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1269"
+      ]
+    },
+    {
+      "commit": "3822a4c518c969a7830d02e7312733b5eb108c74",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1269"
+      ]
+    },
+    {
+      "commit": "983846d7ae17530e28a2b848aae897053955a617",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1269"
+      ]
+    }
+  ]
+}
