@@ -1518,13 +1518,32 @@ recover preview 必须在构造 writer 前使用既有只读连接；缺库/缺 
 
 事实与责任链：`pipeline_watchlist -> wheel/scanning._candidate_universe -> run_candidate_scan -> evidence_summary_from_decisions -> Wheel snapshot -> daily_decision_brief_renderer`。共用分类器已将 `net_premium_non_positive` 识别为策略拒绝；修复前 Wheel 捕获 `CandidateCalculationError` 后返回 None，丢失 reason/message/metric_value/threshold，导致其被归为数据缺失。Call、Put 共用这一入口。
 
-设计：在该共用入口使用异常 `to_payload()` 保留诊断字段，经现有 scanner 的同步诊断回调交给分类器；每次计算先清空上一条诊断，避免候选间串用；不复制原因分类，不重复计算候选，不修改领域筛选。真正的数据不足仍保留 partial_data/data_unavailable，不以 no_candidate 掩盖。没有通过门槛的候选使用 no_candidate。保持现有 scope、snapshot 和生命周期结构。Daily Brief 将 no_candidate 显示为“当前没有通过门槛的期权”，避免 Put 被写成 Call；partial_data 显示为“部分候选数据不完整，暂未形成推荐”，data_unavailable 与 wheel_candidate_data_unavailable 显示为“候选数据不足，暂无法评估”。保留未知原因原码，避免伪造解释；有可用推荐时仍显示具体合约。
+设计：在该共用入口使用异常 `to_payload()` 保留诊断字段，经现有 scanner 的同步诊断回调交给分类器；每次计算先清空上一条诊断，避免候选间串用；不复制原因分类，不重复计算候选，不修改领域筛选。真正的数据不足仍保留 partial_data/data_unavailable，不以 no_candidate 掩盖。没有通过门槛的候选使用 no_candidate。保持现有 scope、snapshot 和生命周期结构。Daily Brief 将 no_candidate 显示为“当前没有通过门槛的期权”，避免 Put 被写成 Call；partial_data 显示为“部分合约无法评估”，data_unavailable 与 wheel_candidate_data_unavailable 显示为“候选数据不足，暂无法评估”。保留未知原因原码，避免伪造解释；有可用推荐时仍显示具体合约。
 
 实施增量：一次修复覆盖原始异常传递、中文状态映射和相应回归测试。拒绝直接将 partial_data 改成 no_candidate 的下游补丁，也不增加新的状态或诊断存储。
 
 验收：真实计算触发净权利金非正时，Call/Put 均输出策略拒绝且无数据缺口；全部正常拒绝为 no_candidate；共用候选计算阶段中真实缺失单独为 data_unavailable，与正常拒绝混合为 partial_data；保留后续 Wheel 批次经济数据不足的既有优先级；有效候选与拒绝候选并存仍可推荐。Call/Put 均验证真实计算触发的合约不适用仍为 contract_ineligible，不制造数据缺口；连续净权利金拒绝、真实缺失、有效候选核对原始 rule/message/metric_value/threshold 不丢失、不串用。渲染 facade 覆盖 Call/Put 无候选、部分/全部数据不足、已有推荐及未知原因。运行 Wheel scanning、snapshot/tick integration、共用扫描证据与 Daily Brief renderer 的相关测试，检查文档格式和适用 guardrails。
 
 适用边界：修正状态不保证出现交易机会；收益/Delta/波动率门槛保持不变。生产历史消息不回写。
+
+### 数据缺口解释与正常跳过分支
+
+Call/Put 的标的及快照汇总区分正常无需扫描与证据阻塞。明确关闭、等待阶段确认、
+已覆盖/预留、已有 Call/Put 或意图、股份不足等正常跳过不使已完成的其他分支变为
+`partial_data`；配置不匹配、覆盖未知/超额、扫描失败及未知原因仍保留异常语义。
+等待分支保留的原始候选不计入新建议状态。真实部分缺数不能被容量分配或待交收原因覆盖。
+
+新快照记录 `status_policy_version=normal_skips.v1`，在既有内容哈希内绑定状态规则。
+没有该字段的旧快照继续使用原汇总规则验证；不重写历史状态，也不修改历史消息。
+分支保留可选 `candidate_evidence_reason` 和 `candidate_diagnostics`；后者按
+`outcome`（`ineligible` / `unavailable`）、`reason_code`、`expiration` 与
+`contract_count` 记录诊断。合约按原因和到期日去重计数，不跨原因、分支或账户累加。
+原因来自共享候选决定及 Wheel 批次经济计算，不在简报层重算筛选。
+
+Daily Brief 展示具体缺项、合约数和到期日。无当前买盘属于排除说明，真实证据缺口
+属于缺项；有有效建议时继续显示该建议并附诊断，不笼统声称暂停全部建议。
+未记录具体诊断的旧结果明确说明缺项未记录。分组合并比较完整诊断，展示可截断；
+未入选卡片的真实缺口仍通过缺口摘要保留。股票覆盖、策略阈值、容量和排序合同不变。
 
 
 ### Call 覆盖证据的新鲜度

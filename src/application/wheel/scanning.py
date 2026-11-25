@@ -28,6 +28,7 @@ from domain.domain.wheel import (
 )
 from src.application.candidate_models import CandidateBaseValues, CandidateContractInput
 from src.application.candidate_scanning import (
+    candidate_diagnostics_from_decisions,
     CandidateScanConfig,
     CandidateScanDependencies,
     evidence_summary_from_decisions,
@@ -131,6 +132,15 @@ def _coverage_fields(frames: Mapping[str, pd.DataFrame], symbol: str) -> dict[st
     frame = frames.get(symbol)
     coverage = frame.attrs.get("required_data_coverage") if frame is not None else None
     return {"required_data_coverage": coverage} if coverage else {}
+
+
+def _wheel_evaluation_diagnostics(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Project the Wheel economics owner's reasons through the same summary contract."""
+    return candidate_diagnostics_from_decisions([
+        {"accepted": False, "contract_symbol": item.get("contract_symbol"), "normalized_input": item,
+         "rejects": [{"reason": "evidence_unavailable", "metric_value": {"reason_codes": item["reason_codes"]}}]}
+        for item in candidates
+    ])
 
 
 def _scope_coverage(
@@ -506,6 +516,7 @@ def run_wheel_call_scan(
                 continue
             batch = _batch_economics(raw_batch, stock)
             evaluated: list[dict[str, Any]] = []
+            unavailable_candidates: list[dict[str, Any]] = []
             data_unavailable = False
             for candidate in common_candidates_by_symbol.get(symbol, []):
                 multiplier = 0
@@ -536,6 +547,7 @@ def run_wheel_call_scan(
                 item = dict(grant_evaluations.get(str(contracts), {}))
                 if item.get("wheel_candidate_status") == "data_unavailable":
                     data_unavailable = True
+                    unavailable_candidates.append(item)
                     continue
                 if not item.get("accepted"):
                     continue
@@ -559,6 +571,10 @@ def run_wheel_call_scan(
                 decisions=decisions_by_symbol.get(symbol, []),
                 accepted_count=len(common_candidates_by_symbol.get(symbol, [])),
             )
+            base_scope["candidate_diagnostics"] = [
+                *candidate_diagnostics_from_decisions(decisions_by_symbol.get(symbol, [])),
+                *_wheel_evaluation_diagnostics(unavailable_candidates),
+            ]
             evidence_status, evidence_reason = project_evidence_scan_status(
                 evidence=evidence,
                 candidate_count=len(evaluated),
@@ -756,6 +772,7 @@ def run_wheel_put_scan(
             except (TypeError, ValueError):
                 requested_contracts = 0
             evaluated: list[dict[str, Any]] = []
+            unavailable_candidates: list[dict[str, Any]] = []
             data_unavailable = requested_contracts <= 0
             for candidate in common_candidates_by_symbol.get(symbol, []):
                 try:
@@ -782,6 +799,7 @@ def run_wheel_put_scan(
                 item = dict(grant_evaluations.get(str(requested_contracts), {}))
                 if item.get("wheel_candidate_status") == "data_unavailable":
                     data_unavailable = True
+                    unavailable_candidates.append(item)
                     continue
                 if not item.get("accepted"):
                     continue
@@ -814,6 +832,10 @@ def run_wheel_put_scan(
                 decisions=decisions_by_symbol.get(symbol, []),
                 accepted_count=len(common_candidates_by_symbol.get(symbol, [])),
             )
+            base_scope["candidate_diagnostics"] = [
+                *candidate_diagnostics_from_decisions(decisions_by_symbol.get(symbol, [])),
+                *_wheel_evaluation_diagnostics(unavailable_candidates),
+            ]
             evidence_status, evidence_reason = project_evidence_scan_status(
                 evidence=evidence,
                 candidate_count=len(evaluated),

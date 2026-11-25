@@ -513,6 +513,15 @@ def test_shared_calculation_rejection_precedence(status, rule, expected):
                       "metric_value": {"reason_code": rule, "metric_value": -1}, "threshold": 0}
 
 
+def test_no_bid_staleness_overrides_cached_ineligible_classification():
+    reject = audit.calculation_rejection(
+        {"opening_contract_status": "ineligible",
+         "opening_contract_reason_codes": ["option_no_current_bid", "option_ask_missing_or_invalid"]},
+        {"rule": "evidence_unavailable", "metric_value": {"reason_code": "option_snapshot_stale"}},
+    )
+    assert reject["reason"] == "evidence_unavailable"
+
+
 @pytest.mark.parametrize("field,value", [
     ("stage", "other"), ("reason", "policy_rejected"), ("message", "wrong"),
     ("metric_value", {"reason_code": "wrong", "metric_value": 9}), ("threshold", 999),

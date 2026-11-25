@@ -528,6 +528,33 @@ def test_duplicate_wheel_branch_is_not_added_twice() -> None:
     assert "建议｜卖出 2 张" not in message
 
 
+def test_wheel_grouping_compares_full_diagnostics_before_display_truncation():
+    brief = _same_wheel_call_recommendations()
+    brief["wheel_batches"] = brief["wheel_batches"][:2]
+    brief["candidates"] = {}
+    for index, row in enumerate(brief["wheel_batches"]):
+        row["candidate_diagnostics"] = [{"outcome": "unavailable", "reason_code": f"missing-{n}",
+            "expiration": "2027-02-19", "contract_count": 1} for n in range(4)] + [
+            {"outcome": "unavailable", "reason_code": f"distinct-{index}", "expiration": "2027-02-19", "contract_count": 1}]
+    view = build_daily_brief_user_view(brief, delivery_kind="fixed_report",
+        limits={"max_items_per_account": 0}, context=_scheduled_context())
+    assert len(view["wheel_batches"]) == 2
+
+
+def test_wheel_quote_gap_survives_settlement_reason_and_card_budget():
+    brief = _brief()
+    brief["wheel_batches"] = [{"symbol": "NVDA", "direction": "call", "wheel_branch_id": "waiting",
+        "recommended_contracts": 0, "reason_code": "option_close_settlement_pending",
+        "candidate_evidence_reason": "partial_data", "candidate_diagnostics": [
+            *[{"outcome": "ineligible", "reason_code": "option_no_current_bid",
+               "expiration": f"2026-12-{day}", "contract_count": 1} for day in range(20, 25)],
+            {"outcome": "unavailable", "reason_code": "option_ask_missing_or_invalid",
+             "expiration": "2026-12-30", "contract_count": 1}]}]
+    rendered = render_fixed_report(brief, limits={"max_total_items": 1}, context=_scheduled_context())
+    assert "卖价缺失或无效" in rendered
+    assert "2026-12-30" in rendered
+
+
 def test_wheel_recommendation_alert_groups_only_selected_branches() -> None:
     brief = _same_wheel_call_recommendations()
     identities = []
@@ -2447,7 +2474,7 @@ def test_evidence_hold_stays_in_candidate_summary_not_error_reminder() -> None:
     ("reason", "expected"),
     [
         ("no_candidate", "暂无合适合约"),
-        ("partial_data", "候选数据不完整，暂停建议"),
+        ("partial_data", "部分合约无法评估"),
         ("data_unavailable", "候选数据不足，无法评估"),
         ("wheel_candidate_data_unavailable", "候选数据不足，无法评估"),
         ("unknown_wheel_reason", "unknown_wheel_reason"),

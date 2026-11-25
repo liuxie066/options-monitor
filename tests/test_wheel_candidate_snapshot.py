@@ -85,6 +85,43 @@ def _batch(*, final: bool = True) -> dict:
     }
 
 
+@pytest.mark.parametrize("reason,expected", [
+    ("wheel_capacity_fully_committed_or_reserved", "no_candidate"),
+    ("wheel_disabled", "no_candidate"),
+    ("wheel_config_mismatch", "partial_data"),
+    ("coverage_quantity_unavailable", "partial_data"),
+])
+def test_snapshot_normal_skips_and_legacy_status_validation(tmp_path, reason, expected):
+    from src.application.wheel.candidate_snapshot import validate_wheel_candidate_snapshot
+    scopes = [_scope(candidate_count=0), {"symbol": "AMD", "direction": "call",
+              "status": "not_applicable", "reason_code": reason, "candidate_count": 0}]
+    payload = _seal(tmp_path, scope_results=scopes, batches=[])
+    assert payload["opening_status"] == expected
+    assert load_wheel_candidate_snapshot(base=tmp_path, run_id="run-1", account="lx") == payload
+    legacy = {k: v for k, v in payload.items() if k not in {"status_policy_version", "content_sha256"}}
+    legacy["opening_status"] = "partial_data"
+    legacy["content_sha256"] = canonical_sha256(legacy)
+    validate_wheel_candidate_snapshot(legacy, expected_run_id="run-1", expected_account="lx")
+
+
+def test_snapshot_rejects_invalid_diagnostic_count(tmp_path):
+    batch = _batch()
+    batch["candidate_diagnostics"] = [{"outcome": "unavailable", "reason_code": "ask_missing_or_invalid",
+                                      "expiration": "2026-05-06", "contract_count": True}]
+    with pytest.raises(WheelCandidateSnapshotError, match="diagnostics"):
+        _seal(tmp_path, scope_results=[_scope()], batches=[batch])
+
+
+def test_normal_waiting_batch_raw_candidates_do_not_create_opening_opportunity(tmp_path):
+    batch = {**_batch(final=False), "candidate_status": "not_applicable", "reason_code": "wheel_call_open"}
+    payload = _seal(tmp_path, scope_results=[
+        {**_scope(candidate_count=0), "status": "not_applicable", "reason_code": "wheel_call_open"},
+        {**_scope(candidate_count=0), "symbol": "AMD", "reason_code": "no_candidate"},
+    ], batches=[batch])
+    assert batch["raw_candidates"]
+    assert payload["opening_status"] == "no_candidate"
+
+
 @pytest.mark.parametrize("detail", [None, "Required-data scan retained covered expiration rows."])
 @pytest.mark.parametrize("has_candidate", [True, False])
 def test_wheel_status_detail_roundtrips_without_changing_candidate_decisions(

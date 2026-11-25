@@ -24,6 +24,22 @@ from src.application.scan_sell_put import run_sell_put_scan
 _SCAN_NOW_UTC = datetime(2026, 4, 1, 15, 0, tzinfo=timezone.utc)
 
 
+@pytest.mark.parametrize("encoded", [False, True])
+def test_candidate_reason_codes_survive_provider_and_csv_boundary(encoded):
+    from src.application.candidate_models import CandidateContractInput
+    from src.application.candidate_scanning import calculation_rejection, candidate_diagnostics_from_decisions
+    codes = ["option_no_current_bid", "option_ask_missing_or_invalid"]
+    row = _nvda_put_row(opening_contract_status="ineligible", opening_contract_reason_codes=str(codes) if encoded else codes)
+    normalized = CandidateContractInput.from_row(row, mode="put").to_gate_payload()
+    assert normalized["opening_contract_reason_codes"] == codes
+    reject = calculation_rejection(normalized, {"rule": "contract_ineligible", "metric_value": {
+        "status": "ineligible", "reason_codes": normalized["opening_contract_reason_codes"]}})
+    record = {"opening_decision": {"accepted": False, "normalized_input": normalized, "rejects": [reject]}}
+    diagnostics = candidate_diagnostics_from_decisions([record, record])
+    assert {item["reason_code"] for item in diagnostics} == set(codes)
+    assert {item["contract_count"] for item in diagnostics} == {1}
+
+
 def _nvda_put_row(**overrides) -> dict:
     row = {
         "symbol": "NVDA",

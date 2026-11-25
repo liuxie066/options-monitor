@@ -1208,8 +1208,10 @@ def _load_wheel_snapshot_family(
         direction = _text(batch.get("direction") or "call").lower()
         gap_scope = {"scope": "strategy", "strategy_family": "wheel", "symbol": symbol,
                      "candidate_owner": "wheel", "direction": direction, "wheel_branch_id": branch_id}
-        if batch.get("candidate_status") in {"failed", "unavailable", "incomplete"} or batch.get("reason_code") == "partial_data":
-            data_gaps.append({**gap_scope, "reason": batch.get("reason_code") or "wheel_scan_failed"})
+        evidence_reason = batch.get("candidate_evidence_reason")
+        evidence_gap = evidence_reason if evidence_reason in {"partial_data", "data_unavailable", "wheel_candidate_data_unavailable"} else None
+        if batch.get("candidate_status") in {"failed", "unavailable", "incomplete"} or batch.get("reason_code") == "partial_data" or evidence_reason in {"partial_data", "data_unavailable", "wheel_candidate_data_unavailable"}:
+            data_gaps.append({**gap_scope, "reason": evidence_gap or batch.get("reason_code") or "wheel_scan_failed"})
         final = batch.get("final_candidate")
         final = dict(final) if isinstance(final, Mapping) else None
         observation_candidate = next((
@@ -1240,6 +1242,9 @@ def _load_wheel_snapshot_family(
             "lifecycle_status": _text(batch.get("lifecycle_status")),
             "status": _text(batch.get("phase") or batch.get("candidate_status")),
             "phase": _text(batch.get("phase")),
+            **({"candidate_diagnostics": batch["candidate_diagnostics"]}
+               if "candidate_diagnostics" in batch else {}),
+            **({"candidate_evidence_reason": evidence_reason} if evidence_reason else {}),
             "reason_code": _text(batch.get("reason_code")) or None,
             "reason_codes": list(batch.get("reason_codes") or []),
             "recommended_contracts": int(batch.get("granted_contracts") or 0) if price_available else 0,

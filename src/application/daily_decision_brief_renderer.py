@@ -1818,9 +1818,12 @@ def _group_wheel_batches(
             (
                 _lower(row.get("phase")), _lower(row.get("status")),
                 _lower(row.get("reason_code")),
+                _lower(row.get("candidate_evidence_reason")),
                 tuple(sorted(set(row.get("reason_codes") or []))),
                 _lower((row.get("coverage") or {}).get("status")),
                 tuple(sorted(set((row.get("coverage") or {}).get("reason_codes") or []))),
+                _wheel_diagnostic_signature(row),
+                tuple(_candidate_required_data_details(row)),
             )
             for row in members
         }
@@ -2045,6 +2048,7 @@ def _wheel_batch_views(
                 details.append("状态：" + "；".join(dict.fromkeys(
                     _wheel_reason_text(reason) for reason in reasons
                 )))
+        details.extend(_wheel_candidate_diagnostic_details(row))
         details.extend(_candidate_required_data_details(row))
         out.append(
             {
@@ -2057,6 +2061,64 @@ def _wheel_batch_views(
             }
         )
     return out
+
+
+def _wheel_diagnostic_signature(row: Mapping[str, Any]) -> tuple[Any, ...] | None:
+    diagnostics = row.get("candidate_diagnostics")
+    if not isinstance(diagnostics, list):
+        return None
+    return tuple(sorted((str(item.get("outcome") or ""), str(item.get("reason_code") or ""),
+                         str(item.get("expiration") or ""), str(item.get("contract_count")))
+                        for item in diagnostics if isinstance(item, Mapping)))
+
+
+def _wheel_candidate_diagnostic_details(row: Mapping[str, Any]) -> list[str]:
+    diagnostics = row.get("candidate_diagnostics")
+    if not isinstance(diagnostics, list) or not diagnostics:
+        if row.get("reason_code") in {"partial_data", "data_unavailable", "wheel_candidate_data_unavailable"} and not row.get("required_data_coverage"):
+            return ["数据说明：本次记录未提供具体缺项"]
+        return []
+    labels = {
+        "option_no_current_bid": "无当前买盘，已排除",
+        "option_ask_missing_or_invalid": "卖价缺失或无效",
+        "option_bid_missing_or_invalid": "买价缺失或无效",
+        "bid_missing_or_invalid": "买价缺失或无效",
+        "ask_missing_or_invalid": "卖价缺失或无效",
+        "option_snapshot_stale": "期权报价过期",
+        "underlier_observation_unavailable": "正股行情不可用",
+        "option_snapshot_identity_mismatch": "期权行情身份不符",
+        "option_multiplier_conflict": "合约乘数冲突",
+        "term_matched_rv_unavailable": "期限匹配历史波动率不可用",
+        "term_matched_rv_missing_or_invalid": "期限匹配历史波动率缺失或无效",
+        "implied_volatility_missing_or_invalid": "隐含波动率缺失或无效",
+        "risk_delta_unavailable": "Delta 数据不可用",
+        "risk_earnings_unavailable": "财报事件数据不可用",
+        "stock_exit_fee_unavailable": "卖股费用不可用",
+        "stock_assignment_fee_unavailable": "指派买股费用不可用",
+        "remaining_stock_cost_basis_unavailable": "剩余股票成本不可用",
+        "realized_sell_put_net_pnl_unavailable": "历史 Put 净收益不可用",
+        "realized_prior_call_net_pnl_unavailable": "历史 Call 净收益不可用",
+        "realized_prior_stock_sale_net_pnl_unavailable": "历史卖股净收益不可用",
+        "currency_unavailable": "币种缺失",
+        "currency_mismatch": "币种不一致",
+    }
+    details = []
+    side = str(row.get("direction") or "call").title()
+    for item in sorted(diagnostics, key=lambda item: 0 if isinstance(item, Mapping) and item.get("outcome") == "unavailable" else 1):
+        if not isinstance(item, Mapping):
+            continue
+        count = item.get("contract_count")
+        if type(count) is not int or count <= 0:
+            continue
+        reason = str(item.get("reason_code") or "")
+        label = labels.get(reason, reason or "原因未记录")
+        prefix = "缺项" if item.get("outcome") == "unavailable" else "排除说明"
+        expiration = str(item.get("expiration") or "到期日未记录")
+        details.append(f"{prefix}：{expiration} · {count} 份 {side} · {label}")
+    details = list(dict.fromkeys(details))
+    if len(details) > 4:
+        return [*details[:4], f"数据说明：另有 {len(details) - 4} 项诊断，详见扫描快照；各原因数量不相加"]
+    return details
 
 
 def _wheel_gap_reminders(brief: Mapping[str, Any]) -> list[str]:
@@ -2078,6 +2140,8 @@ def _wheel_gap_reminders(brief: Mapping[str, Any]) -> list[str]:
         reasons = [*(row.get("reason_codes") or []), row.get("reason_code"),
                    *(coverage.get("reason_codes") or [])]
         subject = f"{_upper(row.get('symbol')) or '未知标的'} Wheel {str(row.get('direction') or 'call').title()}"
+        if row.get("candidate_evidence_reason") in gap_reasons:
+            reasons.append(row["candidate_evidence_reason"])
         for reason in reasons:
             if isinstance(reason, str) and reason in gap_reasons:
                 grouped.setdefault(reason, set()).add(subject)
@@ -2087,7 +2151,15 @@ def _wheel_gap_reminders(brief: Mapping[str, Any]) -> list[str]:
         if len(subjects) > 3:
             shown += f"（另有 {len(subjects) - 3} 个标的/方向，共 {len(subjects)} 个）"
         reminders.append("缺口摘要：" + shown + " · " + _wheel_reason_text(reason))
-    return reminders
+    # Branch cards share the account display quota; real scan gaps must remain
+    # visible even when allocation/settlement replaces their primary reason.
+    for row in brief.get("wheel_batches") or []:
+        if not isinstance(row, Mapping):
+            continue
+        for detail in _wheel_candidate_diagnostic_details(row):
+            if detail.startswith("缺项："):
+                reminders.append(f"{_upper(row.get('symbol'))} Wheel {str(row.get('direction') or 'call').title()} · {detail}")
+    return list(dict.fromkeys(reminders))
 
 
 def _wheel_reason_text(value: Any) -> str:
@@ -2118,7 +2190,7 @@ def _wheel_reason_text(value: Any) -> str:
         "share_capacity_fact_unavailable": "账户净覆盖额度未核实，仅供观察",
         "share_capacity_oversubscribed": "Short Call 覆盖超过持股，高风险",
         "no_candidate": "暂无合适合约",
-        "partial_data": "候选数据不完整，暂停建议",
+        "partial_data": "部分合约无法评估",
         "wheel_scan_failed": "Wheel 扫描失败",
         "wheel_scan_prerequisite_unavailable": "扫描前置数据不可用",
         "wheel_coverage_facts_unavailable": "股票覆盖数据不可用",
