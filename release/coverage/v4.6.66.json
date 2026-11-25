@@ -5,7 +5,7 @@
     "tag": "v4.6.65",
     "commit": "3b56528c24444c3f4409b8b3baabd8ab74954652"
   },
-  "reviewed_head": "69da7eec63c2f262624e78e5364a473c010b28cb",
+  "reviewed_head": "1f9597f4aed50f2644a6448ad58b47f2c255db59",
   "commits": [
     {
       "sha": "472b116b899db8f130766b659c32dce20dcc292e",
@@ -28,8 +28,28 @@
       "subject": "fix(notify): suppress hold-only position reminders"
     },
     {
+      "sha": "9e3a961083552635fdfe34a1317e6b5644ed7ea8",
+      "subject": "fix(positions): preserve assignment evidence and complete PnL summaries"
+    },
+    {
       "sha": "69da7eec63c2f262624e78e5364a473c010b28cb",
       "subject": "Merge pull request #1279 from liuxie066/cindy/vigilant-colden"
+    },
+    {
+      "sha": "61a5e1da513b79f80c74d828f91c78ae81611b57",
+      "subject": "chore: release 4.6.66"
+    },
+    {
+      "sha": "2fd66471c4f5763a7b54fc3e7a231146a7c409f6",
+      "subject": "chore(merge): integrate latest main before assignment fix delivery"
+    },
+    {
+      "sha": "8aede707bb24fb535e266b3350e7f58c7c30ccd4",
+      "subject": "Merge pull request #1280: assignment evidence and PnL fixes"
+    },
+    {
+      "sha": "1f9597f4aed50f2644a6448ad58b47f2c255db59",
+      "subject": "chore(release): integrate confirmed assignment fixes"
     }
   ],
   "release_notes": [
@@ -38,6 +58,16 @@
       "text": "支持查询指定期间 Put 指派批次的当前盈亏，展示原币和人民币汇总、归属及数据覆盖情况，CLI 和 Bot 复用只读查询。",
       "commits": [
         "b31f140d10d6cd63b363fc12c5f16170825cd87e"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Put 接货期间查询保留完整账户汇总及批次下钻，统一报价与盈亏状态；复用账本实际费用分配，严格校验报价币种和时间，并将卖出归属冲突、共享来源账户矛盾及读取缺口明确标为待核实。",
+      "commits": [
+        "9e3a961083552635fdfe34a1317e6b5644ed7ea8",
+        "2fd66471c4f5763a7b54fc3e7a231146a7c409f6",
+        "8aede707bb24fb535e266b3350e7f58c7c30ccd4",
+        "1f9597f4aed50f2644a6448ad58b47f2c255db59"
       ]
     },
     {
@@ -58,7 +88,12 @@
       ]
     }
   ],
-  "no_release_note": [],
+  "no_release_note": [
+    {
+      "commit": "61a5e1da513b79f80c74d828f91c78ae81611b57",
+      "reason": "同一目标版本在并行主分支合入前的发布元数据准备；最终发布清单已刷新，不新增业务行为。"
+    }
+  ],
   "design_evidence": [
     {
       "commit": "472b116b899db8f130766b659c32dce20dcc292e",
@@ -94,6 +129,36 @@
       "commit": "69da7eec63c2f262624e78e5364a473c010b28cb",
       "references": [
         "docs/OPTION_NOTIFICATION_EXPERIENCE_PRD.md"
+      ]
+    },
+    {
+      "commit": "9e3a961083552635fdfe34a1317e6b5644ed7ea8",
+      "references": [
+        "docs/ASSIGNED_STOCK_RETURN_DESIGN.md"
+      ]
+    },
+    {
+      "commit": "61a5e1da513b79f80c74d828f91c78ae81611b57",
+      "references": [
+        "docs/RELEASE_PROCESS.md"
+      ]
+    },
+    {
+      "commit": "2fd66471c4f5763a7b54fc3e7a231146a7c409f6",
+      "references": [
+        "docs/ASSIGNED_STOCK_RETURN_DESIGN.md"
+      ]
+    },
+    {
+      "commit": "8aede707bb24fb535e266b3350e7f58c7c30ccd4",
+      "references": [
+        "docs/ASSIGNED_STOCK_RETURN_DESIGN.md"
+      ]
+    },
+    {
+      "commit": "1f9597f4aed50f2644a6448ad58b47f2c255db59",
+      "references": [
+        "docs/ASSIGNED_STOCK_RETURN_DESIGN.md"
       ]
     }
   ]
