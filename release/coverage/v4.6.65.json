@@ -1,0 +1,137 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.65",
+  "base": {
+    "tag": "v4.6.64",
+    "commit": "2f319b35682bef5c0e684d927cd65d54d5ecc662"
+  },
+  "reviewed_head": "828074c9a8b73b338a79edbf523e1ddcd10b41df",
+  "commits": [
+    {
+      "sha": "ed394e72de5156d780e3b36b36f05322bbe362a1",
+      "subject": "fix(wheel): retain hidden-card gaps and freshness reasons"
+    },
+    {
+      "sha": "d45d619d50e400368b1128dc18fba8a27af161bf",
+      "subject": "fix(group-query-bot): reject generic non-advice coverage disclaimers"
+    },
+    {
+      "sha": "907191a26a03aad1d5fd105b9add1478e8bfc5fb",
+      "subject": "fix(code-health): preserve Unicode paths in Seatbelt profiles"
+    },
+    {
+      "sha": "259c17c0e3cde9e27736f1481bb13803dc7a9ccd",
+      "subject": "fix(wheel): bound repeated diagnostics and verify additive reasons"
+    },
+    {
+      "sha": "07800ae3c6fa0d487a841edb77c2c9de8728738b",
+      "subject": "Merge pull request #1273 from liuxie066/fix/wheel-diagnostic-evidence-20261125"
+    },
+    {
+      "sha": "50e26b9f9199fabbd336d1fd78df7cfb66305427",
+      "subject": "chore(group-query-bot): synchronize verified Wheel fixes from main"
+    },
+    {
+      "sha": "cc5c4edd0072a72212b3f9ce6a0a115472e0c24e",
+      "subject": "Merge pull request #1274 from liuxie066/codex/health-fix-7c502a3b4eed2be9"
+    },
+    {
+      "sha": "5bc86cb15345f207e628621babe07a547be6f9f3",
+      "subject": "chore(code-health): synchronize verified business fixes from main"
+    },
+    {
+      "sha": "828074c9a8b73b338a79edbf523e1ddcd10b41df",
+      "subject": "Merge pull request #1275 from liuxie066/fix/code-health-unicode-sandbox-20261125"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Wheel 隐藏卡片仍保留历史缺项与截断说明，批量重复说明按标的汇总；报价新鲜度诊断保留具体原因，完整双零报价继续按无当前买盘处理。",
+      "commits": [
+        "ed394e72de5156d780e3b36b36f05322bbe362a1",
+        "259c17c0e3cde9e27736f1481bb13803dc7a9ccd",
+        "07800ae3c6fa0d487a841edb77c2c9de8728738b",
+        "50e26b9f9199fabbd336d1fd78df7cfb66305427",
+        "5bc86cb15345f207e628621babe07a547be6f9f3"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "群聊覆盖检查不再把“不构成投资建议”等通用免责声明当作已经说明证据不足，缺少实际覆盖说明时触发改写或安全回退。",
+      "commits": [
+        "d45d619d50e400368b1128dc18fba8a27af161bf",
+        "cc5c4edd0072a72212b3f9ce6a0a115472e0c24e",
+        "5bc86cb15345f207e628621babe07a547be6f9f3"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Code health 修复中文等非 ASCII 路径导致的沙箱验证失败，保留目录外写入和网络访问限制。",
+      "commits": [
+        "907191a26a03aad1d5fd105b9add1478e8bfc5fb",
+        "828074c9a8b73b338a79edbf523e1ddcd10b41df"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "ed394e72de5156d780e3b36b36f05322bbe362a1",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1273"
+      ]
+    },
+    {
+      "commit": "d45d619d50e400368b1128dc18fba8a27af161bf",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1274"
+      ]
+    },
+    {
+      "commit": "907191a26a03aad1d5fd105b9add1478e8bfc5fb",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1275"
+      ]
+    },
+    {
+      "commit": "259c17c0e3cde9e27736f1481bb13803dc7a9ccd",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1273"
+      ]
+    },
+    {
+      "commit": "07800ae3c6fa0d487a841edb77c2c9de8728738b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1273"
+      ]
+    },
+    {
+      "commit": "50e26b9f9199fabbd336d1fd78df7cfb66305427",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1273",
+        "https://github.com/liuxie066/options-monitor/pull/1274"
+      ]
+    },
+    {
+      "commit": "cc5c4edd0072a72212b3f9ce6a0a115472e0c24e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1274"
+      ]
+    },
+    {
+      "commit": "5bc86cb15345f207e628621babe07a547be6f9f3",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1273",
+        "https://github.com/liuxie066/options-monitor/pull/1274",
+        "https://github.com/liuxie066/options-monitor/pull/1275"
+      ]
+    },
+    {
+      "commit": "828074c9a8b73b338a79edbf523e1ddcd10b41df",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1275"
+      ]
+    }
+  ]
+}
