@@ -49,7 +49,20 @@ def test_catalog_and_scene_preserve_all_baseline_input_constraints() -> None:
     # Only schema description annotations are excluded; names, defaults and
     # every validation keyword remain.
     catalog = tools.tool_descriptions(list(AGENT_TOOL_REGISTRY))
-    assert _constraint_fingerprint(catalog) == "b49e8eec36523646d5dec10b5cb60848ed39ffc4372a894f180a3c11f08eb19b"
+    assert _constraint_fingerprint(catalog) == "d83ea595b77ad4c9b77c3db214a992777b3e7735853d263e065641cfc5ad0f63"
+    # Independent additive-change proof: removing only the four new cohort
+    # selectors exactly reproduces every prior tool constraint/default.
+    baseline = deepcopy(catalog)
+    positions_schema = next(item["input_schema"] for item in baseline if item["name"] == "option_positions_read")
+    additions = {
+        "assignment_year": {"type": "integer", "minimum": 1, "maximum": 9999},
+        "assignment_month": {"type": "string", "pattern": r"^\d{4}-(0[1-9]|1[0-2])$"},
+        "assignment_start_date": {"type": "string", "format": "date"},
+        "assignment_end_date": {"type": "string", "format": "date"},
+    }
+    for name, expected in additions.items():
+        assert _without_descriptions(positions_schema["properties"].pop(name)) == expected
+    assert _constraint_fingerprint(baseline) == "b49e8eec36523646d5dec10b5cb60848ed39ffc4372a894f180a3c11f08eb19b"
     contract = ExecutionContract("test", "test", "om_chat", "eval", {"user_message": "status"}, {}, {})
     descriptions = build_scene_manifest(contract, "test").tool_descriptions
     wire = [{key: item[key] for key in ("name", "description", "input_schema")} for item in descriptions]
@@ -59,7 +72,8 @@ def test_catalog_and_scene_preserve_all_baseline_input_constraints() -> None:
     assert [item for item in wire if item["name"] != "option_positions_read"] == [
         item for item in canonical if item["name"] != "option_positions_read"]
     positions = next(item for item in wire if item["name"] == "option_positions_read")
-    assert positions["input_schema"]["properties"]["action"]["enum"] == ["events"]
+    assert positions["input_schema"]["properties"]["action"]["enum"] == ["events", "assigned-stock"]
+    assert set(additions) <= set(positions["input_schema"]["properties"])
 
 
 def test_catalog_and_actual_scene_stay_within_measured_definition_budgets() -> None:

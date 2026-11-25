@@ -247,13 +247,14 @@ def test_host_revocation_after_tool_read_blocks_answer_and_outbox(monkeypatch, t
         assert conn.execute("SELECT COUNT(*) FROM bot_reply_outbox").fetchone()[0] == 0
 
 
-def test_scene_only_exposes_event_fields(monkeypatch, tmp_path):
+def test_scene_exposes_events_and_assignment_cohort_fields(monkeypatch, tmp_path):
     _configs, fixed = _scope(tmp_path, monkeypatch, ["us", "hk"])
     description = next(item for item in build_scene_manifest(_contract(fixed), "scene").tool_descriptions
                        if item["name"] == "option_positions_read")
     fields = set(description["input_schema"]["properties"])
     assert fields == {"config_key", "action", "broker", "account", "limit", "cursor", "include_total",
-                      "position_effect", "symbol", "option_type", "strike", "exp"}
+                      "position_effect", "symbol", "option_type", "strike", "exp",
+                      "assignment_year", "assignment_month", "assignment_start_date", "assignment_end_date", "refresh_quotes"}
     assert description["default_input"]["action"] == "events"
     assert all(example["input"]["action"] == "events" for example in description["examples"])
 
@@ -459,3 +460,23 @@ def test_missing_account_still_requires_schema_input(monkeypatch, tmp_path):
     description = next(t for t in build_scene_manifest(request, "missing-account").tool_descriptions
                        if t["name"] == "trade_attribution_read")
     assert "account" in description["input_schema"]["required"]
+
+
+def test_scene_assignment_period_keeps_cross_market_account_authority(monkeypatch, tmp_path):
+    _configs, fixed = _scope(tmp_path, monkeypatch, ["us", "hk"])
+    payload, error = tools.build_tool_payload(
+        "option_positions_read", {"config_key": "us", "action": "assigned-stock", "assignment_year": 2026},
+        fixed_input=fixed,
+    )
+    assert error is None, error
+    assert payload["assignment_year"] == 2026 and payload["status"] == "all"
+    assert "as_of_ms" not in payload
+    rejected, error = tools.build_tool_payload(
+        "option_positions_read", {"config_key": "us", "action": "assigned-stock", "assignment_year": 2026},
+        fixed_input={**fixed, "read_markets": ["us"]},
+    )
+    assert rejected is None and error
+    rejected, error = tools.build_tool_payload(
+        "option_positions_read", {"config_key": "us", "action": "assigned-stock"}, fixed_input=fixed,
+    )
+    assert rejected is None and error

@@ -80,8 +80,11 @@ def build_tool_payload(
         if value is not None
     }
     payload.update(explicit_payload)
-    if tool_name == "option_positions_read" and fixed_input and fixed_input.get("read_generation") and payload.get("action") != "events":
-        return None, "Bot option_positions_read only permits action=events"
+    assignment_period_read = tool_name == "option_positions_read" and payload.get("action") == "assigned-stock" and any(
+        name in payload for name in ("assignment_year", "assignment_month", "assignment_start_date", "assignment_end_date")
+    )
+    if tool_name == "option_positions_read" and fixed_input and fixed_input.get("read_generation") and payload.get("action") != "events" and not assignment_period_read:
+        return None, "Bot option_positions_read permits events or assigned-stock with an assignment period"
     for name in fields:
         if name not in trusted_fixed:
             continue
@@ -142,7 +145,7 @@ def build_tool_payload(
                 needs_account_scope, needs_accounts_scope = False, True
         elif not payload.get("accounts"):
             return None, "select authorized accounts before reading portfolio data"
-    account_wide_performance = tool_name == "option_performance_report" and bool(trusted_fixed.get("read_generation"))
+    account_wide_performance = (tool_name == "option_performance_report" or assignment_period_read) and bool(trusted_fixed.get("read_generation"))
     if tool_name == "receipt_read" or needs_account_scope or needs_nested_account_scope or needs_accounts_scope or dual_market_events or account_wide_performance:
         from src.application.account_config import accounts_from_config, normalize_account_label
         from src.application.agent_tool_config import load_runtime_config
@@ -194,7 +197,7 @@ def build_tool_payload(
             if nested_account not in allowed or (needs_account_scope and nested_account != account):
                 return None, "query.account is outside or conflicts with the configured scope"
             payload["query"] = {**nested_query, "account": nested_account}
-    if tool_name == "option_performance_report" and trusted_fixed.get("read_generation"):
+    if account_wide_performance:
         # The canonical report is account-wide; config_key never filters trades
         # by instrument market. Prove both market/account grants before reading.
         if set(trusted_fixed.get("read_markets") or ()) != {"us", "hk"}:
