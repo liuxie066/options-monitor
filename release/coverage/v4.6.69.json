@@ -1,0 +1,347 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.69",
+  "base": {
+    "tag": "v4.6.68",
+    "commit": "0f103aec31f8d36838bee94b0801d0cfb40c895c"
+  },
+  "reviewed_head": "d904910687daa7e9c376d1d3502af9d8c5d358db",
+  "commits": [
+    {
+      "sha": "c1d705196ebe18001428ae77fd45c5277edecb19",
+      "subject": "fix: share qualified closed-market stock valuation"
+    },
+    {
+      "sha": "f94695756314dc1abb039043973f49f28773281b",
+      "subject": "fix: align assignment period dates with Shanghai time"
+    },
+    {
+      "sha": "467f92870c2fb65138ebc3d4df763588261bd579",
+      "subject": "fix(brief): remove redundant candidate explanation text"
+    },
+    {
+      "sha": "45040a327013e69b35251bac7d52a6cb56cc3e4a",
+      "subject": "test(positions): provide complete quote evidence in gateway fixtures"
+    },
+    {
+      "sha": "4f0b08cd0826523c08275c36fe20b03ba3ef9bce",
+      "subject": "Merge pull request #1289: qualify stock valuation and assignment dates"
+    },
+    {
+      "sha": "4105645da35a9e5f1c1adf70660f8069b5e5dbad",
+      "subject": "fix(funds): reconcile pending cash by currency"
+    },
+    {
+      "sha": "d54e677c61a37a8b5d7cf28e239e3a6be03a18b6",
+      "subject": "fix(wheel): block recommendations for unresolved call batch occupancy"
+    },
+    {
+      "sha": "6440694e00f05cc40d165c6924bf6a99c7f777ea",
+      "subject": "Merge remote-tracking branch 'origin/main' into cindy/fix-sy-wheel-data"
+    },
+    {
+      "sha": "64e6172a6a60509fa5166239006e8f84a17ef9e2",
+      "subject": "test(funds): isolate cache contract provider"
+    },
+    {
+      "sha": "6aed3a543d21f36b60b7d303f1b6821ac16cd52a",
+      "subject": "test(funds): cover multi-currency pending brief"
+    },
+    {
+      "sha": "04776fb58829f9e1f53ae2be6c8722a9d75b91fd",
+      "subject": "test(wheel): isolate injected cash provider from plugin resolution"
+    },
+    {
+      "sha": "4626d3c11386ef09a8cdac1fe698c47ac9fc05e7",
+      "subject": "fix(funds): reconcile adjustments with final cash snapshot"
+    },
+    {
+      "sha": "b939da216243814dc1b358449832715a6ee74542",
+      "subject": "Merge branch 'main' into cindy/epic-mclean"
+    },
+    {
+      "sha": "c20beff3f863da8990267b5a1e8ab188524539a7",
+      "subject": "test(wheel): isolate injected cash provider from plugin setup"
+    },
+    {
+      "sha": "671a249a156b57c8724de36ada1c5f535927eb4b",
+      "subject": "fix(review): preserve evidence and identity across audited boundaries"
+    },
+    {
+      "sha": "bd64aa6a883e881cb0a38f579ebb3f6881b77d15",
+      "subject": "Merge pull request #1290 from liuxie066/cindy/epic-mclean"
+    },
+    {
+      "sha": "fdf2a7d846ccb911baebc686bc5ca9767cecd4a9",
+      "subject": "Merge branch 'main' into cindy/multi-currency-assignment"
+    },
+    {
+      "sha": "ad56a0f7ba33d5113eb1702c74f550e2ceb6d1f1",
+      "subject": "Merge pull request #1292 from liuxie066/cindy/multi-currency-assignment"
+    },
+    {
+      "sha": "b94952949a5297582949799cc311cfc9f322576b",
+      "subject": "Merge final delivery baseline ad56a0f and deduplicate cash fixture"
+    },
+    {
+      "sha": "eb808f3aa59111b455caebb642b06fcdce086c89",
+      "subject": "Merge pull request #1291 from liuxie066/cindy/fix-sy-wheel-data"
+    },
+    {
+      "sha": "6c3db95e24ffe19063c5ed391060e688a6f79ec9",
+      "subject": "merge(main): integrate verified brief and wheel fixes into audit PR"
+    },
+    {
+      "sha": "d904910687daa7e9c376d1d3502af9d8c5d358db",
+      "subject": "Merge pull request #1293 from liuxie066/cindy/vigilant-dijkstra"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "简报移除普通候选净价档位和 Wheel Call 采集时间的冗余说明，保留排序依据与报价可用性判断。",
+      "commits": [
+        "467f92870c2fb65138ebc3d4df763588261bd579",
+        "b939da216243814dc1b358449832715a6ee74542",
+        "bd64aa6a883e881cb0a38f579ebb3f6881b77d15"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "在途资金按币种分别对账，并以最后完整资金快照撤回已经到账的补计，避免重复增加额度；未换算的不同币种金额不直接相加。",
+      "commits": [
+        "4105645da35a9e5f1c1adf70660f8069b5e5dbad",
+        "4626d3c11386ef09a8cdac1fe698c47ac9fc05e7",
+        "fdf2a7d846ccb911baebc686bc5ca9767cecd4a9",
+        "ad56a0f7ba33d5113eb1702c74f550e2ceb6d1f1"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "未归属 Call 可能跨多个接股批次时，暂停受影响批次的新 Wheel 建议与意图；已确认普通 CC 沿用既有归属证明，撤销确认后重新评估。",
+      "commits": [
+        "d54e677c61a37a8b5d7cf28e239e3a6be03a18b6",
+        "6440694e00f05cc40d165c6924bf6a99c7f777ea",
+        "b94952949a5297582949799cc311cfc9f322576b",
+        "eb808f3aa59111b455caebb642b06fcdce086c89"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "持仓建议启用但来源缺失或无效时，保留证据不足状态，避免展示为零条建议；关闭该功能时不读取来源，有效空结果仍正常处理。",
+      "commits": [
+        "671a249a156b57c8724de36ada1c5f535927eb4b",
+        "6c3db95e24ffe19063c5ed391060e688a6f79ec9",
+        "d904910687daa7e9c376d1d3502af9d8c5d358db"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "群 Call 上滚保留真实不可评估原因，移仓候选行情缺失时区分部分评估与完整零结果；公开 Delta 条件证据保留实际筛选下限。",
+      "commits": [
+        "671a249a156b57c8724de36ada1c5f535927eb4b",
+        "6c3db95e24ffe19063c5ed391060e688a6f79ec9",
+        "d904910687daa7e9c376d1d3502af9d8c5d358db"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "微信入站上下文刷新保持既有通知收件人身份，其他获准发送者不能改写绑定；Code health 关闭问题前重新核对讨论与任务归属，避免旧结论关闭已变化的问题。",
+      "commits": [
+        "671a249a156b57c8724de36ada1c5f535927eb4b",
+        "6c3db95e24ffe19063c5ed391060e688a6f79ec9",
+        "d904910687daa7e9c376d1d3502af9d8c5d358db"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Linux 安装说明补齐启动前的凭据绑定文件安装；环境修复 CLI 遵循配置加载契约，持仓平仓 JSON 输出不再混入文本前缀。",
+      "commits": [
+        "671a249a156b57c8724de36ada1c5f535927eb4b",
+        "6c3db95e24ffe19063c5ed391060e688a6f79ec9",
+        "d904910687daa7e9c376d1d3502af9d8c5d358db"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "历史通知日期按事件当时的主机时区归日；诊断探测共享超时预算，汇率缓存锁等待响应截止与取消，并保留既有清理与原子写入规则。",
+      "commits": [
+        "671a249a156b57c8724de36ada1c5f535927eb4b",
+        "6c3db95e24ffe19063c5ed391060e688a6f79ec9",
+        "d904910687daa7e9c376d1d3502af9d8c5d358db"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Put 接货期间报表的指派日期统一按北京时间展示，与年/月筛选一致；保留原始时间戳及底层市场日期口径。",
+      "commits": [
+        "f94695756314dc1abb039043973f49f28773281b",
+        "4f0b08cd0826523c08275c36fe20b03ba3ef9bce"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "正股估值在休市或盘前复用最近完整交易日的未复权收盘价，接货报表、组合估值与当前绩效共用报价校验；保留真实收盘时间、取得时间及缺价原因，不改变持仓归属和实际费用的证据要求。",
+      "commits": [
+        "c1d705196ebe18001428ae77fd45c5277edecb19",
+        "4f0b08cd0826523c08275c36fe20b03ba3ef9bce"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "45040a327013e69b35251bac7d52a6cb56cc3e4a",
+      "reason": "仅补充隔离测试/回归夹具及生成依赖图，不引入独立运行或用户行为；对应业务变化已在本版发布说明中覆盖。"
+    },
+    {
+      "commit": "64e6172a6a60509fa5166239006e8f84a17ef9e2",
+      "reason": "仅补充隔离测试/回归夹具及生成依赖图，不引入独立运行或用户行为；对应业务变化已在本版发布说明中覆盖。"
+    },
+    {
+      "commit": "6aed3a543d21f36b60b7d303f1b6821ac16cd52a",
+      "reason": "仅补充隔离测试/回归夹具及生成依赖图，不引入独立运行或用户行为；对应业务变化已在本版发布说明中覆盖。"
+    },
+    {
+      "commit": "04776fb58829f9e1f53ae2be6c8722a9d75b91fd",
+      "reason": "仅补充隔离测试/回归夹具及生成依赖图，不引入独立运行或用户行为；对应业务变化已在本版发布说明中覆盖。"
+    },
+    {
+      "commit": "c20beff3f863da8990267b5a1e8ab188524539a7",
+      "reason": "仅补充隔离测试/回归夹具及生成依赖图，不引入独立运行或用户行为；对应业务变化已在本版发布说明中覆盖。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "c1d705196ebe18001428ae77fd45c5277edecb19",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1289"
+      ]
+    },
+    {
+      "commit": "f94695756314dc1abb039043973f49f28773281b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1289"
+      ]
+    },
+    {
+      "commit": "467f92870c2fb65138ebc3d4df763588261bd579",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1290"
+      ]
+    },
+    {
+      "commit": "45040a327013e69b35251bac7d52a6cb56cc3e4a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1289"
+      ]
+    },
+    {
+      "commit": "4f0b08cd0826523c08275c36fe20b03ba3ef9bce",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1289"
+      ]
+    },
+    {
+      "commit": "4105645da35a9e5f1c1adf70660f8069b5e5dbad",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1292"
+      ]
+    },
+    {
+      "commit": "d54e677c61a37a8b5d7cf28e239e3a6be03a18b6",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1291"
+      ]
+    },
+    {
+      "commit": "6440694e00f05cc40d165c6924bf6a99c7f777ea",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1291"
+      ]
+    },
+    {
+      "commit": "64e6172a6a60509fa5166239006e8f84a17ef9e2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1292"
+      ]
+    },
+    {
+      "commit": "6aed3a543d21f36b60b7d303f1b6821ac16cd52a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1292"
+      ]
+    },
+    {
+      "commit": "04776fb58829f9e1f53ae2be6c8722a9d75b91fd",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1291"
+      ]
+    },
+    {
+      "commit": "4626d3c11386ef09a8cdac1fe698c47ac9fc05e7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1292"
+      ]
+    },
+    {
+      "commit": "b939da216243814dc1b358449832715a6ee74542",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1290"
+      ]
+    },
+    {
+      "commit": "c20beff3f863da8990267b5a1e8ab188524539a7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1292"
+      ]
+    },
+    {
+      "commit": "671a249a156b57c8724de36ada1c5f535927eb4b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1293"
+      ]
+    },
+    {
+      "commit": "bd64aa6a883e881cb0a38f579ebb3f6881b77d15",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1290"
+      ]
+    },
+    {
+      "commit": "fdf2a7d846ccb911baebc686bc5ca9767cecd4a9",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1292"
+      ]
+    },
+    {
+      "commit": "ad56a0f7ba33d5113eb1702c74f550e2ceb6d1f1",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1292"
+      ]
+    },
+    {
+      "commit": "b94952949a5297582949799cc311cfc9f322576b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1291"
+      ]
+    },
+    {
+      "commit": "eb808f3aa59111b455caebb642b06fcdce086c89",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1291"
+      ]
+    },
+    {
+      "commit": "6c3db95e24ffe19063c5ed391060e688a6f79ec9",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1293"
+      ]
+    },
+    {
+      "commit": "d904910687daa7e9c376d1d3502af9d8c5d358db",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1293"
+      ]
+    }
+  ]
+}
