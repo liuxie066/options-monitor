@@ -16,6 +16,13 @@
 - 下次检查方式：用真实gateway/client、仅替换SDK传输验证方法和错误映射；用完整分母通过真实planner/collector/limiter，显式计入连接和供应商时延；验证准备阶段无请求/无claim，重放不重复采集，线上再按回执核对应采与实采。对旧实现做定向对照时核对实际失败断言：连接数不符合预期只能证明连接复用有判别力，不能据此宣称复现了deadline故障。
 - 证据：`tests/test_futu_gateway_rehab.py`、`tests/test_research_collection_window.py`，尤其是`test_full_market_roster_finishes_in_sixty_second_slot`的采集结果与连接数分别断言；适配与共享连接修复见PR #992。当前限制与修复边界见`docs/RESEARCH_WATCHLIST_SCOPE.md`的采集窗口与公司行动适配。
 
+## L002：持有不提醒，不能通过改名或临期例外绕过
+
+- 触发条件：修改持仓通知筛选、优先级或展示文案，尤其是临期、低 Delta 和时间／事件提醒。
+- 错误原因：既有合同要求继续观察不逐条展示，但筛选先把 `near_expiry_far_otm_hold` 纳入提醒，绕过了 hold 汇总；后续只修正提醒文案并补写文档，没有回查“不需要改变行动就不提醒”的原始原则。
+- 下次检查方式：先检查最终行动；仅持有／继续观察的持仓只汇总，不因临期、低 Delta 或时间字段逐条提醒。独立有效的平仓／滚仓动作仍展示，无法评估仍计入缺口；原始 Brief 和持仓查询明细保留证据。用普通 hold、临期 hold、有效／无效时间字段及 hold 加有效滚仓覆盖文本和卡片，不以新文档或测试已通过代替业务原则核验。
+- 证据：原原则见 `docs/OPTION_NOTIFICATION_EXPERIENCE_PRD.md` 的通知抑制规则（`5e114a273c`）；偏离见 `44933f738`，只修文案见 `ec8b43462`。回归见 `tests/test_daily_decision_brief_selection.py::test_hold_is_summary_only_even_with_near_expiry_or_event_time`、`test_near_expiry_hold_does_not_hide_valid_roll_advice` 及 `tests/test_daily_decision_brief_service.py::test_near_expiry_hold_preserves_source_evidence_without_notification_detail`。
+
 ## 条目模板
 
 ```markdown

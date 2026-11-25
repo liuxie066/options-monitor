@@ -2300,7 +2300,7 @@ def test_close_advice_daily_brief_honors_ranked_account_limit(
 @pytest.mark.parametrize("market,option_type,symbol,spot", [
     ("US", "put", "NVDA", 120), ("HK", "call", "3690.HK", 70),
 ])
-def test_near_expiry_hold_report_preserves_reason_without_inventing_time_gap(
+def test_near_expiry_hold_preserves_source_evidence_without_notification_detail(
     tmp_path: Path, sessions, market, option_type, symbol, spot,
 ) -> None:
     from test_strict_close_advice import _row
@@ -2321,11 +2321,15 @@ def test_near_expiry_hold_report_preserves_reason_without_inventing_time_gap(
     assert row["decision_basis"] == "near_expiry_far_otm_hold"
     _write_close_report(account_dir, [row], market=market)
     brief = _assemble(tmp_path, market=market)
+    assert brief["positions"][0]["reason"] == row["reason"]
+    assert brief["positions"][0]["delta"] == row["delta"]
+    assert brief["positions"][0]["recommendation_state"] == "hold"
     for render in (render_fixed_report_card_markdown, render_fixed_report_text):
         text = render(brief)
-        assert row["reason"] in text
-        assert f"Delta {row["delta"]:g}" in text
-        assert ("剩余交易日 0–1 天" if sessions is None else f"剩余交易日 {sessions} 天") in text
+        assert row["reason"] not in text
+        assert "Delta" not in text
+        assert "持仓提醒" not in text
+        assert "普通持有 1 条" in text
         assert "时间待核实" not in text
         assert "核查原因" not in text
         assert "建议平仓" not in text
