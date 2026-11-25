@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 1618 (`src`: 640, `domain`: 101, `scripts`: 36, `tests`: 837)
-- Internal import edges: 14702 total, 4820 production/script edges excluding tests
+- Internal import edges: 14720 total, 4822 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -33,7 +33,7 @@ flowchart LR
   storage["domain.storage"]
   application -->|771| domain
   application -->|4| domain_services
-  application -->|241| infrastructure
+  application -->|242| infrastructure
   application -->|2| om_strategy_core
   application -->|65| storage
   domain_services -->|6| domain
@@ -51,11 +51,11 @@ flowchart LR
   scripts -->|2| tests
   src -->|1| application
   storage -->|1| domain
-  tests -->|7419| application
+  tests -->|7428| application
   tests -->|854| domain
   tests -->|2| domain_services
-  tests -->|510| infrastructure
-  tests -->|539| interfaces
+  tests -->|516| infrastructure
+  tests -->|540| interfaces
   tests -->|14| om_strategy_core
   tests -->|103| scripts
   tests -->|79| storage
@@ -67,7 +67,7 @@ flowchart LR
 |---|---|---|
 | application | domain | 771 |
 | interfaces | application | 264 |
-| application | infrastructure | 241 |
+| application | infrastructure | 242 |
 | scripts | application | 103 |
 | application | storage | 65 |
 | infrastructure | application | 47 |
@@ -90,10 +90,10 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 7419 |
+| tests | application | 7428 |
 | tests | domain | 854 |
-| tests | interfaces | 539 |
-| tests | infrastructure | 510 |
+| tests | interfaces | 540 |
+| tests | infrastructure | 516 |
 | tests | scripts | 103 |
 | tests | storage | 79 |
 | tests | om_strategy_core | 14 |
@@ -108,7 +108,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application | domain.domain | 328 |
 | src.interfaces | src.application | 205 |
 | src.application.ledger | domain.domain | 190 |
-| src.application | src.infrastructure | 171 |
+| src.application | src.infrastructure | 172 |
 | scripts | src.application | 83 |
 | src.application.ledger | domain.domain.ledger | 81 |
 | src.application.trades | domain.domain | 73 |

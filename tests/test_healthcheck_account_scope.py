@@ -191,3 +191,31 @@ def test_valid_account_quote_readiness_failure_remains_diagnostic(
     )
     assert quote_check["status"] == "error"
     assert quote_check["message"] == "quote unavailable"
+
+
+def test_healthcheck_timeout_reaches_real_doctor_and_stops_late_quote_probe(healthcheck_payload, monkeypatch):
+    import time
+    from src.application import futu_doctor
+    from src.application.agent_tools import runtime_helpers
+    from src.infrastructure import futu_gateway, opend_watchdog
+    clock, contexts, later = [100.0], [], []
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(diagnostics, "run_futu_doctor", runtime_helpers.run_futu_doctor)
+    monkeypatch.setattr(futu_doctor, "sdk_status", lambda: {"ok": True})
+    monkeypatch.setattr(opend_watchdog, "port_open", lambda *a, **kw: True)
+    class Context:
+        def get_global_state(self):
+            clock[0] += 2
+            return 0, {"program_status_type": "READY", "qot_logined": True, "trd_logined": True}
+        def close(self): contexts.append("closed")
+    def build(**kwargs):
+        contexts.append(kwargs)
+        return Context()
+    monkeypatch.setattr(futu_gateway, "build_futu_quote_context", build)
+    monkeypatch.setattr(futu_doctor, "telnet_status", lambda **kw: later.append("telnet") or {"ok": True})
+    monkeypatch.setattr(futu_doctor, "check_required_option_fields", lambda **kw: later.append("fields") or {})
+    out = execute_tool("healthcheck", {**healthcheck_payload, "accounts": ["user1"], "timeout_sec": 1})
+    assert contexts[0]["deadline"] == 101.0
+    assert contexts[-1] == "closed"
+    assert later == []
+    assert out["data"]["summary"]["ok"] is False

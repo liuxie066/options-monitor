@@ -1135,6 +1135,21 @@ def _evaluate_scenario(*, plan: dict[str, Any], rows: list[dict[str, Any]],
         "fee_model_version": plan["fee_model_version"],
         "strategy_version": plan["strategy_version"],
     }
+    if operation == "roll-up":
+        common["schema_version"] = "group_query_roll_up_result.v1"
+        common["account_eligibility"] = "not_verified"
+        required_shares = (contracts * multiplier
+                           if contracts > 0 and multiplier > 0 else None)
+        common["stock_coverage"] = {
+            "verification_status": "not_verified",
+            "required_shares": required_shares,
+        }
+        common["unverified_conditions"] = [
+            "actual_share_count_not_verified",
+            "all_unclosed_short_call_coverage_not_verified",
+            "duplicate_obligation_not_verified",
+        ]
+        common["calculation_kind"] = "leg_cashflow_estimate"
     evidence_reason = _scenario_evidence_reason(
         original, option_type=plan["original_contract"]["option_type"],
         quote_side="buy", now=now)
@@ -1247,6 +1262,8 @@ def _evaluate_scenario(*, plan: dict[str, Any], rows: list[dict[str, Any]],
         old_quote.pop("bid")
     candidates: list[dict[str, Any]] = []
     excluded = 0
+    unassessed = 0
+    incomplete_reasons: set[str] = set()
     reasons: dict[str, int] = {}
     seen: set[str] = set()
     for row in rows:
@@ -1260,8 +1277,12 @@ def _evaluate_scenario(*, plan: dict[str, Any], rows: list[dict[str, Any]],
         seen.add(key)
         candidate_reason = _scenario_evidence_reason(
             row, option_type=identity["option_type"], quote_side="sell", now=now)
+        if candidate_reason is None and (identity["bid"] is None or identity["bid"] <= 0
+                                         or identity["ask"] is None or identity["ask"] <= 0):
+            candidate_reason = "candidate_evidence_invalid"
         if candidate_reason is not None:
-            excluded += 1
+            unassessed += 1
+            incomplete_reasons.add(candidate_reason)
             reasons[candidate_reason] = reasons.get(candidate_reason, 0) + 1
             continue
         identity["contracts"] = contracts
@@ -1283,7 +1304,8 @@ def _evaluate_scenario(*, plan: dict[str, Any], rows: list[dict[str, Any]],
                     new_sell_fee=sell_fee)
                 accepted = evaluation.get("economic_result") == "positive_net_credit"
         except ValueError:
-            excluded += 1
+            unassessed += 1
+            incomplete_reasons.add("candidate_evidence_invalid")
             reasons["candidate_evidence_invalid"] = reasons.get("candidate_evidence_invalid", 0) + 1
             continue
         if not accepted:
@@ -1326,7 +1348,7 @@ def _evaluate_scenario(*, plan: dict[str, Any], rows: list[dict[str, Any]],
     scope_complete = _scenario_scope_complete(
         operation=operation, requested_boundary=boundary,
         max_expiration=max_expiration, effective_scope=effective_scope)
-    complete = bool(seen) and scope_complete
+    complete = bool(seen) and scope_complete and not unassessed
     if not seen:
         common["status"] = "unavailable"
     elif not complete:
@@ -1334,9 +1356,10 @@ def _evaluate_scenario(*, plan: dict[str, Any], rows: list[dict[str, Any]],
     else:
         common["status"] = "success"
     common["outcome"] = "found" if candidates else ("none" if complete else "unable")
-    common["reason_codes"] = ([] if candidates else
-                              ["no_qualified_candidate" if complete
-                               else "search_scope_not_proven_complete"])
+    if not scope_complete or not seen:
+        incomplete_reasons.add("search_scope_not_proven_complete")
+    common["reason_codes"] = (sorted(incomplete_reasons) if not complete else
+                              [] if candidates else ["no_qualified_candidate"])
     common["fee_model_id"] = plan["fee_model_id"]
     common["fee_model"] = {"id": plan["fee_model_id"],
                            "model_id": plan["fee_model_id"],
@@ -1359,25 +1382,11 @@ def _evaluate_scenario(*, plan: dict[str, Any], rows: list[dict[str, Any]],
         "candidate_count": len(seen),
         "matched": len(candidates),
         "excluded": excluded,
+        "unassessed": unassessed,
         "exclusion_reasons": dict(sorted(reasons.items())),
         "limit": limit,
         "complete": complete,
     }
-    if operation == "roll-up":
-        common["schema_version"] = "group_query_roll_up_result.v1"
-        common["account_eligibility"] = "not_verified"
-        required_shares = (contracts * multiplier
-                           if contracts > 0 and multiplier > 0 else None)
-        common["stock_coverage"] = {
-            "verification_status": "not_verified",
-            "required_shares": required_shares,
-        }
-        common["unverified_conditions"] = [
-            "actual_share_count_not_verified",
-            "all_unclosed_short_call_coverage_not_verified",
-            "duplicate_obligation_not_verified",
-        ]
-        common["calculation_kind"] = "leg_cashflow_estimate"
     return common
 
 
@@ -1414,7 +1423,7 @@ def _roll_candidate_identity(row: dict[str, Any], plan: dict[str, Any], operatio
     strike = _finite_or_none(row.get("strike"))
     bid = _finite_or_none(row.get("bid"))
     ask = _finite_or_none(row.get("ask"))
-    if strike is None or strike <= 0 or bid is None or bid <= 0 or ask is None or ask <= 0:
+    if strike is None or strike <= 0:
         return None
     if operation == "roll-down":
         if strike >= float(plan["original_contract"]["strike"]) or strike >= spot:

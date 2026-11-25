@@ -332,6 +332,13 @@ def refresh_wechat_clawbot_binding_from_inbound_message(
             "reason": "binding_not_found",
         }
 
+    if not _binding_matches_message(
+        raw_binding, user_id=user_id, group_id=message_group_id(message) or None,
+        chat_key=message_chat_key(message) or None,
+    ):
+        return {"attempted": True, "updated_count": 0, "target": resolved.raw,
+                "reason": "no_matching_binding"}
+
     now = utc_now()
     inbound_message_id = message_id(message) or None
     refreshed = {
@@ -397,6 +404,13 @@ def refresh_wechat_clawbot_binding_from_reply(
             "reason": "binding_not_found",
         }
 
+    if not _binding_matches_message(
+        raw_binding, user_id=user_id, group_id=message_group_id(message) or None,
+        chat_key=message_chat_key(message) or None,
+    ):
+        return {"attempted": True, "updated_count": 0, "target": resolved.raw,
+                "reason": "no_matching_binding"}
+
     now = utc_now()
     inbound_message_id = message_id(message) or None
     refreshed = {
@@ -455,10 +469,10 @@ def _binding_matches_message(
     if str(binding.get("to_user_id") or "").strip() != str(user_id or "").strip():
         return False
     binding_group_id = str(binding.get("group_id") or "").strip()
-    if binding_group_id and binding_group_id != str(group_id or "").strip():
+    if binding_group_id != str(group_id or "").strip():
         return False
-    binding_chat_key = str(binding.get("chat_key") or "").strip()
-    if binding_chat_key and chat_key and binding_chat_key != str(chat_key or "").strip():
+    binding_chat_key = str(binding.get("chat_key") or binding_group_id or binding.get("to_user_id") or "").strip()
+    if binding_chat_key != str(chat_key or "").strip():
         return False
     return True
 

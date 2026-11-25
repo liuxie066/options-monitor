@@ -876,6 +876,30 @@ def test_option_positions_cli_buy_close_auto_matches_unique_selector(monkeypatch
     assert repo.get_record_fields(lot["record_id"])["contracts_open"] == 2
 
 
+@pytest.mark.parametrize("apply", [False, True])
+def test_option_positions_cli_buy_close_selector_json(monkeypatch, tmp_path: Path, capsys, apply) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+    data_config, repo = _active_ledger_context(tmp_path)
+    _open_position(repo,
+        symbol="0700.HK", contracts=2, currency="HKD", strike=480.0, expiration_ymd="2026-04-29",
+        premium_per_share=3.93, opened_at_ms=1000,
+    )
+
+    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
+    _set_om_argv(monkeypatch, data_config,
+        "buy-close", "--account", "lx", "--symbol", "0700.HK", "--option-type", "put", "--strike", "480",
+        "--exp", "2026-04-29", "--contracts", "1", "--close-price", "1.2", "--format", "json", *(["--confirm"] if apply else ["--dry-run"]),
+)
+
+    cli_mod.main()
+
+    payload = json.loads(capsys.readouterr().out)
+    lot = repo.list_position_lots()[0]
+    assert payload["match"]["rule"] == "strict_contract_unique"
+    assert payload["write_applied"] is apply
+    assert repo.get_record_fields(lot["record_id"])["contracts_open"] == (1 if apply else 2)
+
+
 def test_manual_buy_close_replay_selector_uses_nested_lot_identity(tmp_path: Path) -> None:
     from src.application.ledger.commands import record_manual_position_close
 

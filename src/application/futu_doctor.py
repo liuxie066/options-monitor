@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
+import time
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -16,6 +18,7 @@ from src.infrastructure.futu_gateway import (
     build_ready_futu_quote_gateway,
 )
 from src.infrastructure.opend_watchdog import port_open, run_watchdog_check
+from src.infrastructure.fetch_control import check_fetch_control
 
 
 REQUIRED_SNAPSHOT_COLS = [
@@ -81,8 +84,11 @@ def sdk_status() -> dict[str, Any]:
     }
 
 
-def telnet_status(*, host: str = "127.0.0.1", port: int = 22222) -> dict[str, Any]:
-    open_ok = port_open(str(host), int(port), timeout=0.8)
+def telnet_status(*, host: str = "127.0.0.1", port: int = 22222, deadline: float | None = None) -> dict[str, Any]:
+    check_fetch_control(deadline)
+    timeout = min(0.8, max(0.0, deadline - time.monotonic())) if deadline is not None else 0.8
+    open_ok = port_open(str(host), int(port), timeout=timeout)
+    check_fetch_control(deadline)
     return {
         "host": str(host),
         "port": int(port),
@@ -110,10 +116,14 @@ def check_required_option_fields(
     host: str,
     port: int,
     limit: int = 10,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     results: list[SymbolFieldResult] = []
+    controls = {"deadline": deadline} if deadline is not None else {}
+    check_fetch_control(deadline)
 
     for sym in symbols:
+        check_fetch_control(deadline)
         underlier = None
         gateway = None
         try:
@@ -122,8 +132,11 @@ def check_required_option_fields(
                 host=host,
                 port=int(port),
                 is_option_chain_cache_enabled=False,
+                **controls,
             )
-            chain = _rows(gateway.get_option_chain(code=underlier.code))
+            check_fetch_control(deadline)
+            chain = _rows(gateway.get_option_chain(code=underlier.code, **controls))
+            check_fetch_control(deadline)
             if not chain:
                 results.append(
                     SymbolFieldResult(
@@ -140,7 +153,8 @@ def check_required_option_fields(
                 for row in chain[: int(limit)]
                 if row.get("code")
             ]
-            snap = _rows(gateway.get_snapshot(codes))
+            snap = _rows(gateway.get_snapshot(codes, **controls))
+            check_fetch_control(deadline)
             if not snap:
                 results.append(
                     SymbolFieldResult(
@@ -156,8 +170,9 @@ def check_required_option_fields(
             snapshot_columns = {key for row in snap for key in row}
             missing = [col for col in REQUIRED_SNAPSHOT_COLS if col not in snapshot_columns]
             observation = get_underlier_observation_opend(
-                gateway, underlier.code, market=underlier.market, base_dir=None,
+                gateway, underlier.code, market=underlier.market, base_dir=None, **controls,
             )
+            check_fetch_control(deadline)
             option_fields_ok = not missing
             scan_prerequisites_ok = option_fields_ok and observation.status == "ready"
             note = None if scan_prerequisites_ok else (
@@ -180,6 +195,7 @@ def check_required_option_fields(
                 )
             )
         except Exception as exc:
+            check_fetch_control(deadline)
             results.append(
                 SymbolFieldResult(
                     symbol=sym,
@@ -192,6 +208,7 @@ def check_required_option_fields(
             if gateway is not None:
                 gateway.close()
 
+    check_fetch_control(deadline)
     return {
         "host": str(host),
         "port": int(port),
@@ -223,9 +240,14 @@ def run_futu_doctor_checks(
     expected_account_ids: list[str] | tuple[str, ...] | None = None,
     trd_env: str = "REAL",
 ) -> dict[str, Any]:
-    del timeout_sec
+    if timeout_sec is not None and (not math.isfinite(float(timeout_sec)) or float(timeout_sec) <= 0):
+        raise ValueError("timeout_sec must be finite and positive")
+    deadline = None if timeout_sec is None else time.monotonic() + float(timeout_sec)
+    controls = {"deadline": deadline} if deadline is not None else {}
+    check_fetch_control(deadline)
     symbol_list = [str(s).strip() for s in (symbols or []) if str(s).strip()]
     sdk = sdk_status()
+    check_fetch_control(deadline)
 
     capability = str(required_capability or "").strip().lower()
     watchdog = run_watchdog_check(
@@ -235,9 +257,12 @@ def run_futu_doctor_checks(
         required_capability=capability,
         expected_account_ids=expected_account_ids,
         trd_env=trd_env,
+        **controls,
     ).to_payload()
+    check_fetch_control(deadline)
     watchdog_ok = bool(watchdog.get("ok"))
-    telnet = telnet_status(host=str(telnet_host), port=int(telnet_port))
+    telnet = telnet_status(host=str(telnet_host), port=int(telnet_port), **controls)
+    check_fetch_control(deadline)
 
     required_fields = None
     required_fields_raw = ""
@@ -247,8 +272,11 @@ def run_futu_doctor_checks(
                 symbols=symbol_list,
                 host=str(host),
                 port=int(port),
+                **controls,
             )
+            check_fetch_control(deadline)
         except Exception as exc:
+            check_fetch_control(deadline)
             required_fields_raw = f"{type(exc).__name__}: {exc}"
             required_fields = {
                 "host": str(host),

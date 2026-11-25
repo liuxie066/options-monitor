@@ -507,3 +507,20 @@ def test_evidence_only_compression_keeps_reason_codes_within_eight():
         assert len(result["reason_codes"]) <= 8
         assert {"earnings_incomplete", "enumeration_incomplete", "output_limited"} <= set(result["reason_codes"])
         assert result["displayed"] >= 1
+
+
+@pytest.mark.parametrize("mode", ["put", "call"])
+@pytest.mark.parametrize("lower,required", [(0.2, {"operator": "between", "value": [0.2, 0.3]}),
+                                           (None, {"operator": "lte", "value": 0.3})])
+def test_public_delta_condition_reports_executed_bounds(mode, lower, required):
+    prepared = _prepared(mode=mode, policy={"max_abs_delta": 0.3})
+    prepared.filters["min_abs_delta"] = lower
+    result = _evaluate([_row(mode=mode, delta=-0.25 if mode == "put" else 0.25)], prepared=prepared)
+    assert result["outcome"] == "found"
+    condition = next(item for item in result["candidates"][0]["evidence"]["conditions"]
+                     if item["name"] == "abs_delta")
+    assert condition["required"] == required
+    assert condition["status"] == "pass"
+    if lower is not None:
+        rejected = _evaluate([_row(mode=mode, delta=-0.1 if mode == "put" else 0.1)], prepared=prepared)
+        assert rejected["outcome"] == "none"

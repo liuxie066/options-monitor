@@ -267,6 +267,11 @@ preflight 会检查 env path 是文件还是目录、runtime root / locks / outp
 ```bash
 sudo cp /tmp/options-monitor-service/systemd/*.service /etc/systemd/system/
 sudo cp /tmp/options-monitor-service/systemd/*.timer /etc/systemd/system/
+# 保留每个 unit 的凭据绑定目录；必须先安装再启动消费者。
+while IFS= read -r source; do
+  relative="${source#/tmp/options-monitor-service/systemd/}"
+  sudo install -D -m 0644 "$source" "/etc/systemd/system/$relative"
+done < <(find /tmp/options-monitor-service/systemd -type f -name zzzz-secret-credentials.conf -print)
 sudo mkdir -p "$RUNTIME"
 cp /tmp/options-monitor-service/service.profile.json "$RUNTIME/service.profile.json"
 sudo systemd-analyze verify /etc/systemd/system/options-monitor-*.service

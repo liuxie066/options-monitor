@@ -23,7 +23,7 @@ import fcntl
 import json
 from pathlib import Path
 import sys
-from time import monotonic
+from time import monotonic, sleep
 from typing import Any, Callable, Mapping
 from urllib import request as urllib_request
 from zoneinfo import ZoneInfo
@@ -327,7 +327,18 @@ def current_exchange_rate_snapshot(
         path.parent.mkdir(parents=True, exist_ok=True)
         # A stable lock file protects the read/merge/write across processes.
         with path.with_suffix(path.suffix + ".lock").open("a+") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            if deadline is None and cancelled is None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            else:
+                while True:
+                    _check_fx_budget(deadline, cancelled)
+                    try:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        _check_fx_budget(deadline, cancelled)
+                        sleep(min(0.05, max(0.0, deadline - monotonic()))
+                              if deadline is not None else 0.05)
             try:
                 _check_fx_budget(deadline, cancelled)
                 latest_cache = _read_cache(path)

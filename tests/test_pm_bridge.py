@@ -15,7 +15,7 @@ def test_pm_bridge_script_is_removed() -> None:
     assert not (Path(__file__).resolve().parents[1] / "scripts" / "pm_bridge.py").exists()
 
 
-def test_fetch_symbol_keeps_us_spot_missing_without_fallback(monkeypatch) -> None:
+def test_fetch_symbol_keeps_us_spot_missing_without_fallback(monkeypatch, tmp_path) -> None:
     import src.application.opend_symbol_fetching as mod
 
     class _Gateway:
@@ -56,7 +56,7 @@ def test_fetch_symbol_keeps_us_spot_missing_without_fallback(monkeypatch) -> Non
         lambda _symbol, **_kwargs: SimpleNamespace(code="US.NVDA", market="US", currency="USD"),
     )
     monkeypatch.setattr(mod, "get_trading_date", lambda _market: pd.Timestamp("2026-04-21").date())
-    out = mod.fetch_symbol("NVDA", base_dir=Path("."))
+    out = mod.fetch_symbol("NVDA", base_dir=tmp_path)
 
     assert out["spot"] is None
     assert out["underlier_code"] == "US.NVDA"

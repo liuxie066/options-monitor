@@ -170,12 +170,15 @@ def test_cli_preview_apply_and_retry(tmp_path,monkeypatch,capsys):
     repo,config=scope(tmp_path)
     monkeypatch.setattr(cli,'resolve_option_positions_repo',lambda **kw:(tmp_path/'data.json',repo))
     monkeypatch.setattr(cli,'_guard_write',lambda **kw:{'ok':True})
-    monkeypatch.setattr(cli,'load_runtime_config',lambda payload:(tmp_path/'hk.json',config))
+    from unittest.mock import create_autospec
+    loader = create_autospec(cli.load_runtime_config, return_value=(tmp_path/'hk.json', config))
+    monkeypatch.setattr(cli, 'load_runtime_config', loader)
     monkeypatch.setattr(cli,'collect_futu_environment_evidence',lambda *a,**kw:proof())
     args=['repair',EID,'--trd-env','REAL','--config-key','hk','--reason','OpenD exact historic deal','--format','json']
     before=storage(repo)
     assert cli.main(args)==0
     plan=json.loads(capsys.readouterr().out)
+    loader.assert_called_once_with(config_key='hk', config_path=None)
     assert not plan['write_applied'] and storage(repo)==before
     assert cli.main([*args,'--confirm','--expected-input-hash',plan['expected_input_hash']])==0
     result=json.loads(capsys.readouterr().out)
@@ -283,7 +286,9 @@ def test_provider_failure_and_cancellation_close_without_ledger_effect(tmp_path,
     assert closed==[True] and storage(repo)==before
     import src.interfaces.cli.trade_events as cli
     monkeypatch.setattr(cli,'resolve_option_positions_repo',lambda **kw:(tmp_path/'data.json',repo))
-    monkeypatch.setattr(cli,'load_runtime_config',lambda payload:(tmp_path/'hk.json',config))
+    from unittest.mock import create_autospec
+    loader = create_autospec(cli.load_runtime_config, return_value=(tmp_path/'hk.json', config))
+    monkeypatch.setattr(cli, 'load_runtime_config', loader)
     assert cli.main(['repair',EID,'--trd-env','REAL','--config-key','hk','--reason','OpenD exact historic deal'])==2
     assert closed==[True,True] and storage(repo)==before
     failure=KeyboardInterrupt()

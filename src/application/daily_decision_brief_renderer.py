@@ -339,6 +339,10 @@ def build_daily_brief_user_view(
         "wheel_batches": wheel_batches,
         "positions": position_views,
         "position_total": position_total,
+        "position_source_unavailable": any(
+            isinstance(gap, Mapping) and gap.get("strategy_family") == "close_advice"
+            for gap in brief.get("data_gaps") or []
+        ),
         "position_actionable_total": position_actionable_total,
         "position_review_total": position_review_total,
         "position_hold_total": selection["position_hold_total"],
@@ -2620,6 +2624,8 @@ def _position_summary(
     *,
     visible_actionable_count: int,
 ) -> str:
+    if view.get("position_source_unavailable"):
+        return _CLOSE_RECOMMENDATION_LABELS["not_evaluable"]
     position_total = _whole_number(view.get("position_total")) or 0
     actionable_total = (
         _whole_number(view.get("position_actionable_total")) or 0

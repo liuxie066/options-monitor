@@ -165,3 +165,83 @@ def test_doctor_closes_gateway_when_option_provider_raises(monkeypatch):
     assert not result["ok"]
     assert "synthetic failure" in result["error"]
     assert closed == [True]
+
+
+@pytest.mark.parametrize("stop_after", [None, "chain", "snapshot"])
+def test_option_probe_reuses_deadline_and_always_closes(monkeypatch, stop_after):
+    import time
+    from types import SimpleNamespace
+    clock, calls = [100.0], []
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(futu_doctor, "normalize_underlier", lambda symbol: SimpleNamespace(code="US.TEST", market="US"))
+    class Gateway:
+        def get_option_chain(self, **kwargs):
+            calls.append(("chain", kwargs["deadline"]))
+            if stop_after == "chain": clock[0] = 102.0
+            return [{"code": "US.TEST-C"}]
+        def get_snapshot(self, codes, **kwargs):
+            calls.append(("snapshot", kwargs["deadline"]))
+            if stop_after == "snapshot": clock[0] = 102.0
+            return [{key: "fixture" for key in futu_doctor.REQUIRED_SNAPSHOT_COLS}]
+        def close(self): calls.append(("close", None))
+    def build(**kwargs):
+        calls.append(("factory", kwargs["deadline"]))
+        return Gateway()
+    def observe(*args, **kwargs):
+        calls.append(("observation", kwargs["deadline"]))
+        return SimpleNamespace(status="ready", last_price=100, to_dict=lambda: {})
+    monkeypatch.setattr(futu_doctor, "build_ready_futu_quote_gateway", build)
+    monkeypatch.setattr(futu_doctor, "get_underlier_observation_opend", observe)
+    if stop_after:
+        with pytest.raises(TimeoutError):
+            futu_doctor.check_required_option_fields(symbols=["TEST", "NEXT"], host="fake", port=1, deadline=101.0)
+        assert [name for name, _ in calls] == (["factory", "chain", "close"] if stop_after == "chain"
+                                             else ["factory", "chain", "snapshot", "close"])
+    else:
+        result = futu_doctor.check_required_option_fields(symbols=["TEST"], host="fake", port=1, deadline=101.0)
+        assert result["results"][0]["ok"]
+        assert all(value == 101.0 for name, value in calls if name != "close")
+    assert calls[-1] == ("close", None)
+
+
+@pytest.mark.parametrize("path", ["quote_retry", "port_retry", "start", "broker"])
+def test_watchdog_subpaths_share_remaining_deadline(monkeypatch, path):
+    from types import SimpleNamespace
+    from src.infrastructure import opend_watchdog as watchdog, futu_gateway
+    clock = [10.0]
+    calls = []
+    monkeypatch.setattr(watchdog.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(watchdog.time, "sleep", lambda duration: clock.__setitem__(0, clock[0] + duration))
+    monkeypatch.setattr(watchdog, "port_open", lambda *args, **kwargs: path == "broker")
+    if path == "quote_retry":
+        def quote(*args, **kwargs):
+            calls.append(kwargs)
+            raise ConnectionError("connection reset")
+        monkeypatch.setattr(watchdog, "get_global_state_once", quote)
+        operation = lambda: watchdog.get_global_state("fixture", 11111, deadline=10.2)
+    elif path == "port_retry":
+        operation = lambda: watchdog.run_watchdog_check(deadline=10.2, retry_enabled=True)
+    elif path == "start":
+        monkeypatch.setenv("OPEND_START_SCRIPT", "/fixture/never-run.sh")
+        def run(*args, **kwargs):
+            calls.append(kwargs)
+            assert kwargs["timeout"] == pytest.approx(0.2)
+            clock[0] = 10.2
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        monkeypatch.setattr(watchdog.subprocess, "run", run)
+        operation = lambda: watchdog.try_start_opend(deadline=10.2)
+    else:
+        def build(**kwargs):
+            calls.append(kwargs)
+            clock[0] = 10.2
+            return SimpleNamespace(close=lambda: calls.append("closed"))
+        monkeypatch.setattr(futu_gateway, "build_ready_futu_broker_gateway", build)
+        operation = lambda: watchdog.run_watchdog_check(deadline=10.2, required_capability="broker")
+    with pytest.raises(TimeoutError, match="deadline"):
+        operation()
+    assert clock[0] == pytest.approx(10.2)
+    if path in {"quote_retry", "broker"}:
+        assert calls[0]["deadline"] == 10.2
+        assert len(calls) == (2 if path == "broker" else 1)
+    if path == "broker":
+        assert calls[-1] == "closed"

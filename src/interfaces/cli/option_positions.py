@@ -1427,8 +1427,6 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(str(e))
         raw_match = out.get("match")
         match: dict[str, Any] = raw_match if isinstance(raw_match, dict) else {}
-        if match.get("rule") == "strict_contract_unique":
-            print(f"[MATCH] rule={match.get('rule')} record_id={match.get('record_id')}")
         payload = attach_write_contract(
             {"operation": "manual_close", **out, "ledger_store": ledger_store},
             dry_run=dry_run,
@@ -1438,6 +1436,8 @@ def main(argv: list[str] | None = None) -> int:
         if _json_or_text_format(args) == "json":
             print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
             return 0
+        if match.get("rule") == "strict_contract_unique":
+            print(f"[MATCH] rule={match.get('rule')} record_id={match.get('record_id')}")
         patch = out["patch"]
         if dry_run:
             print('[DRY_RUN] update fields:')

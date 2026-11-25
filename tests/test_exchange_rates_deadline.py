@@ -166,3 +166,38 @@ def test_cancel_during_selection_does_not_start_cache_write(monkeypatch, tmp_pat
         fx.current_exchange_rate_snapshot(cache_path=path, cancelled=lambda: stopped[0])
     assert path.read_bytes() == before
     assert not path.with_suffix(".json.lock").exists()
+
+
+@pytest.mark.parametrize("stop", ["deadline", "cancelled"])
+def test_contended_cache_lock_honors_budget_without_writing(tmp_path, monkeypatch, stop):
+    path = tmp_path / "fx.json"
+    path.write_text(json.dumps({"schema_version": 2, "pairs": {"USDCNY": _row(7.2, _at(9, 30, 11))}}))
+    before = path.read_bytes()
+    clock, cancelled = [10.0], [False]
+    monkeypatch.setattr(fx, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(fx, "fetch_market_exchange_rates", lambda **kwargs: None)
+    real_flock = fx.fcntl.flock
+    def controlled_flock(fd, operation):
+        if operation != fx.fcntl.LOCK_UN:
+            assert operation & fx.fcntl.LOCK_NB, "budgeted wait must not block in flock"
+        return real_flock(fd, operation)
+    monkeypatch.setattr(fx.fcntl, "flock", controlled_flock)
+    def sleep(seconds):
+        assert 0 < seconds <= 0.05
+        clock[0] += seconds
+        if stop == "cancelled":
+            cancelled[0] = True
+    monkeypatch.setattr(fx, "sleep", sleep, raising=False)
+    with path.with_suffix(".json.lock").open("a+") as holder:
+        real_flock(holder.fileno(), fx.fcntl.LOCK_EX)
+        try:
+            with pytest.raises(TimeoutError, match=stop):
+                fx.current_exchange_rate_snapshot(cache_path=path,
+                    deadline=10.1 if stop == "deadline" else None,
+                    cancelled=lambda: cancelled[0])
+            assert path.read_bytes() == before
+        finally:
+            real_flock(holder.fileno(), fx.fcntl.LOCK_UN)
+    cancelled[0] = False
+    result = fx.current_exchange_rate_snapshot(cache_path=path, deadline=clock[0] + 1)
+    assert result["pairs"]["USDCNY"]["rate"] == 7.2

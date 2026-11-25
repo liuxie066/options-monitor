@@ -304,12 +304,17 @@ def issue_closure_transport(comment_transport):
            "disposition": "reply", "reviewed_at": "2026-11-14",
            "triage": {"decision": "not_worthwhile", "third_party_service": False,
                       "reason": "The short duplicate logic is consistent; extraction costs exceed its benefit."}}
+    remote_issue = {"number": 7, "html_url": "https://github.com/fixture/repo/issues/7",
+                    "title": "fixture", "body": "original", "state": "open",
+                    "assignees": [], "labels": [], "milestone": None}
+    row.update(fingerprint_version=3, input_digest=issues.issue_input_digest(remote_issue, []))
     delivery.save_json(root / "issue-state.json", {"issues": {"7": row}})
     issue_run = root / "issues"
     issue_run.mkdir()
     summary = issues.summarize(issue_run, {"target": A, "issues": [{"number": 7}]}, {7: row}, {})
     receipt = {"issues": {"reviewed": [7], "run_dir": str(issue_run), "summary": summary}}
-    remote = {"state": "open", "close_failure": None, "comment_failure": False}
+    remote = {"state": "open", "close_failure": None, "comment_failure": False,
+              "issue": remote_issue, "prs": [], "timeline": []}
 
     def command(argv, **kwargs):
         if argv[1:3] == ["issue", "close"]:
@@ -323,12 +328,24 @@ def issue_closure_transport(comment_transport):
             return "closed"
         if argv[-1].endswith("/issues/7") and not fail["before_get"]:
             calls.append(argv)
-            return json.dumps({"number": 7, "state": remote["state"]})
+            return json.dumps({**remote["issue"], "state": remote["state"]})
+        if argv[-1].endswith("/timeline?per_page=100"):
+            calls.append(argv)
+            return json.dumps([remote["timeline"]])
+        if argv[-1].endswith("/pulls?state=open&per_page=100"):
+            calls.append(argv)
+            return json.dumps([remote["prs"]])
+        if "/pulls/" in argv[-1]:
+            calls.append(argv)
+            return json.dumps(next(row for row in remote["prs"] if str(row["number"]) == argv[-1].split("/")[-1]))
         if (argv[1:3] == ["issue", "comment"] and remote["comment_failure"]
                 and (remote["comment_failure"] != "explanation" or comments)):
             calls.append(argv)
             raise RuntimeError("comment temporarily unavailable")
-        return transport(argv, **kwargs)
+        result = transport(argv, **kwargs)
+        if argv[1:3] == ["issue", "comment"] and len(comments) == 2 and remote.get("after_explanation"):
+            remote["after_explanation"]()
+        return result
 
     def run(*, reviewed=(7,)):
         receipt["issues"]["reviewed"] = list(reviewed)
@@ -347,7 +364,7 @@ def test_not_worthwhile_closes_after_comments_and_updates_summary_once(issue_clo
     assert comments[0]["html_url"] in comments[1]["body"] and "按 not_worthwhile 分诊结论关闭" in comments[1]["body"]
     close_index = next(index for index, argv in enumerate(calls) if argv[1:3] == ["issue", "close"])
     assert sum(argv[1:3] == ["issue", "comment"] for argv in calls[:close_index]) == 2
-    assert "comments?" in calls[close_index - 1][-1]
+    assert any("comments?" in call[-1] for call in calls[:close_index])
     assert calls[close_index][-2:] == ["--reason", "not planned"]
     assert receipt["issues"]["summary"]["github_closed"] == [7]
     for filename in ("summary.json", "close-recommendations.json", "receipt.json"):
@@ -678,3 +695,48 @@ def test_pending_release_defers_other_loop_merges_without_skipping_review(commit
     assert observed == [(False, [12])]
     assert receipt["merge_deferred_for_release"] is True
     assert receipt["daily_summary"]["reviewed_pull_requests"] == 1
+
+
+@pytest.mark.parametrize("changed", ["body", "comment", "assignee", "label", "linked_pr", "legacy"])
+def test_stale_rejection_cannot_close_issue_after_pending_rereview(issue_closure_transport, changed):
+    root, _, comments, calls, _, remote, _, run = issue_closure_transport
+    if changed == "body": remote["issue"]["body"] = "new correction"
+    elif changed == "comment": comments.append({"id": 900, "body": "new evidence", "user": {"login": "human"}})
+    elif changed == "assignee": remote["issue"]["assignees"] = [{"login": "human"}]
+    elif changed == "label": remote["issue"]["labels"] = [{"name": "confirmed"}]
+    elif changed == "linked_pr": remote["prs"] = [{"number": 9, "state": "open", "title": "Fix #7", "body": ""}]
+    else:
+        state = delivery.read_json(root / "issue-state.json", {})
+        state["issues"]["7"].pop("input_digest")
+        delivery.save_json(root / "issue-state.json", state)
+    delivery.save_json(root / "issues" / "pending.json", {"7": {"reason": "review timeout"}})
+    result = run(reviewed=[])
+    assert result["errors"] and result["github_closed"] == []
+    assert remote["state"] == "open"
+    assert not any(call[1:3] == ["issue", "close"] for call in calls)
+
+
+def test_issue_change_after_explanation_blocks_close(issue_closure_transport):
+    _, _, comments, calls, _, remote, _, run = issue_closure_transport
+    remote["after_explanation"] = lambda: remote["issue"].update(body="new evidence")
+    result = run()
+    assert len(comments) == 2
+    assert result["errors"]
+    assert remote["state"] == "open"
+    assert not any(call[1:3] == ["issue", "close"] for call in calls)
+
+
+@pytest.mark.parametrize("ownership", ["assignee", "linked_pr"])
+def test_unchanged_digest_does_not_authorize_closing_owned_issue(issue_closure_transport, ownership):
+    root, _, _, calls, _, remote, _, run = issue_closure_transport
+    if ownership == "assignee":
+        remote["issue"]["assignees"] = [{"login": "human"}]
+    else:
+        remote["prs"] = [{"number": 9, "state": "open", "title": "Fix #7", "body": ""}]
+    state = delivery.read_json(root / "issue-state.json", {})
+    state["issues"]["7"]["input_digest"] = issues.issue_input_digest(remote["issue"], [])
+    delivery.save_json(root / "issue-state.json", state)
+    result = run()
+    assert result["errors"]
+    assert remote["state"] == "open"
+    assert not any(call[1:3] == ["issue", "close"] for call in calls)
