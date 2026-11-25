@@ -1052,8 +1052,12 @@ def test_put_intent_consumption_releases_cash_before_final_capacity_check(tmp_pa
 def test_capacity_worker_uses_shared_cash_reader_without_writes(tmp_path, monkeypatch, cached):
     import json
     import src.application.wheel.capacity as capacity
+    import src.application.portfolio_context_service as service
     from cash_evidence_helpers import cash_config, cash_portfolio
 
+    # Exercise the injected cash reader without requiring the broker plugin.
+    monkeypatch.setattr(service, "resolve_broker_portfolio_provider",
+                        lambda _config, *, account, futu_provider: futu_provider)
     portfolio = cash_portfolio({"cash_by_currency": {"USD": 500}, "exchange_rates": {"stale": True}})
     state = tmp_path / "output_accounts/lx/state"
     state.mkdir(parents=True)
