@@ -539,8 +539,10 @@ def _project_assigned_stock_from_prepared_rows(
     # The strategy-metadata family is read from the event layer now (design
     # §7.5), so each lot is handed the metadata its own events declare.
     if strategy_by_lot_id is None:
-        strategy_by_lot_id = lot_strategy_metadata_from_trade_events(
-            [row for row in selected_rows if _event_time_ms(row) <= instant])
+        # Selection already excludes future economics and retains validated
+        # late voids that restate this boundary. Metadata must use that same
+        # effective history rather than revive a voided opening or adjustment.
+        strategy_by_lot_id = lot_strategy_metadata_from_trade_events(selected_rows)
     selected_ids = {
         str(row.get("event_id") or "").strip()
         for row in selected_rows
