@@ -2152,19 +2152,23 @@ def _wheel_gap_reminders(brief: Mapping[str, Any]) -> list[str]:
         for reason in reasons:
             if isinstance(reason, str) and reason in gap_reasons:
                 grouped.setdefault(reason, set()).add(subject)
+        for detail in _wheel_candidate_diagnostic_details(row):
+            if detail.startswith("数据说明："):
+                grouped.setdefault(detail, set()).add(subject)
     reminders = []
     for reason, subjects in sorted(grouped.items()):
         shown = "、".join(sorted(subjects)[:3])
         if len(subjects) > 3:
             shown += f"（另有 {len(subjects) - 3} 个标的/方向，共 {len(subjects)} 个）"
-        reminders.append("缺口摘要：" + shown + " · " + _wheel_reason_text(reason))
+        description = reason if reason.startswith("数据说明：") else _wheel_reason_text(reason)
+        reminders.append("缺口摘要：" + shown + " · " + description)
     # Branch cards share the account display quota; real scan gaps must remain
     # visible even when allocation/settlement replaces their primary reason.
     for row in brief.get("wheel_batches") or []:
         if not isinstance(row, Mapping):
             continue
         for detail in _wheel_candidate_diagnostic_details(row):
-            if detail.startswith(("缺项：", "数据说明：")):
+            if detail.startswith("缺项："):
                 reminders.append(f"{_upper(row.get('symbol'))} Wheel {str(row.get('direction') or 'call').title()} · {detail}")
     return list(dict.fromkeys(reminders))
 

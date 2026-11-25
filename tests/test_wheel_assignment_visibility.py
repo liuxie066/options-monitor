@@ -64,6 +64,7 @@ def test_many_wheel_gaps_keep_all_reasons_without_blocking_notification(symbol_c
         assert 'WHEEL000 Wheel Call、WHEEL001 Wheel Call、WHEEL002 Wheel Call' in message
         assert f'另有 {symbol_count - 3} 个标的/方向，共 {symbol_count} 个' in message
         assert '候选数据不足，无法评估' in message
+        assert '本次记录未提供具体缺项' in message
         assert '合约乘数来源未核实，暂停推荐' in message
         assert '指派交割金额或实际费用证据不完整，暂停推荐' in message
         assert '指派交割币种缺失，暂停推荐' in message
