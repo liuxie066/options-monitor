@@ -1158,8 +1158,9 @@ def test_wheel_diagnostics_reach_sealed_snapshot_and_brief(tmp_path, direction, 
         assert expected not in message
         assert f"1 份 {direction.title()}" not in message
     else:
-        assert expected in message
-        assert f"1 份 {direction.title()}" in message
+        assert "部分合约数据不可用，相关候选评估不完整" in message
+        assert expected not in message
+        assert f"1 份 {direction.title()}" not in message
     assert "排除说明" not in message
     assert "暂停建议" not in message
 

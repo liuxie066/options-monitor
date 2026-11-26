@@ -296,7 +296,7 @@ def daily_management(run: Run, *, input_fn: Input = input,
         return 2
     run = lambda argv: _instance_run(caller, argv, source=source, repo_root=repo_base_fn())
     while True:
-        print(f"\n日常管理 · {source}\n  1  查看结果与状态\n  2  账户与标的\n"
+        print("\n日常管理\n  1  查看结果与状态\n  2  账户与标的\n"
               "  3  通知与 Bot\n  4  策略与全局持仓风险\n  5  运行与维护\n  0  返回")
         choice = input_fn("请选择：").strip()
         if choice == "0":
@@ -462,8 +462,8 @@ def first_install(
                     if scope["brief_available"]:
                         print(f"  {scope['account']} · {scope['market']} 已有可读简报数据时间："
                               f"{scope['brief_time'] or '未知'}（已有结果，不代表本次扫描完成）")
-            except (AgentToolError, OSError, ValueError) as exc:
-                print(f"  配置回读失败：{exc}")
+            except (AgentToolError, OSError, ValueError):
+                print("  无法读取配置，安装检查未完成。请运行 om doctor 排查。")
                 unresolved.add("配置回读")
         if unresolved:
             print("  尚未解决：" + "、".join(sorted(unresolved)))

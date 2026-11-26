@@ -286,11 +286,18 @@ def send_opend_alert(base: Path, cfg: dict, *, error_code: str, message_text: st
     fields: list[tuple[str, object]] = [
         ("时间", format_iso_time_beijing(now_utc) or now_utc),
         ("影响", "本轮行情与交易数据可能不完整"),
-        ("原因", message_text),
-        ("诊断", f"`{error_code}`"),
+        ("处理", {
+            "OPEND_NEEDS_PHONE_VERIFY": "请在 OpenD 完成手机验证",
+            "OPEND_NEEDS_PIC_VERIFY": "请在 OpenD 完成图片验证",
+            "OPEND_LOGIN_INVALID": "登录已失效，请重新登录 OpenD",
+            "OPEND_RATE_LIMIT": "数据请求受限，请稍后重试",
+            "OPEND_QOT_NOT_LOGINED": "OpenD 行情未登录，请登录后重试",
+            "OPEND_TRD_NOT_LOGINED": "OpenD 交易未登录，请登录后重试",
+            "OPEND_PORT_CLOSED": "无法连接 OpenD，请检查服务是否运行",
+            "OPEND_NOT_READY": "OpenD 尚未就绪，请检查连接状态",
+            "OPEND_API_ERROR": "OpenD 数据接口异常，请检查连接状态",
+        }.get(str(error_code), "请检查 OpenD 连接状态")),
     ]
-    if detail:
-        fields.append(("详情", str(detail)[:1200]))
     msg = render_system_notice(
         component="OpenD",
         status="❌ 不可用",
@@ -409,7 +416,7 @@ def send_opend_recovery_notice(base: Path, cfg: dict, *, scope: str = 'project',
         status="✅ 已恢复",
         fields=(
             ("时间", format_iso_time_beijing(now_utc) or now_utc),
-            ("结果", "数据连接已恢复，后续批次将自动重新评估"),
+            ("结果", "数据连接已恢复，将在下次扫描时更新结果"),
         ),
     )
 

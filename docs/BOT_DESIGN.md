@@ -4,6 +4,9 @@ Bot 支持解释 OM 策略、分析已记录的报错、说明历史过滤原因
 
 ## 调用链
 
+Control 的真人查询回复使用业务名称与中文状态，保留账本口径、分页范围、扫描结果与通知确认数量；
+不展示数据库表名或内部汇总责任名称。日志等明确的排障查询仍保留诊断信息，工具 JSON 不随文案变更。
+
 渠道鉴权与去重 → `channel_facade.py` → `local_harness.py` → `host.py` → `runtime.py`。
 
 `runtime.py` 直接使用现有 Python Chat Completions / Responses 适配器。没有历史上下文的首轮默认使用原生 `tool_choice=required` 要求一次工具调用；Host 对独立数字+P/C 简写或完整 put/call 词片段（如“腾讯put”“NVDA call”“卖put”）显式允许先澄清；明确的解释、过滤原因和报错查询仍优先读取，工具名单本身不改变默认值。已有上下文的追问由模型判断是否需要重读。Host 校验参数和固定范围，调用原有 OM 工具，返回脱敏结果；模型随后直接给出正文。没有 Pi 子进程、IPC、答案提交工具、claims 或证据编号准入。

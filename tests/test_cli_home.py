@@ -120,3 +120,24 @@ def test_secret_text_ignores_unexpected_value_field() -> None:
         }
     )
     assert "do-not-print" not in output
+
+
+def test_home_hides_internal_reasons_but_preserves_scope_and_data_time(capsys):
+    from src.interfaces.cli.home import _print_home_status
+    _print_home_status({'scopes': [{'account': 'lx', 'market': 'us',
+        'attempt': {'status': 'attempted', 'reason': 'internal_failure_code'},
+        'brief_available': False, 'brief_reason': '/private/internal/path'}]})
+    output = capsys.readouterr().out
+    assert 'lx · us' in output and '结果尚未确认' in output
+    assert '简报暂不可用' in output
+    assert 'internal_failure_code' not in output and '/private/internal/path' not in output
+
+
+def test_home_read_error_does_not_print_raw_exception(monkeypatch, capsys):
+    from src.interfaces.cli import home
+    def fail():
+        raise ValueError('/private/internal/config.yaml parser details')
+    monkeypatch.setattr(home, '_home_state', fail)
+    assert home.interactive_home(lambda args: 0) == 2
+    output = capsys.readouterr().out
+    assert 'om doctor' in output and '/private/internal' not in output

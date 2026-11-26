@@ -80,7 +80,7 @@ def test_report_defaults_to_generated_runtime_config_and_preserves_explicit_loca
     pdd = next(m for m in runtime.payload["markets"] if m["market"] == "US")["symbols"][0]
     assert pdd["strategies"]["sell_call"]["min_strike"] == 100
     assert runtime.payload["config_source"] == "runtime"
-    assert "config.us.json" in runtime.markdown
+    assert "config.us.json" not in runtime.markdown
     assert "user.us.json" not in runtime.markdown
     local_result = build_config_review(runtime_root=tmp_path, configs_root=local, prices_file=prices, now=NOW)
     assert local_result.payload["config_source"] == "local_user"
