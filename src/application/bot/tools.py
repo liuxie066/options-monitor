@@ -926,7 +926,7 @@ def model_observation(tool_name: str, response: dict[str, Any]) -> dict[str, Any
             data["text"] = "\n".join(f"{start + offset}|{line}" for offset, line in enumerate(data["text"].split("\n")))
             data["text_format"] = "line_numbered"
     if (tool_name == "option_positions_read" and isinstance(data, dict)
-            and data.get("schema_version") == "option_positions_read.assignment_period.v1"
+            and data.get("schema_version") == "option_positions_read.assignment_period.v2"
             and conservative_json_tokens(clean) > MAX_NATIVE_OBSERVATION_TOKENS):
         clean = _assignment_period_overview(clean)
     if conservative_json_tokens(clean) > MAX_NATIVE_OBSERVATION_TOKENS:

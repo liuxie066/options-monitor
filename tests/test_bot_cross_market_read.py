@@ -256,6 +256,7 @@ def test_scene_exposes_events_and_assignment_cohort_fields(monkeypatch, tmp_path
                       "position_effect", "symbol", "option_type", "strike", "exp",
                       "assignment_year", "assignment_month", "assignment_start_date", "assignment_end_date", "refresh_quotes", "stock_lot_id"}
     assert description["default_input"]["action"] == "events"
+    assert 'stock-only realized/unrealized' in description['description']
     assert all(example["input"]["action"] == "events" for example in description["examples"])
 
 

@@ -2130,7 +2130,7 @@ __all__ = [
 def assigned_put_remaining_economics(
     lot: Mapping[str, Any], *, price: Any = None, quantity_usable: bool = True,
 ) -> dict[str, Any]:
-    """Value only this Put's stock and premium, without lifecycle/CC cash.
+    """Value the stock received from this Put, excluding option economics.
 
     The application owns quantity and quote qualification. Missing actual fees
     suppress only the amounts that depend on them; book values remain upstream.
@@ -2145,51 +2145,35 @@ def assigned_put_remaining_economics(
     reasons: list[str] = []
     stock_fact = by_component.get("assignment_stock_fee", {})
     stock_actual = stock_fact.get("basis") == "actual"
-    put_facts = list(lot.get("source_option_fee_allocations") or [])
-    put_components = {f.get("component") for f in put_facts}
-    put_actual = (put_components == {"option_open", "option_assignment"}
-                  and all(f.get("basis") == "actual" and f.get("amount") is not None for f in put_facts))
     cost = to_decimal(lot.get("stock_cost_basis_total"), field_name="stock_cost_basis_total")
     remaining_cost = cost * Decimal(remaining) / Decimal(opened)
-    premium_raw = lot.get("put_open_premium_exact")
-    if premium_raw is None:
-        put_actual = False
-        reasons.append("exact_put_premium_unavailable")
-    premium = to_decimal(premium_raw, field_name="put_premium") if premium_raw is not None else None
-    net = (premium - sum((to_decimal(f.get("amount"), field_name="put_fee") for f in put_facts), Decimal(0))) if put_actual and premium is not None else None
-    remaining_net = net * Decimal(remaining) / Decimal(opened) if net is not None else None
-    sold_net = net - remaining_net if net is not None else None
     spot = price if price is not None else lot.get("spot")
     stock_pnl = None
     if not quantity_usable:
         reasons.append("stock_quantity_unverified")
     elif remaining == 0:
         stock_pnl = Decimal(0)
-        remaining_net = Decimal(0)
     elif not stock_actual:
         reasons.append("actual_stock_settlement_fee_missing")
     elif spot is None:
         reasons.append("qualified_quote_missing")
     else:
         stock_pnl = Decimal(remaining) * to_decimal(spot, field_name="price") - remaining_cost
-    if not put_actual and remaining > 0:
-        reasons.append("actual_put_fee_missing")
-    with_put = stock_pnl + remaining_net if stock_pnl is not None and remaining_net is not None else None
     sale_facts = [f for f in facts if "sale" in str(f.get("component"))]
     sold_actual = all(f.get("basis") == "actual" for f in sale_facts) and (sold == 0 or bool(sale_facts))
     realized = (None if not quantity_usable else Decimal(0) if sold == 0 else
                 to_decimal(lot.get("assigned_stock_realized_pnl", 0), field_name="realized")
                 if sold_actual and stock_actual else None)
+    if quantity_usable and sold > 0:
+        if not stock_actual and "actual_stock_settlement_fee_missing" not in reasons:
+            reasons.append("actual_stock_settlement_fee_missing")
+        if not sold_actual:
+            reasons.append("actual_stock_sale_fee_missing")
     def text(value: Decimal | None) -> str | None:
         return format(value, "f") if value is not None else None
     return {
         "stock_unrealized_pnl": text(stock_pnl),
-        "remaining_pnl_with_put": text(with_put),
         "remaining_stock_cost_basis_exact": text(remaining_cost),
-        "put_net_premium": text(net),
-        "allocated_put_net_premium_remaining": text(remaining_net if quantity_usable else None),
-        "allocated_put_net_premium_sold": text(sold_net if quantity_usable else None),
         "stock_realized_pnl": text(realized),
-        "sold_pnl_with_put": text(realized + sold_net) if realized is not None and sold_net is not None else None,
         "reasons": reasons,
     }

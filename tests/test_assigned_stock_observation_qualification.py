@@ -118,7 +118,7 @@ def test_same_execution_conflict_keeps_closed_sale_targets_affected():
         assert not conflict['resolved']
         assert conflict['candidate_stock_lot_ids'] == [current['stock_lot_id']]
         assert _affected(current, conflict)
-        assert assigned_put_remaining_economics(current, quantity_usable=False)['remaining_pnl_with_put'] is None
+        assert assigned_put_remaining_economics(current, quantity_usable=False)['stock_unrealized_pnl'] is None
     # A later disposal with a distinct execution cannot consume old closed inventory.
     different = {**recorded, 'source_deal_id': 'other', 'shares': 40, 'trade_time_ms': 5000}
     for unrelated in (different, {**variants[2], 'account': 'sy'},
@@ -182,5 +182,5 @@ def test_report_requested_symbol_does_not_hide_identity_linked_revision(tmp_path
     )
     assert captured == [None]
     assert result['rows'][0]['quantity_status'] == 'pending'
-    assert result['rows'][0]['remaining_pnl_with_put'] is None
+    assert result['rows'][0]['stock_unrealized_pnl'] is None
     assert result['unresolved_stock_sales'][0]['symbol'] == 'FUTU'

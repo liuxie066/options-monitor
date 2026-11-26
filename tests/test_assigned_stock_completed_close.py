@@ -214,8 +214,9 @@ def test_no_daily_close_carry_during_regular_session_or_hk_lunch(monkeypatch, tm
 @pytest.mark.parametrize('account', [None, 'lx', 'sy'])
 @pytest.mark.parametrize('missing_pdd', [False, True])
 @pytest.mark.parametrize('history_complete', [False, True])
+@pytest.mark.parametrize('sale_shares', [40, 100])
 def test_public_ytd_completed_close_preserves_ledger_basis_and_metric_gaps(
-    monkeypatch, tmp_path, account, missing_pdd, history_complete, period,
+    monkeypatch, tmp_path, account, missing_pdd, history_complete, period, sale_shares,
 ):
     """Synthetic lots with production-shaped symbols/times; no real ledger facts."""
     import json
@@ -275,7 +276,7 @@ def test_public_ytd_completed_close_preserves_ledger_basis_and_metric_gaps(
                 lot_id=name + '-lot' if kind == 'open' else None))
     writer.upsert_assigned_stock_event({
         'stock_event_id': 'sold-stock', 'event_type': 'sale', 'account': 'lx', 'broker': '富途',
-        'symbol': 'FUTU', 'currency': 'USD', 'side': 'sell', 'shares': 100, 'price': 105,
+        'symbol': 'FUTU', 'currency': 'USD', 'side': 'sell', 'shares': sale_shares, 'price': 105,
         'fees': 1, 'fee_provenance': {'basis': 'actual', 'source': 'synthetic'},
         'target_stock_lot_id': 'assigned-stock-sold-assignment', 'trade_time_ms': stamp - 50_000})
     _inbox(str(db) + '.trade_intake_inbox.sqlite3', [])
@@ -317,8 +318,12 @@ def test_public_ytd_completed_close_preserves_ledger_basis_and_metric_gaps(
         **({'account': account} if account else {})})
     assert response['ok'], response
     data = response['data']
+    from tests.test_assignment_period_entry_contract import assert_stock_only_period
+    assert_stock_only_period(response)
+    sold_remaining_pnl = '-715.2' if sale_shares == 40 else '0'
+    realized_pnl = '198.6' if sale_shares == 40 else '498'
     expected = {'tencent': '-6261', 'meituan': '-856', 'pop': '-231', 'futu': '-1192',
-                'pdd': None if missing_pdd else '-1279', 'sold': '0'}
+                'pdd': None if missing_pdd else '-1279', 'sold': sold_remaining_pnl}
     for row in data['rows']:
         name = row['source_assignment_event_id'].removesuffix('-assignment')
         if expected[name] is None:
@@ -327,23 +332,38 @@ def test_public_ytd_completed_close_preserves_ledger_basis_and_metric_gaps(
             assert Decimal(row['stock_unrealized_pnl']) == Decimal(expected[name])
         assert row['quantity_status'] == ('confirmed' if history_complete else 'ledger_only')
         if history_complete:
-            assert row['confirmed']['shares_remaining'] == (0 if name == 'sold' else 100)
+            assert row['confirmed']['shares_remaining'] == (100 - sale_shares if name == 'sold' else 100)
             assert row['provisional'] is None
         else:
             assert row['confirmed']['shares_remaining'] is None
-            assert row['provisional']['shares_remaining'] == (0 if name == 'sold' else 100)
-        assert row['quote_status'] == ('not_required' if name == 'sold' else
+            assert row['provisional']['shares_remaining'] == (100 - sale_shares if name == 'sold' else 100)
+        assert Decimal(row['stock_realized_pnl']) == Decimal(realized_pnl if name == 'sold' else '0')
+        assert {f['component'] for f in row['fee_evidence']} == (
+            {'assignment_stock_fee', 'stock_sale_fee'} if name == 'sold' else {'assignment_stock_fee'})
+        assert row['quote_status'] == ('not_required' if name == 'sold' and sale_shares == 100 else
                                       'missing_quote' if name == 'pdd' and missing_pdd else 'closed_market_carry')
         if name == 'pdd':
-            assert row['remaining_pnl_with_put'] is None
+            assert 'remaining_pnl_with_put' not in row
     assert data['coverage']['source_history'] == ('complete' if history_complete else 'unknown')
     assert data['coverage']['status'] == ('partial' if not history_complete or missing_pdd and account != 'lx' else 'complete')
     if account is None:
         by_currency = data['summary']['by_currency']
         assert by_currency['HKD']['stock_unrealized_pnl']['value'] == '-7348.00'
-        assert by_currency['USD']['stock_unrealized_pnl']['value'] == ('-1192.00' if missing_pdd else '-2471.00')
-        assert data['summary']['cny_estimate']['metrics']['stock_unrealized_pnl']['value'] == (
-            '-14589.80' if missing_pdd else '-23542.80')
+        assert Decimal(by_currency['USD']['stock_unrealized_pnl']['value']) == (
+            Decimal('-1192.00' if missing_pdd else '-2471.00') + Decimal(sold_remaining_pnl))
+        assert Decimal(data['summary']['cny_estimate']['metrics']['stock_unrealized_pnl']['value']) == (
+            Decimal('-14589.80' if missing_pdd else '-23542.80') + Decimal(sold_remaining_pnl) * 7)
+    expected_realized = Decimal(0 if account == 'sy' else realized_pnl)
+    assert Decimal(data['summary']['by_currency']['USD']['stock_realized_pnl']['value']) == expected_realized
+    assert Decimal(data['summary']['cny_estimate']['metrics']['stock_realized_pnl']['value']) == expected_realized * 7
+    for account_row in data['accounts']:
+        amount = Decimal(realized_pnl if account_row['account'] == 'lx' else '0')
+        assert Decimal(account_row['summary']['by_currency']['USD']['stock_realized_pnl']['value']) == amount
+        assert Decimal(account_row['summary']['cny_estimate']['metrics']['stock_realized_pnl']['value']) == amount * 7
+        for symbol_row in account_row['symbols']:
+            currency = 'HKD' if symbol_row['symbol'].endswith('.HK') else 'USD'
+            expected_symbol = amount if symbol_row['symbol'] == 'FUTU' else Decimal(0)
+            assert Decimal(symbol_row['summary']['by_currency'][currency]['stock_realized_pnl']['value']) == expected_symbol
     expected_symbols = {s for _, a, s, _ in setups if not account or a == account}
     qualified = expected_symbols - ({'PDD'} if missing_pdd else set())
     assert set(data['quote_refresh']['received_symbols']) == expected_symbols

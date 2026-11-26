@@ -89,6 +89,7 @@ def build_scene_manifest(
                 "Read local trades: action=events, market/symbol, max20 per signed-snapshot page. "
                 "Assignment events are not broker confirmation. Put stock P&L: action=assigned-stock with "
                 "assignment_year/month or paired assignment_start_date/end_date; Shanghai cohorts, current state/price. "
+                "stock-only realized/unrealized P&L; stock fees, no options. "
                 "Omitted P&L period: current Shanghai YYYY-MM assignment_month (MTD). Includes sold lots; "
                 "never fill as_of_ms. Requires both US/HK read grants; preserve metric basis/coverage and nulls."
             )

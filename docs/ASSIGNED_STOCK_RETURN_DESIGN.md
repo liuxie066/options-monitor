@@ -256,11 +256,15 @@ Asia/Shanghai。期间明细的 `assigned_date` 也从 `assigned_at_ms` 按同�
 `from=2026-10-01 to=2026-10-31`，可附账户、标的和 `no-refresh`。
 `no-refresh` 或注入冻结报价时不联网取得报价/FX；缺失 FX 保留原币结果。
 
-新结果版本为 `option_positions_read.assignment_period.v1`。`summary.by_currency`
-分别提供正股剩余浮盈亏与余股抵扣 Put 净权利金后的盈亏，`cny_estimate`
+结果版本为 `option_positions_read.assignment_period.v2`。`summary.by_currency`
+仅提供剩余正股浮盈亏（`stock_unrealized_pnl`）与正股已实现盈亏（`stock_realized_pnl`），`cny_estimate`
 独立保留汇率证据及覆盖；账户/标的/批次下钻沿用相同未展示舍入的 Decimal
-金额。完全售出且数量无冲突的批次两项剩余盈亏为零，不需现价。已售已实现
-及对应 Put 净额单列，组合其他腿、CC 收益及期间现金流不叠加。
+金额。完全售出且数量无冲突的批次剩余浮盈亏为零，不需现价；已售损益仅按
+正股卖出净回款减去所售股份交割成本计算。交割费用按售出/剩余股数分配，卖出
+费用计入已实现盈亏；缺实际费用时受影响净额为空并说明缺口。
+本报表及模型观察均不返回 Put 混合盈亏、分摊权利金或期权费用金额；
+组合其他腿、CC 收益及期间现金流不叠加。底层 Put 权利金/费用事实、独立期权
+绩效与无期间参数的生命周期查询保持各自口径。
 
 查询经 ledger owner 的同连接短只读事务取得有效交易和股票卖出事实，再释放
 事务取价。trade intake owner 只读发现未入账股票卖出及账户未归属状态；不能从
@@ -270,9 +274,9 @@ Asia/Shanghai。期间明细的 `assigned_date` 也从 `assigned_at_ms` 按同�
 的估算，并列 `provisional_lot_ids`。原始成交与人工确认事件不能凭相近时间自动
 配对。未知与完整零匹配分开，Bot 必须引用完整 owner 汇总，不对截断明细求和。
 
-期间查询的 Put 毛权利金和实际期权费直接消费 canonical economic allocation，
-保留 allocation/source-event 身份及精确金额；最后一次关闭的开仓费用余数不可再次按
-源开仓合约比例重算。期间明细仅暴露本次口径的金额，报价状态/市场时刻和
+底层 Put 毛权利金和实际期权费仍由 canonical economic allocation 持有，
+保留 allocation/source-event 身份及精确金额，期间报表不输出这些金额。
+期间明细仅暴露正股口径的金额及交割/卖出费用，报价状态/市场时刻和
 `assigned_stock_unrealized_pnl` 别名与合格后的正股指标保持一致，避免混入初始无价
 投影的 null 或不相关生命周期/CC 总额。
 
@@ -296,4 +300,4 @@ Bot 超过观察预算时保留 owner 已计算的完整概览、分户汇总和
 期间明细的 `valuation_basis` 区分 `confirmed`、`ledger`、`unavailable`；`confirmed`
 对象只承载已核实数量/损益，`provisional` 对象明确承载无已知冲突的账本暂估及
 `source_history`。既有顶层金额和汇总的账本 basis/partial 语义不变，不代表券商历史
-已完整核实。数量待核实时，已售净额和已售份额权利金也不可报告为确定数值。
+已完整核实。数量待核实时，正股已实现盈亏也不可报告为确定数值。

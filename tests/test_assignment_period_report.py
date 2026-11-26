@@ -46,24 +46,24 @@ def test_pending_sale_does_not_pollute_future_lot_or_other_account():
 
 def test_aggregation_preserves_unrounded_values_and_distinguishes_null_zero():
     rows = [{'stock_lot_id': 'a', 'currency': 'HKD', 'quantity_status': 'ledger_only',
-             'stock_unrealized_pnl': '1.005', 'remaining_pnl_with_put': None, 'reasons': ['missing_fee']},
+             'stock_unrealized_pnl': '1.005', 'stock_realized_pnl': None, 'reasons': ['missing_fee']},
             {'stock_lot_id': 'b', 'currency': 'HKD', 'quantity_status': 'confirmed',
-             'stock_unrealized_pnl': '1.005', 'remaining_pnl_with_put': '0', 'reasons': []}]
+             'stock_unrealized_pnl': '1.005', 'stock_realized_pnl': '0', 'reasons': []}]
     summary = summarize_lots(rows)
     stock = summary['by_currency']['HKD']['stock_unrealized_pnl']
     assert stock['value'] == '2.01'
     assert stock['coverage'] == 'partial'
     assert stock['provisional_lot_ids'] == ['a']
-    put = summary['by_currency']['HKD']['remaining_pnl_with_put']
-    assert put['value'] == '0.00' and put['omitted_lot_ids'] == ['a']
-    assert summarize_lots([rows[0]])['by_currency']['HKD']['remaining_pnl_with_put']['value'] is None
+    realized = summary['by_currency']['HKD']['stock_realized_pnl']
+    assert realized['value'] == '0.00' and realized['omitted_lot_ids'] == ['a']
+    assert summarize_lots([rows[0]])['by_currency']['HKD']['stock_realized_pnl']['value'] is None
     assert summarize_lots([])['empty_value'] == '0.00'
     assert summarize_lots([], empty_is_zero=False)['empty_value'] is None
 
 
 def test_missing_fx_keeps_native_and_never_yields_false_cny_zero():
     rows = [{'stock_lot_id': 'a', 'currency': 'USD', 'quantity_status': 'confirmed',
-             'stock_unrealized_pnl': '-12', 'remaining_pnl_with_put': '-10', 'reasons': []}]
+             'stock_unrealized_pnl': '-12', 'stock_realized_pnl': '-10', 'reasons': []}]
     summary = summarize_lots(rows)
     fx = _fx_summary(summary, {}, ms('2026-11-25T12:00:00'))
     assert fx['metrics']['stock_unrealized_pnl']['value'] is None
@@ -78,7 +78,7 @@ def test_cny_aggregation_rejects_mixed_source_and_keeps_decimal(monkeypatch):
         return {'pairs': snapshot}
     monkeypatch.setattr(report, 'project_exchange_rate_snapshot', projection)
     rows = [{'stock_lot_id': c, 'currency': c, 'quantity_status': 'confirmed',
-             'stock_unrealized_pnl': '-1.005', 'remaining_pnl_with_put': '-1', 'reasons': []}
+             'stock_unrealized_pnl': '-1.005', 'stock_realized_pnl': '-1', 'reasons': []}
             for c in ('USD', 'HKD')]
     summary = summarize_lots(rows)
     pair = {'display_eligible': True, 'quote_at_utc': '2026-11-25T03:59:00+00:00', 'rate': '1', 'source': 'a'}

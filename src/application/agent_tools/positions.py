@@ -489,7 +489,7 @@ def _option_positions_output_contract(payload: dict[str, Any]) -> dict[str, Any]
         if any(key in normalized for key in ("assignment_year", "assignment_month", "assignment_start_date", "assignment_end_date")):
             return {
                 **_OPTION_POSITIONS_ASSIGNED_STOCK_OUTPUT_CONTRACT,
-                "schema_version": "option_positions_read.assignment_period.v1",
+                "schema_version": "option_positions_read.assignment_period.v2",
                 "fact_fields": ["query", "summary", "accounts", "rows", "coverage", "source", "pagination",
                                 "freshness", "unresolved_stock_sales", "scope_reviews", "quote_refresh"],
                 "missing_data_fields": ["coverage", "rows[].reasons", "scope_reviews"],
@@ -1159,6 +1159,7 @@ OPTION_POSITIONS_READ_TOOL = build_agent_tool(
         "expired_position_marked_open means local inconsistency, not broker settlement/assignment/liquidation/pending order. "
         "cash_secured_amount is assignment collateral, not profit/cash/loss. Only assigned-stock adds read-only price evidence. "
         "Put assignment P&L: action=assigned-stock with assignment_year/month or paired start/end dates. "
+        "stock-only realized/unrealized P&L; stock fees, no options. "
         "Shanghai assignment cohort, current remainder/eligible price; omitted period defaults current YYYY-MM "
         "assignment_month (MTD). Include sold lots: status=all. Never fill as_of_ms for current valuation. "
         "Retain per-metric coverage/basis; ledger estimates are not verified broker holdings."
