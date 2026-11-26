@@ -1,0 +1,82 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.71",
+  "base": {
+    "tag": "v4.6.70",
+    "commit": "6b1c045aa979e1297d0b65b8dda1bd9197acb40d"
+  },
+  "reviewed_head": "455e679735e1e31a4a1c586adb02efaeb92f5c35",
+  "commits": [
+    {
+      "sha": "34f92e9cc698bc4cfbc707ceae96c8de6a6a0e90",
+      "subject": "fix(upgrade): maintain historical releases after successful upgrades"
+    },
+    {
+      "sha": "dec766301eb4675248371c68d53991ba19d3ad9f",
+      "subject": "Merge remote-tracking branch 'origin/main' into cindy/lively-knuth"
+    },
+    {
+      "sha": "dc68ac01f514cfea34d3ca0af393d342d8220ef8",
+      "subject": "docs: keep upgrade maintenance link in product archives"
+    },
+    {
+      "sha": "e980a79159ffdf63c3d2fd11b1f661d60769674f",
+      "subject": "Merge remote-tracking branch 'origin/main' into cindy/lively-knuth"
+    },
+    {
+      "sha": "455e679735e1e31a4a1c586adb02efaeb92f5c35",
+      "subject": "Merge pull request #1300 from liuxie066/cindy/lively-knuth"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "正常升级成功后自动维护历史版本，保留当前版本、实际回退版本、历史状态目录及所需共享环境；升级失败或跳过服务重启时不清理，清理失败单独记录。",
+      "commits": [
+        "34f92e9cc698bc4cfbc707ceae96c8de6a6a0e90",
+        "dec766301eb4675248371c68d53991ba19d3ad9f",
+        "dc68ac01f514cfea34d3ca0af393d342d8220ef8",
+        "e980a79159ffdf63c3d2fd11b1f661d60769674f",
+        "455e679735e1e31a4a1c586adb02efaeb92f5c35"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "34f92e9cc698bc4cfbc707ceae96c8de6a6a0e90",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1300",
+        "docs/DEPLOY_LINUX_MAC.md"
+      ]
+    },
+    {
+      "commit": "dec766301eb4675248371c68d53991ba19d3ad9f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1300",
+        "docs/DEPLOY_LINUX_MAC.md"
+      ]
+    },
+    {
+      "commit": "dc68ac01f514cfea34d3ca0af393d342d8220ef8",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1300",
+        "docs/DEPLOY_LINUX_MAC.md"
+      ]
+    },
+    {
+      "commit": "e980a79159ffdf63c3d2fd11b1f661d60769674f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1300",
+        "docs/DEPLOY_LINUX_MAC.md"
+      ]
+    },
+    {
+      "commit": "455e679735e1e31a4a1c586adb02efaeb92f5c35",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1300",
+        "docs/DEPLOY_LINUX_MAC.md"
+      ]
+    }
+  ]
+}
