@@ -570,6 +570,7 @@ def load_wheel_candidate_cash_fact(*, base: Path, snapshot: Mapping[str, Any]) -
         if not isinstance(options, Mapping):
             raise WheelCandidateSnapshotError("ledger dependency unavailable")
         return {
+            "withdrawal_runtime_root": str(base.resolve()),
             "cash_evidence": cash_snapshot_evidence(portfolio),
             "cash_snapshot": portfolio.get("cash_snapshot"),
             "cash_authority": portfolio.get("capacity_authority"),

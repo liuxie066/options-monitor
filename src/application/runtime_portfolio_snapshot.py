@@ -99,7 +99,8 @@ MAX_CANONICAL_BYTES = 1_048_576
 SECTION_NAMES = tuple("ledger_projection broker_cash broker_positions cash_occupation source_status".split())
 SECTION_SCHEMA_VERSIONS = {name: f"runtime_portfolio_snapshot.{name}.v1" for name in SECTION_NAMES}
 BROKER_CASH_SCHEMA_V1 = SECTION_SCHEMA_VERSIONS["broker_cash"]
-SECTION_SCHEMA_VERSIONS["broker_cash"] = "runtime_portfolio_snapshot.broker_cash.v2"
+BROKER_CASH_SCHEMA_V2 = "runtime_portfolio_snapshot.broker_cash.v2"
+SECTION_SCHEMA_VERSIONS["broker_cash"] = "runtime_portfolio_snapshot.broker_cash.v3"
 BROKER_POSITIONS_SCHEMA_V1 = SECTION_SCHEMA_VERSIONS["broker_positions"]
 SECTION_SCHEMA_VERSIONS["broker_positions"] = "runtime_portfolio_snapshot.broker_positions.v2"
 SOURCE_OWNERS = tuple("broker_portfolio candidate_results ledger_projection required_data".split())
@@ -171,6 +172,9 @@ SECTION_FACT_KEYS["broker_cash"] += tuple(
     "portfolio_source_name cash_source_observed_at cash_snapshot cash_balance_reliable "
     "cash_balance_unavailable_by_row cash_source_observation_status source_observation_status".split()
 )
+
+BROKER_CASH_V2_FACT_KEYS = SECTION_FACT_KEYS["broker_cash"]
+SECTION_FACT_KEYS["broker_cash"] += ("withdrawal_reserve", "cash_gross_by_currency")
 
 
 def _positions_completeness(context: Mapping[str, Any]) -> dict[str, Any]:
@@ -270,10 +274,11 @@ def project_ledger_projection_facts(
     }
 
 
-def project_broker_cash_facts(source: Mapping[str, Any]) -> dict[str, Any]:
+def project_broker_cash_facts(source: Mapping[str, Any], *, version: str | None = None) -> dict[str, Any]:
     source = _mapping(source, "broker portfolio")
+    keys = BROKER_CASH_V2_FACT_KEYS if version == BROKER_CASH_SCHEMA_V2 else SECTION_FACT_KEYS["broker_cash"]
     return {**_project_required(source, BROKER_CASH_V1_FACT_KEYS),
-            **{key: source.get(key) for key in SECTION_FACT_KEYS["broker_cash"] if key not in BROKER_CASH_V1_FACT_KEYS}}
+            **{key: source.get(key) for key in keys if key not in BROKER_CASH_V1_FACT_KEYS}}
 
 
 def project_broker_positions_facts(source: Mapping[str, Any]) -> dict[str, Any]:
@@ -970,7 +975,8 @@ def _section(value: Any, name: str, account: str) -> dict[str, Any]:
         _fail("SECTION_ACCOUNT_MISMATCH", f"{name} account mismatch")
     version = row.get("schema_version")
     legacy_version = {"broker_cash": BROKER_CASH_SCHEMA_V1, "broker_positions": BROKER_POSITIONS_SCHEMA_V1}.get(name)
-    if version != SECTION_SCHEMA_VERSIONS[name] and (legacy_version is None or version != legacy_version):
+    if (version != SECTION_SCHEMA_VERSIONS[name] and (legacy_version is None or version != legacy_version)
+            and not (name == "broker_cash" and version == BROKER_CASH_SCHEMA_V2)):
         _fail("SECTION_SCHEMA_INVALID", f"{name} schema is invalid")
     facts = (
         _source_status_facts(row.get("facts"))
@@ -1027,6 +1033,8 @@ def _section(value: Any, name: str, account: str) -> dict[str, Any]:
 
 def _validated_section_facts(name: str, value: Any, *, version: str | None = None) -> dict[str, Any]:
     keys = BROKER_CASH_V1_FACT_KEYS if name == "broker_cash" and version == BROKER_CASH_SCHEMA_V1 else SECTION_FACT_KEYS.get(name)
+    if name == "broker_cash" and version == BROKER_CASH_SCHEMA_V2:
+        keys = BROKER_CASH_V2_FACT_KEYS
     if keys is None:
         _fail("SECTION_INVALID", f"unsupported section {name}")
     facts = _mapping(value, f"sections.{name}.facts", set(keys))
@@ -1382,7 +1390,8 @@ def _validate_source_bindings(
     if (current_cash_schema or current_positions_schema) and portfolio_status == "ready":
         if not isinstance(portfolio_payload, Mapping):
             _fail("SOURCE_BINDING_INVALID", "prepared portfolio payload missing")
-        if current_cash_schema and sections["broker_cash"]["facts"] != project_broker_cash_facts(portfolio_payload):
+        if current_cash_schema and sections["broker_cash"]["facts"] != project_broker_cash_facts(
+                portfolio_payload, version=sections["broker_cash"]["schema_version"]):
             _fail("SOURCE_BINDING_INVALID", "broker projection differs from original payload")
         if sections["broker_positions"]["facts"] != project_broker_positions_facts(portfolio_payload):
             _fail("SOURCE_BINDING_INVALID", "broker projection differs from original payload")

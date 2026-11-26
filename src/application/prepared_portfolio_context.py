@@ -766,22 +766,26 @@ def run_worker(request_path: Path) -> int:
             if sealed_hash != fx_hash:
                 raise PreparedPortfolioContextError("worker FX snapshot mismatch")
             fx_observation = project_exchange_rate_snapshot(fx_snapshot, purpose="capacity")
-        context = load_account_portfolio_context(
-            market=broker,
-            account=account,
-            state_dir=state_dir,
-            log=logs.append,
-            runtime_config=cfg,
-            portfolio_source=str(source),
-            fetch_futu_portfolio_context_fn=fetch_futu_portfolio_context,
-            required_position_asset_types=("stock",),
-            exchange_rate_cache_path=base / "output_shared" / "state" / "rate_cache.json",
-            **({"exchange_rate_observation": fx_observation} if fx_hash is not None else {}),
-            load_json_fn=load_cached_json,
-            write_cache=False,
-            deadline=deadline,
-            cancelled=stop.is_set,
-        )
+        from src.application.runtime_paths import runtime_root_scope
+
+        with runtime_root_scope(base, source="prepared_portfolio"):
+            context = load_account_portfolio_context(
+                market=broker,
+                account=account,
+                state_dir=state_dir,
+                log=logs.append,
+                runtime_config=cfg,
+                portfolio_source=str(source),
+                fetch_futu_portfolio_context_fn=fetch_futu_portfolio_context,
+                required_position_asset_types=("stock",),
+                exchange_rate_cache_path=base / "output_shared" / "state" / "rate_cache.json",
+                **({"exchange_rate_observation": fx_observation} if fx_hash is not None else {}),
+                load_json_fn=load_cached_json,
+                write_cache=False,
+                persist_withdrawals=True,
+                deadline=deadline,
+                cancelled=stop.is_set,
+            )
         check_fetch_control(deadline, stop.is_set)
         try:
             context = prepare_position_sizing_evidence(

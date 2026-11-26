@@ -925,7 +925,8 @@ def test_benchmark_gate_measures_valid_path_and_faults() -> None:
 
 
 @pytest.mark.parametrize("positions_complete", [True, False])
-def test_v2_cash_preserves_verdict_and_binds_real_position_completeness(positions_complete):
+@pytest.mark.parametrize("cash_version", [2, 3])
+def test_cash_preserves_verdict_and_binds_real_position_completeness(positions_complete, cash_version):
     assembly = _owner_assembly_kwargs()
     original = json.loads(assembly["prepared_portfolio_payload_bytes"])
     original["position_snapshot_input"]["completeness"] = "complete" if positions_complete else "partial"
@@ -940,8 +941,19 @@ def test_v2_cash_preserves_verdict_and_binds_real_position_completeness(position
     assembly.update(prepared_portfolio_payload_bytes=raw, prepared_portfolio_manifest_bytes=canonical_json_bytes(manifest))
     snapshot, references = assemble_runtime_portfolio_snapshot(**assembly)
     cash = snapshot["sections"]["broker_cash"]
-    assert cash["schema_version"] == "runtime_portfolio_snapshot.broker_cash.v2"
+    assert cash["schema_version"] == "runtime_portfolio_snapshot.broker_cash.v3"
     assert cash["facts"]["cash_snapshot"] == payload["cash_snapshot"]
+    assert cash["facts"]["withdrawal_reserve"] == payload["withdrawal_reserve"]
+    if cash_version == 2:
+        cash["schema_version"] = "runtime_portfolio_snapshot.broker_cash.v2"
+        for key in ("withdrawal_reserve", "cash_gross_by_currency"):
+            cash["facts"].pop(key)
+        cash["content_sha256"] = sha256_bytes(canonical_json_bytes(cash["facts"]))
+        snapshot = build_runtime_portfolio_snapshot(
+            run_id=snapshot["run_id"], account=snapshot["account"], sections=snapshot["sections"],
+            replay_bindings=snapshot["replay_bindings"], chosen_results=snapshot["chosen_results"],
+            ledger_shadow=snapshot["ledger_shadow"], reference_payloads=references)
+        cash = snapshot["sections"]["broker_cash"]
     assert snapshot["sections"]["broker_positions"]["completeness"]["status"] == ("complete" if positions_complete else "unavailable")
     assert _verified(snapshot, expected_run_id=assembly["run_id"], expected_account=assembly["account"], reference_payloads=references) == snapshot
     # Even a recomputed section hash cannot detach the projection from its original source.

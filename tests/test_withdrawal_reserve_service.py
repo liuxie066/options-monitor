@@ -230,3 +230,172 @@ def test_read_only_query_never_writes_reservations(tmp_path):
     assert observe(path, gateway=Gateway([FLOW]), persist=False)["reserved_by_currency"] == {"HKD": 10000}
     assert observe(path, rows=[{**SOURCE, "amount": "-20000"}], persist=False)["status"] == "unavailable"
     assert path.read_bytes() == before
+
+
+def test_refresh_failure_preserves_new_source_and_blocks_capacity(tmp_path):
+    path = tmp_path / "new.db"
+    def failed():
+        raise OSError("funds unavailable")
+    result = observe(path, gateway=Gateway([FLOW]), refresh_funds=failed)
+    assert result["status"] == "unavailable"
+    assert result["reserved_by_currency"] == {"HKD": 10000}
+    with service.transaction(path, persist=False) as conn:
+        assert service.read_state(conn, "lx")["records"]["pm1"]["status"] == "matched"
+
+
+def test_manual_preview_readonly_and_offline_receipt_replay(tmp_path):
+    path = tmp_path / "reserve.db"
+    observe(path)
+    kwargs = dict(cfg=CFG, account="lx", account_id="123", environment="REAL",
+                  record_id="pm1", action="cancel", flow_ids=[], reason="cancelled", actor="operator",
+                  path=path, client=pm([SOURCE]), now=NOW,
+                  gateway_factory=lambda: pytest.fail("cancel or replay must not connect to OpenD"))
+    original = path.read_bytes()
+    preview = correction(**kwargs)
+    assert path.read_bytes() == original
+    assert preview["stored_record"]["source"] == preview["current_record"]["source"]
+    result = correction(**kwargs, expected_hash=preview["preview_hash"], operation_id="offline")
+    kwargs["client"] = SimpleNamespace(read_cash_flows=lambda **kw: pytest.fail("receipt replay must not contact PM"))
+    assert correction(**kwargs, expected_hash=preview["preview_hash"], operation_id="offline") == result
+    with pytest.raises(ValueError, match="identity reused"):
+        correction(**kwargs, expected_hash="different", operation_id="offline")
+
+
+def test_manual_preview_missing_store_does_not_create_database(tmp_path):
+    path = tmp_path / "absent.db"
+    with pytest.raises(ValueError, match="no matching"):
+        correction(cfg=CFG, account="lx", account_id="123", environment="REAL", record_id="pm1",
+                   action="cancel", flow_ids=[], reason="cancelled", actor="operator", path=path)
+    assert not path.exists()
+
+
+def test_invalid_pending_cannot_release_manual_reserve(tmp_path):
+    path = tmp_path / "reserve.db"
+    observe(path)
+    gateway = Gateway([FLOW])
+    gateway.get_account_balance = lambda **kw: [{"hk_cash": 90000, "currency": "CNH", "pending_asset": float("nan")}]
+    with pytest.raises(ValueError, match="invalid pending"):
+        correction(cfg=CFG, account="lx", account_id="123", environment="REAL", gateway=gateway,
+                   record_id="pm1", action="settle", flow_ids=["flow1"], reason="receipt", actor="operator",
+                   path=path, client=pm([SOURCE]), now=NOW)
+    assert observe(path)["reserved_by_currency"] == {"HKD": 10000}
+
+
+def test_pm_account_move_blocks_new_account_even_outside_window(tmp_path):
+    from datetime import timedelta
+    path = tmp_path / "reserve.db"
+    observe(path)
+    later = NOW + timedelta(days=20)
+    payload = pm([{**SOURCE, "account": "sy"}]).read_cash_flows()
+    payload.update(account="sy")
+    payload["freshness"]["observed_at_utc"] = later.isoformat()
+    result = service.observe(cfg={}, account="sy", account_id="456", environment="REAL", gateway=Gateway(),
+                             client=SimpleNamespace(read_cash_flows=lambda **kw: payload), path=path, now=later)
+    assert result["status"] == "unavailable"
+    with service.transaction(path, persist=False) as conn:
+        record = service.read_state(conn, "sy")["records"]["pm1"]
+    assert record["foreign_owner"] is True
+
+
+def test_frozen_withdrawal_proof_detects_new_and_settled_changes(tmp_path):
+    path = tmp_path / "output_shared/state/withdrawal_reserves.sqlite3"
+    initial = observe(path, rows=[])
+    context = {"capacity_authority": {"trd_env": "REAL", "futu_account_id": "123"},
+               "withdrawal_reserve": initial}
+    def verify(rows):
+        service.verify_current_withdrawals(cfg={}, account="lx", context=context,
+                                           runtime_root=tmp_path, client=pm(rows), now=NOW)
+    verify([])
+    observe(path, rows=[])  # benign generation/observation bump must not expire the proof
+    verify([])
+    with pytest.raises(ValueError, match="changed"):
+        verify([SOURCE])
+    settled = observe(path, gateway=Gateway([FLOW]))
+    assert settled["reserved_by_currency"] == initial["reserved_by_currency"] == {}
+    with pytest.raises(ValueError, match="changed"):
+        verify([SOURCE])
+
+
+def test_foreign_conflict_shadow_does_not_block_original_owner_recovery(tmp_path):
+    from domain.domain.withdrawal_reserve import reconcile, correct
+    path = tmp_path / "reserve.db"
+    observe(path, gateway=Gateway([FLOW]))
+    with service.transaction(path) as conn:
+        original = service.read_state(conn, "lx")
+        shadow = reconcile(None, [{**SOURCE, "account": "sy"}], [], today=NOW.date(), account="sy",
+                           binding="futu:REAL:456", flow_complete=False, funds_usable=False,
+                           foreign_record_ids={"pm1"})
+        service.save_state(conn, "sy", shadow)
+        missing = reconcile(original, [], [], today=NOW.date(), account="lx", binding=original["binding"],
+                            flow_complete=False, funds_usable=False)
+        service.save_state(conn, "lx", missing)
+    observe(path)  # PM restored to original attribution; destination shadow is not an owner
+    with service.transaction(path, persist=False) as conn:
+        current = service.read_state(conn, "lx")
+    restored = correct(current, record_id="pm1", action="restore", flow_ids=[], flows={},
+                       today=NOW.date(), reason="resolve disputed attribution")
+    assert restored["records"]["pm1"]["status"] == "manual"
+
+
+def test_missing_durable_empty_state_blocks_frozen_confirmation(tmp_path):
+    path = tmp_path / "output_shared/state/withdrawal_reserves.sqlite3"
+    summary = observe(path, rows=[])
+    path.unlink()  # isolated fixture loss
+    with pytest.raises(ValueError, match="durable withdrawal state missing"):
+        service.verify_current_withdrawals(cfg={}, account="lx", context={
+            "capacity_authority": {"trd_env": "REAL", "futu_account_id": "123"}, "withdrawal_reserve": summary},
+            runtime_root=tmp_path, client=pm([]), now=NOW)
+
+
+@pytest.mark.parametrize("persist", [False, True])
+def test_observation_network_outside_write_lock_and_concurrent_edit_not_overwritten(tmp_path, persist):
+    path = tmp_path / "reserve.db"
+    observe(path)
+    def concurrent_pm(**kwargs):
+        with service.transaction(path) as writer:
+            state = service.read_state(writer, "lx")
+            state["records"]["pm1"]["source"]["amount"] = "-20000.00"
+            service.save_state(writer, "lx", state)
+        return pm([SOURCE]).read_cash_flows()
+    result = service.observe(cfg={}, account="lx", account_id="123", environment="REAL", gateway=Gateway(),
+                             client=SimpleNamespace(read_cash_flows=concurrent_pm), path=path, now=NOW, persist=persist)
+    assert result["status"] == "unavailable"
+    with service.transaction(path, persist=False) as conn:
+        assert service.read_state(conn, "lx")["records"]["pm1"]["source"]["amount"] == "-20000.00"
+
+
+def test_manual_network_outside_lock_and_conflict_preserves_newer_state(tmp_path):
+    path = tmp_path / "reserve.db"
+    observe(path)
+    kwargs = dict(cfg=CFG, account="lx", account_id="123", environment="REAL", record_id="pm1",
+                  action="cancel", flow_ids=[], reason="cancelled", actor="operator", path=path, now=NOW)
+    preview = correction(**kwargs, client=pm([SOURCE]))
+    def concurrent_pm(**kw):
+        with service.transaction(path) as writer:
+            state = service.read_state(writer, "lx")
+            state["records"]["pm1"]["source"]["amount"] = "-20000.00"
+            service.save_state(writer, "lx", state)
+        return pm([SOURCE]).read_cash_flows()
+    with pytest.raises(ValueError, match="changed during"):
+        correction(**kwargs, client=SimpleNamespace(read_cash_flows=concurrent_pm),
+                   expected_hash=preview["preview_hash"], operation_id="concurrent")
+    with service.transaction(path, persist=False) as conn:
+        assert service.read_state(conn, "lx")["records"]["pm1"]["source"]["amount"] == "-20000.00"
+
+
+@pytest.mark.parametrize("persist", [False, True])
+def test_revalidation_read_error_never_falls_back_to_old_zero(tmp_path, monkeypatch, persist):
+    import sqlite3
+    path = tmp_path / "reserve.db"
+    observe(path, gateway=Gateway([FLOW]))
+    original_read = service.read_state
+    reads = []
+    def fail_second(conn, account):
+        reads.append(account)
+        if len(reads) > 1:
+            raise sqlite3.OperationalError("read failed after concurrent restore")
+        return original_read(conn, account)
+    monkeypatch.setattr(service, "read_state", fail_second)
+    result = observe(path, persist=persist)
+    assert result["status"] == "unavailable"
+    assert result["reason"] == "withdrawal_state_revalidation_unavailable"

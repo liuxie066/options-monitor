@@ -41,7 +41,7 @@ def normalize_source(row):
         raise ValueError("zero cash flow")
     if row.get("flow_type") not in (None, "", "WITHDRAW" if amount < 0 else "DEPOSIT"):
         raise ValueError("cash flow direction conflict")
-    return {**fields, "amount": str(amount)}
+    return {**fields, "amount": str(amount.quantize(Decimal("0.01")))}
 
 
 def eligible_flow(row, source, today, *, manual=False):
@@ -68,7 +68,7 @@ def eligible_flow(row, source, today, *, manual=False):
 
 
 def reconcile(previous, sources, flows, *, today, account, broker="富途",
-              binding, flow_complete, funds_usable):
+              binding, flow_complete, funds_usable, foreign_record_ids=()):
     """Consume a complete PM account snapshot and account-scoped broker flows.
 
     Caller owns completeness, authority and persistence. A returned state is not
@@ -76,6 +76,11 @@ def reconcile(previous, sources, flows, *, today, account, broker="富途",
     """
     state = deepcopy(previous or {"records": {}, "claimed": {}, "operations": {}})
     records = state["records"]
+    for record in records.values():
+        record["source"] = normalize_source(record["source"])
+        record["version"] = fingerprint(record["source"])
+        if "proposed" in record:
+            record["proposed"] = normalize_source(record["proposed"])
     if state.get("binding") not in (None, binding):
         raise ValueError("withdrawal physical account changed")
     state["binding"] = binding
@@ -91,9 +96,19 @@ def reconcile(previous, sources, flows, *, today, account, broker="富途",
         relevant = source["account"] == account and source["broker"] == broker
         if not relevant and existing is None:
             continue
+        if key in foreign_record_ids and relevant and money(source["amount"]) < 0:
+            if existing is None:
+                existing = records[key] = {"source": source, "version": fingerprint(source),
+                                           "status": "conflict", "flows": []}
+            existing.update(status="conflict", foreign_owner=True)
+        elif existing:
+            existing.pop("foreign_owner", None)
         version = fingerprint(source)
         if existing:
-            if existing["version"] != version:
+            existing.pop("source_missing", None)
+            if existing["status"] == "conflict":
+                existing["proposed"] = source
+            elif existing["version"] != version:
                 if (existing["status"] != "pending" or existing.get("flows") or not relevant
                         or any(existing["source"][k] != source[k]
                                for k in ("account", "broker", "currency")) or money(source["amount"]) >= 0):
@@ -105,7 +120,7 @@ def reconcile(previous, sources, flows, *, today, account, broker="富途",
     # Disappearance never releases a reservation or erases a settled decision.
     for key in records.keys() - seen:
         if records[key]["status"] != "cancelled":
-            records[key]["status"] = "conflict"
+            records[key].update(status="conflict", source_missing=True)
     unique_flows = {}
     for row in flows:
         fid = str(row.get("cashflow_id") or "")
@@ -119,7 +134,8 @@ def reconcile(previous, sources, flows, *, today, account, broker="富途",
                 continue
             source = record["source"]
             matches = [fid for fid, flow in unique_flows.items()
-                       if state["claimed"].get(fid) in (None, key)
+                       if (state["claimed"].get(fid) in (None, key)
+                           or records[state["claimed"][fid]]["status"] == "matched")
                        and eligible_flow(flow, source, today)
                        and money(flow["cashflow_amount"]) == money(source["amount"])]
             candidates[key] = matches
@@ -127,6 +143,10 @@ def reconcile(previous, sources, flows, *, today, account, broker="富途",
             if len(matches) != 1 or sum(matches[0] in values for values in candidates.values()) != 1:
                 continue
             record = records[key]
+            if state["claimed"].get(matches[0]) not in (None, key):
+                continue
+            if record["status"] == "matched" and record["flows"] != matches:
+                continue
             record.update(flows=matches, status="settled" if funds_usable else "matched")
             state["claimed"][matches[0]] = key
     state["covered_since"] = today.isoformat()
@@ -145,7 +165,8 @@ def reserve_summary(state):
             currency = source["currency"]
             totals[currency] = totals.get(currency, Decimal(0)) + abs(money(source["amount"]))
             statuses.setdefault(currency, set()).add(record["status"])
-    return {"status": "unavailable" if conflict else "available",
+    return {"state_fingerprint": fingerprint({key: state.get(key) for key in ("binding", "records", "claimed")}),
+            "status": "unavailable" if conflict else "available",
             "reason": "withdrawal_source_conflict" if conflict else "ok",
             "reserved_by_currency": {k: float(v) for k, v in totals.items()},
             "statuses_by_currency": {k: sorted(v) for k, v in statuses.items()}}
@@ -175,6 +196,10 @@ def correct(state, *, record_id, action, flow_ids, flows, today, reason):
     result = deepcopy(state)
     record = result["records"][record_id]
     source = record.get("proposed", record["source"])
+    if record.get("foreign_owner") and action != "cancel":
+        raise ValueError("resolve previous PM account reservation before correction")
+    if record.get("source_missing") and action != "cancel":
+        raise ValueError("current PM record missing; only explicit cancellation allowed")
     if money(source["amount"]) >= 0:
         raise ValueError("correct PM to a valid withdrawal before manual resolution")
     if action == "settle":
@@ -185,7 +210,7 @@ def correct(state, *, record_id, action, flow_ids, flows, today, reason):
             owner = result["claimed"].get(fid)
             if owner not in (None, record_id):
                 old_record = result["records"][owner]
-                if old_record["status"] != "manual" or old_record.get("flows"):
+                if fid in old_record.get("flows", []):
                     raise ValueError("cash flow already claimed")
         if not all(eligible_flow(flow, source, today, manual=True) for flow in chosen):
             raise ValueError("cash flow not eligible")

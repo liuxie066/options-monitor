@@ -26,6 +26,7 @@ def cash_portfolio(value, *, account="lx", account_id="123", evaluated_at=None):
     authority = {**result["capacity_authority"], **value.get("capacity_authority", {})}
     if isinstance(value.get("position_snapshot_input"), dict):
         value["position_snapshot_input"] = {**result["position_snapshot_input"], **value["position_snapshot_input"]}
+    result["withdrawal_reserve"] = {"status": "available", "reason": "ok", "reserved_by_currency": {}}
     result.update(value)
     result["capacity_authority"] = authority
     result["cash_snapshot"] = evaluate_account_cash_snapshot(result, config=config, account=account,

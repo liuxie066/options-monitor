@@ -123,7 +123,9 @@ def cash_snapshot_is_usable(context: Mapping[str, Any]) -> bool:
 def withdrawal_reserve_is_usable(context: Mapping[str, Any]) -> bool:
     """Keep withdrawal qualification separate from raw broker cash freshness."""
     reserve = context.get("withdrawal_reserve")
-    return reserve is None or (isinstance(reserve, Mapping) and reserve.get("status") == "available")
+    if reserve is None:
+        return context.get("portfolio_source_name") != "futu"
+    return isinstance(reserve, Mapping) and reserve.get("status") == "available"
 
 
 def _expected_capacity_authority(config: Mapping[str, Any], *, account: str | None) -> dict[str, Any]:
@@ -181,7 +183,7 @@ def cash_snapshot_evidence(context: Mapping[str, Any]) -> dict[str, Any]:
         "cash_balance_reliable", "cash_balance_unavailable_by_row",
         "cash_source_observed_at", "cash_source_observation_status",
         "source_observation_status", "cash_provider_error",
-        "assignment_pending",
+        "assignment_pending", "withdrawal_reserve", "cash_gross_by_currency",
     )
     snapshot = context.get("cash_snapshot")
     return {**{key: deepcopy(context[key]) for key in keys if key in context},
@@ -240,6 +242,7 @@ def load_account_portfolio_context(
     fetch_futu_portfolio_context_fn: Callable[..., dict[str, Any]],
     load_json_fn: JsonLoader = _read_json_from_path,
     write_cache: bool = True,
+    persist_withdrawals: bool | None = None,
     exchange_rate_observation: Mapping[str, Any] | None | object = _FX_NOT_PROVIDED,
     exchange_rate_cache_path: Path | None = None,
     include_options: bool = False,
@@ -329,6 +332,8 @@ def load_account_portfolio_context(
         "write_cache": write_cache,
         "exchange_rate_cache_path": exchange_rate_cache_path or shared_exchange_rate_cache_path(resolve_runtime_root(repo_root=Path(__file__).resolve().parents[2]).runtime_root),
     }
+    if source_plan.primary_source == "futu" and persist_withdrawals is not None:
+        kwargs["persist_withdrawals"] = persist_withdrawals
     if include_options:
         kwargs["include_options"] = True
     if exchange_rate_observation is not _FX_NOT_PROVIDED:

@@ -84,6 +84,8 @@ def _agent_payload(branch, direction, *, run_id, expected_snapshot_hash):
 
 
 def _environment(tmp_path, direction, monkeypatch):
+    from src.application import withdrawal_reserve
+    monkeypatch.setattr(withdrawal_reserve, "verify_current_withdrawals", lambda **kwargs: None)
     if direction == "put":
         class Clock(datetime):
             @classmethod

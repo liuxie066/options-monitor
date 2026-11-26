@@ -720,7 +720,7 @@ def test_pending_close_deadline_preserves_funds_constraint_and_brief(
         pending_amount = f"${closed_contracts * 10_000:,.2f}"
         assert f"PDD 归属未定，已保守扣留担保｜{pending_amount}（未计入可用资金）" in rendered
         assert "可用于期权开仓｜$30,000.00" in rendered
-        assert "可用于期权开仓（折CNY）｜暂不可用" in rendered
+        assert "可用于期权开仓（折CNY）｜—" in rendered
         assert "option_close_settlement_pending" not in rendered
 
     assert repo.list_trade_events() == events_before

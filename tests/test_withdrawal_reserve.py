@@ -113,3 +113,49 @@ def test_explicit_cancellation_of_deleted_source_survives_next_read():
                         today=TODAY, reason="withdrawal cancelled and PM entry removed")
     assert run(cancelled, sources=[])["records"]["pm1"]["status"] == "cancelled"
     assert reserve_summary(run(cancelled, sources=[]))["status"] == "available"
+
+
+def test_conflict_reversion_restores_current_pm_amount():
+    settled = run(sources=[{**SOURCE, "amount": "-20000"}], flows=[{**FLOW, "cashflow_amount": "-20000"}])
+    changed = run(settled, sources=[SOURCE])
+    reverted = run(changed, sources=[{**SOURCE, "amount": "-20000"}])
+    restored = correct(reverted, record_id="pm1", action="restore", flow_ids=[], flows={}, today=TODAY, reason="current PM")
+    assert reserve_summary(restored)["reserved_by_currency"] == {"HKD": 20000}
+
+
+def test_provisional_claim_does_not_hide_new_competitor():
+    provisional = reconcile(None, [SOURCE], [FLOW], today=TODAY, account="lx", binding="futu:REAL:123",
+                            flow_complete=True, funds_usable=False)
+    next_state = run(provisional, sources=[SOURCE, {**SOURCE, "record_id": "pm2"}], flows=[FLOW])
+    assert reserve_summary(next_state)["reserved_by_currency"] == {"HKD": 20000}
+    assert next_state["records"]["pm1"]["status"] != "settled"
+
+
+def test_provisional_claim_cannot_silently_change_flow():
+    provisional = reconcile(None, [SOURCE], [FLOW], today=TODAY, account="lx", binding="futu:REAL:123",
+                            flow_complete=True, funds_usable=False)
+    next_state = run(provisional, flows=[{**FLOW, "cashflow_id": "replacement"}])
+    assert next_state["records"]["pm1"]["flows"] == ["flow1"]
+    assert next_state["records"]["pm1"]["status"] != "settled"
+
+
+def test_disputed_claim_can_be_manually_transferred_after_original_cancelled():
+    restored = correct(run(flows=[FLOW]), record_id="pm1", action="restore", flow_ids=[], flows={}, today=TODAY, reason="wrong match")
+    cancelled = correct(restored, record_id="pm1", action="cancel", flow_ids=[], flows={}, today=TODAY, reason="cancelled")
+    both = run(cancelled, sources=[SOURCE, {**SOURCE, "record_id": "pm2"}], flows=[FLOW])
+    moved = correct(both, record_id="pm2", action="settle", flow_ids=["flow1"], flows={"flow1": FLOW}, today=TODAY, reason="verified owner")
+    assert moved["claimed"] == {"flow1": "pm2"}
+
+
+def test_settled_claim_does_not_hide_unique_new_outflow():
+    settled = run(flows=[FLOW])
+    next_state = run(settled, sources=[SOURCE, {**SOURCE, "record_id": "pm2"}],
+                     flows=[FLOW, {**FLOW, "cashflow_id": "flow2"}])
+    assert next_state["records"]["pm2"]["flows"] == ["flow2"]
+    assert reserve_summary(next_state)["reserved_by_currency"] == {}
+
+
+def test_money_scale_change_is_not_financial_revision():
+    settled = run(flows=[FLOW])
+    changed = run(settled, sources=[{**SOURCE, "amount": "-10000.0"}])
+    assert changed["records"]["pm1"]["status"] == "settled"

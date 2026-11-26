@@ -1305,7 +1305,10 @@ def trade_attribution_capacity_check(
                 portfolio, config=config, account=fact["account"],
                 evaluated_at=datetime.fromtimestamp(now_ms / 1000, timezone.utc),
             )
-            cash_usable = cash_snapshot_is_usable({"cash_snapshot": cash_snapshot})
+            from src.application.portfolio_context_service import withdrawal_reserve_is_usable
+
+            cash_usable = (cash_snapshot_is_usable({"cash_snapshot": cash_snapshot})
+                           and withdrawal_reserve_is_usable(portfolio))
         except (KeyError, TypeError, ValueError, ArithmeticError):
             # Preserve reconciliation/reservation failures ahead of cash errors.
             cash_usable = None

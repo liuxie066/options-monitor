@@ -624,3 +624,20 @@ def test_partial_cash_preserves_known_account_without_zeroing_unknown_account():
     assert accounts["sy"]["funding_gap_cny"] == "0.00"
     assert all(row["fees_complete"] for row in accounts.values())
     assert result["fee_summary"]["status"] == "complete"
+
+
+def test_withdrawal_failure_preserves_other_account_capacity_and_asset_valuation():
+    first = _holding("CNY-CASH", "现金", "cash", quantity=100, market_value_cny=100)
+    second = _holding("CNY-CASH", "现金", "cash", quantity=5000, market_value_cny=5000)
+    second["account"] = "sy"
+    evidence = _evidence(holdings=[first, second], accounts=["lx", "sy"])
+    evidence["capacity_cash_holdings"] = [second]
+    evidence["capacity_cash_unavailable_accounts"] = ["lx"]
+    result = project_assignment_scenario(accounts=["lx", "sy"], portfolio_evidence=evidence,
+                                         option_positions=[], snapshot=_snapshot())
+    accounts = {row["account"]: row for row in result["account_breakdown"]}
+    assert accounts["lx"]["opening_cash_mmf_cny"] is None
+    assert accounts["lx"]["funding_gap_cny"] is None
+    assert accounts["sy"]["opening_cash_mmf_cny"] == "5000.00"
+    assert accounts["sy"]["ending_cash_net_estimated_cny"] == "5000.00"
+    assert result["cash_coverage"]["available_cash_and_mmf_cny"] is None

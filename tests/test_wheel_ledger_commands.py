@@ -685,3 +685,28 @@ def test_manual_end_rolls_back_an_appended_event_on_failure(tmp_path, monkeypatc
     assert applied["write_applied"] is True
     assert repeated["idempotent"] is True and repeated["write_applied"] is False
     assert len(repo.list_wheel_events(account="lx")) == len(before) + 1
+
+
+def test_put_confirmation_withdrawal_check_outside_lock_and_receipt_replay(tmp_path, monkeypatch):
+    from src.application import withdrawal_reserve
+    import sqlite3
+    repo, request = _intent_scope(tmp_path, monkeypatch)("put")
+    before = repo.read_lifecycle_account_rows(account="lx")
+    calls = []
+    def unavailable(**kwargs):
+        # PM must never be requested while the ledger writer transaction is held.
+        with sqlite3.connect(repo.db_path, timeout=0) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.rollback()
+        calls.append(kwargs)
+        raise OSError("PM offline")
+    monkeypatch.setattr(withdrawal_reserve, "verify_current_withdrawals", unavailable)
+    with pytest.raises(ValueError, match="withdrawal evidence unavailable"):
+        api.create_wheel_intent(repo, **request, apply_changes=True)
+    assert repo.read_lifecycle_account_rows(account="lx") == before
+    assert len(calls) == 1
+    monkeypatch.setattr(withdrawal_reserve, "verify_current_withdrawals", lambda **kw: None)
+    created = api.create_wheel_intent(repo, **request, apply_changes=True)
+    monkeypatch.setattr(withdrawal_reserve, "verify_current_withdrawals", lambda **kw: pytest.fail("replay must stay offline"))
+    replay = api.create_wheel_intent(repo, **request, apply_changes=True)
+    assert replay["event_id"] == created["event_id"] and replay["status"] == "idempotent"

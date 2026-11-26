@@ -25,7 +25,7 @@ from src.infrastructure.exchange_rates import (
 from src.application.positions.context_builder import build_context as build_option_positions_context
 from src.application.futu_portfolio_context import fetch_futu_portfolio_context
 from src.application.ledger.api import list_position_lot_snapshots, read_position_query_ledger
-from src.application.portfolio_context_service import load_account_portfolio_context, cash_snapshot_is_usable
+from src.application.portfolio_context_service import load_account_portfolio_context, cash_snapshot_is_usable, withdrawal_reserve_is_usable
 
 
 def load_json(path: Path) -> dict:
@@ -297,7 +297,7 @@ def query_sell_put_cash(
         "kind": "source_snapshot" if snapshot["source_observed_at"] else "source_unknown",
         "reason_codes": snapshot["reason_codes"],
     }
-    cash_usable = cash_snapshot_is_usable(portfolio)
+    cash_usable = cash_snapshot_is_usable(portfolio) and withdrawal_reserve_is_usable(portfolio)
     if not cash_usable:
         cash_by_ccy = {}
         cash_avail_usd = cash_avail_cny = cash_avail_total_cny = None
@@ -306,6 +306,7 @@ def query_sell_put_cash(
         'as_of_utc': observed_at,
         'freshness': freshness,
         'cash_snapshot': snapshot,
+        'withdrawal_reserve': portfolio.get('withdrawal_reserve'),
         'cash_source_observed_at': portfolio.get('cash_source_observed_at'),
         'cash_source_observation_status': portfolio.get('cash_source_observation_status'),
         'market': market,
@@ -339,6 +340,7 @@ def query_sell_put_cash(
         'assessment': {
             'status': 'cash_headroom_only' if cash_usable and cash_secured_reliable else 'unable',
             'reason_codes': list(snapshot['reason_codes'])
+            + ([] if withdrawal_reserve_is_usable(portfolio) else ['withdrawal_reserve_unavailable'])
             + ([cash_secured_unavailable_reason] if cash_secured_unavailable_reason else [])
             + (['CNY_CONVERSION_INCOMPLETE'] if missing_cny_rates else []),
             'supported_claims': (
