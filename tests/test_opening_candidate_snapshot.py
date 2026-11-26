@@ -1779,7 +1779,7 @@ def test_weekly_report_uses_real_sealed_rejects_and_dependency_validation(tmp_pa
     result = build_config_review(configs_root=configs, runtime_root=tmp_path, prices_file=prices, now=now)
     assert result.payload["strike_rejections"]["observed_count"] == 1
     assert "**结论：观察**" in result.markdown
-    assert result.markdown.index("**结论：") < result.markdown.index("## 指标 A")
+    assert result.markdown.index("**结论：") < result.markdown.index("## 行权价边界筛选")
     unknown = _snapshot_path(tmp_path, "unknown-mode")
     unknown.parent.mkdir(parents=True)
     unknown.write_text(json.dumps({"sealed_at_utc": NOW.isoformat(), "scan_mode": None}))

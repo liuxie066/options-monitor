@@ -385,9 +385,9 @@ def test_public_plan_fetch_publish_validate_candidate_brief_chain(tmp_path, monk
             gap.get("expiration") == JAN and gap.get("rv_reason") == "calendar_source_conflict" for gap in rv_gaps
         )
     for text in (render_full_brief(brief), render_fixed_report(brief)):
-        assert "2028-01-28" in text and "交易日历覆盖不足" in text
-        if conflict:
-            assert JAN in text and "交易日历来源冲突" in text
+        assert "历史波动率数据不足，候选结果不完整" in text
+        assert "交易日历覆盖不足" not in text
+        assert "交易日历来源冲突" not in text
     assert manifest.read_bytes() == original_manifest
 
 

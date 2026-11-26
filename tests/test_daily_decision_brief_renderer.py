@@ -3236,6 +3236,20 @@ def test_settlement_is_only_in_funds_and_preserves_available_candidates():
     assert 'NVDA' in message
 
 
+def test_pending_collateral_groups_symbols_but_preserves_currency_totals():
+    from src.application.daily_decision_brief_renderer import _fund_views
+
+    funds = {"cash_secured_pending_by_symbol_by_ccy": {
+        f"TEST{index}": {"USD": 1000, "HKD": 2000} for index in range(10)
+    }}
+    text = "\n".join(_fund_views({"funds": funds}))
+    assert "$10,000.00（未计入可用资金）" in text
+    assert "HK$20,000.00（未计入可用资金）" in text
+    assert text.count("归属未定，已保守扣留担保") == 2
+    assert "TEST0、TEST1、TEST2" in text
+    assert "TEST3" not in text
+
+
 def test_settlement_combines_gap_and_fund_scopes_without_losing_currency():
     brief = _settlement_pending_brief()
     brief.setdefault('funds', {})['cash_secured_unavailable_by_symbol'] = {

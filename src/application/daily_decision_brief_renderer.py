@@ -3052,9 +3052,17 @@ def _fund_views(brief: Mapping[str, Any]) -> list[str]:
                     out.append(f"提醒：在途资金 {money} 未纳入开仓额度；指派、欠款或取数证据未匹配。")
     pending = funds.get("cash_secured_pending_by_symbol_by_ccy")
     if isinstance(pending, Mapping):
-        symbols = [symbol for symbol, amounts in sorted(pending.items()) if _currency_amounts(amounts)]
-        if symbols:
-            out.append(f"{_symbol_scope(symbols)}：归属未定，相关担保金未计入可用资金")
+        pending_by_currency: dict[str, list[tuple[str, float]]] = {}
+        for symbol, amounts in sorted(pending.items()):
+            for currency, amount in _currency_amounts(amounts).items():
+                pending_by_currency.setdefault(currency, []).append((symbol, amount))
+        for currency, items in pending_by_currency.items():
+            symbols = [symbol for symbol, _ in items]
+            total = sum(amount for _, amount in items)
+            out.append(
+                f"{_symbol_scope(symbols)} 归属未定，已保守扣留担保："
+                f"{_currency_money(currency, total)}（未计入可用资金）"
+            )
     fund_notices = []
     unavailable = funds.get("cash_secured_unavailable_by_symbol")
     if opening_cny is None and isinstance(unavailable, Mapping):

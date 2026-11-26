@@ -1371,7 +1371,7 @@ def test_known_pending_collateral_is_deducted_and_explained(tmp_path: Path) -> N
     assert funds["option_opening_available_by_currency"] == {"HKD": 225_000.0, "USD": 5_000.0}
     assert funds["option_opening_reliable"] is True
     assert funds["cash_secured_pending_by_symbol_by_ccy"] == {"PDD": {"USD": 10_000.0}}
-    assert "PDD｜归属未定，相关担保金未计入可用资金" in message
+    assert "PDD 归属未定，已保守扣留担保｜$10,000.00（未计入可用资金）" in message
     assert "可用于期权开仓｜HK$225,000.00" in message
     assert "可用于期权开仓｜$5,000.00" in message
 

@@ -136,7 +136,8 @@ def test_decision_freshness_reason_survives_snapshot_and_brief(tmp_path, field, 
     loaded = load_wheel_candidate_snapshot(base=tmp_path, run_id="run-1", account="lx")
     assert loaded["batches"][0]["candidate_diagnostics"] == diagnostics
     message = render_fixed_report_text({"account": "lx", "market": "US", "wheel_batches": loaded["batches"]})
-    assert label in message
+    assert "部分合约数据不可用，相关候选评估不完整" in message
+    assert label not in message
     assert "evidence_unavailable" not in message
 
 
