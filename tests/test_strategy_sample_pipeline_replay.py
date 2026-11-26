@@ -127,6 +127,7 @@ def _produce_pipeline_sample(tmp_path, monkeypatch, *, stale=False, prepared_mar
             broker_account_identifiers={"123"}, futu_account_id="123", trd_env="REAL", capacity_market="us",
             exchange_rate_observation=kwargs.get("exchange_rate_observation"), position_snapshot_input=positions)
 
+        result["withdrawal_reserve"] = {"status": "available", "reason": "ok", "reserved_by_currency": {}}
         if prepared_marker is not ...:
             result["_sell_put_fx_status"] = prepared_marker
         return result
