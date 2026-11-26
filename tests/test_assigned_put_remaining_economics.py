@@ -1,5 +1,7 @@
 from decimal import Decimal
 
+import pytest
+
 from domain.domain.assigned_stock import assigned_put_remaining_economics
 
 
@@ -21,12 +23,12 @@ def _lot():
     }
 
 
-def test_partial_sale_distributes_premium_and_stock_fees_once():
+def test_partial_sale_includes_only_stock_and_stock_fees_once():
     result = assigned_put_remaining_economics(_lot(), price='8')
-    for name, expected in {'stock_unrealized_pnl': '-126', 'remaining_pnl_with_put': '-66',
-                           'stock_realized_pnl': '-48', 'sold_pnl_with_put': '-8'}.items():
+    for name, expected in {'stock_unrealized_pnl': '-126', 'stock_realized_pnl': '-48'}.items():
         assert Decimal(result[name]) == Decimal(expected)
-    assert Decimal(result['remaining_pnl_with_put']) + Decimal(result['sold_pnl_with_put']) == -74
+    assert Decimal(result['stock_unrealized_pnl']) + Decimal(result['stock_realized_pnl']) == -174
+    assert not any('put' in key or 'premium' in key for key in result)
 
 
 def test_missing_put_fee_does_not_suppress_stock_and_conflict_does():
@@ -34,7 +36,8 @@ def test_missing_put_fee_does_not_suppress_stock_and_conflict_does():
     lot['source_option_fee_allocations'][0]['basis'] = 'missing'
     result = assigned_put_remaining_economics(lot, price='8')
     assert Decimal(result['stock_unrealized_pnl']) == -126
-    assert result['remaining_pnl_with_put'] is None
+    assert result == assigned_put_remaining_economics(_lot(), price='8')
+    assert result['reasons'] == []
     assert assigned_put_remaining_economics(lot, price='8', quantity_usable=False)['stock_unrealized_pnl'] is None
 
 
@@ -42,8 +45,9 @@ def test_fully_sold_needs_no_price_or_put_fee_but_conflict_takes_precedence():
     lot = _lot() | {'shares_sold': 100, 'shares_remaining': 0, 'fee_evidence': []}
     result = assigned_put_remaining_economics(lot)
     assert Decimal(result['stock_unrealized_pnl']) == 0
-    assert Decimal(result['remaining_pnl_with_put']) == 0
-    assert assigned_put_remaining_economics(lot, quantity_usable=False)['remaining_pnl_with_put'] is None
+    assert result['stock_realized_pnl'] is None
+    assert set(result['reasons']) == {'actual_stock_settlement_fee_missing', 'actual_stock_sale_fee_missing'}
+    assert assigned_put_remaining_economics(lot, quantity_usable=False)['stock_unrealized_pnl'] is None
 
 
 def test_real_projection_uses_final_canonical_fee_remainder():
@@ -76,15 +80,42 @@ def test_real_projection_uses_final_canonical_fee_remainder():
         )
         allocated = {a.close_event_id: a for a in canonical.allocations}
         for lot in view['assigned_stock_lots']:
-            economics = assigned_put_remaining_economics(lot, price=100)
             source = allocated[lot['source_assignment_event_id']]
-            assert Decimal(economics['put_net_premium']) == source.realized_pnl_net
-        assert Decimal(assigned_put_remaining_economics(view['assigned_stock_lots'][-1], price=100)
-                       ['put_net_premium']) == Decimal('199.666666')
+            # Lifecycle facts still own the original premium and exact fee
+            # remainder, although the stock-only period report omits them.
+            net = Decimal(lot['put_open_premium_exact']) - sum(
+                Decimal(f['amount']) for f in lot['source_option_fee_allocations'])
+            assert net == source.realized_pnl_net
+        assert net == Decimal('199.666666')
 
 
 def test_unknown_quantity_never_claims_sold_net_or_zero_realized():
     result = assigned_put_remaining_economics(_lot(), price='8', quantity_usable=False)
     assert result['stock_realized_pnl'] is None
-    assert result['sold_pnl_with_put'] is None
-    assert result['allocated_put_net_premium_sold'] is None
+    assert result['stock_unrealized_pnl'] is None
+
+
+@pytest.mark.parametrize('component', ['assignment_stock_fee', 'stock_sale_fee'])
+@pytest.mark.parametrize('basis', ['estimated', 'missing'])
+def test_missing_actual_stock_fees_suppress_only_dependent_amounts(component, basis):
+    lot = _lot()
+    next(f for f in lot['fee_evidence'] if f['component'] == component)['basis'] = basis
+    result = assigned_put_remaining_economics(lot, price='8')
+    assert result['stock_realized_pnl'] is None
+    if component == 'stock_sale_fee':
+        assert result['stock_unrealized_pnl'] == '-126'
+        assert result['reasons'] == ['actual_stock_sale_fee_missing']
+    else:
+        assert result['stock_unrealized_pnl'] is None
+        assert result['reasons'] == ['actual_stock_settlement_fee_missing']
+
+
+def test_missing_quote_preserves_realized_and_missing_put_facts_change_nothing():
+    lot = _lot()
+    result = assigned_put_remaining_economics(lot)
+    assert result['stock_realized_pnl'] == '-48'
+    assert result['stock_unrealized_pnl'] is None
+    assert result['reasons'] == ['qualified_quote_missing']
+    lot.pop('put_open_premium_exact')
+    lot.pop('source_option_fee_allocations')
+    assert assigned_put_remaining_economics(lot) == result

@@ -77,7 +77,7 @@ def test_real_reader_projection_partial_scope_runtime_and_metric_coverage(tmp_pa
     assert new['quantity_status'] == ('pending' if missing_state else 'ledger_only')
     gap = lots['fee-gap-assignment']
     assert gap['stock_unrealized_pnl'] == '500'
-    assert gap['remaining_pnl_with_put'] is None
+    assert 'remaining_pnl_with_put' not in gap
     assert gap['confirmed']['shares_remaining'] is None
     assert gap['provisional']['shares_remaining'] == 100
     assert gap['provisional']['basis'] == 'ledger'
@@ -215,7 +215,7 @@ def test_public_period_replays_late_void_without_reviving_replaced_open(tmp_path
     if account != 'lx':
         gap = lots['fee-gap-assignment']
         assert gap['stock_unrealized_pnl'] == '500'
-        assert gap['remaining_pnl_with_put'] is None
+        assert 'remaining_pnl_with_put' not in gap
         assert gap['quantity_status'] == 'ledger_only'
     amount = '1000.00' if account is None else '500.00'
     stock = result['summary']['by_currency']['USD']['stock_unrealized_pnl']

@@ -8,6 +8,26 @@ from src.application.bot.control.command_parser import parse_bot_control_command
 from src.application.bot.control.renderer import _render_assigned_stock_lifecycle
 
 
+def assert_stock_only_period(value):
+    """Check the whole public/model payload, including repeated drilldowns."""
+    forbidden = {
+        'remaining_pnl_with_put', 'sold_pnl_with_put', 'put_net_premium',
+        'allocated_put_net_premium_remaining', 'allocated_put_net_premium_sold',
+        'option_premium_attribution_exact', 'put_open_premium_exact',
+        'source_option_fee_allocations', 'lifecycle_pnl_net', 'lifecycle_pnl_gross',
+    }
+    if isinstance(value, dict):
+        assert not forbidden.intersection(value)
+        for item in value.values():
+            assert_stock_only_period(item)
+    elif isinstance(value, list):
+        for item in value:
+            assert_stock_only_period(item)
+    elif isinstance(value, str):
+        assert value not in {'put_open_option_fee', 'put_assignment_option_fee',
+                             'actual_put_fee_missing', 'exact_put_premium_unavailable'}
+
+
 def test_period_normalization_preserves_current_request_and_legacy_defaults():
     current = normalize_option_positions_read_input({"assignment_month": "2026-11"})
     assert current == {"assignment_month": "2026-11", "action": "assigned-stock", "status": "all"}
@@ -30,6 +50,8 @@ def test_period_fields_reach_gateway_and_bot_schemas():
     contract = _option_positions_output_contract({"action": "assigned-stock", "assignment_year": 2026})
     assert "summary" in contract["fact_fields"]
     assert "coverage" in contract["fact_fields"]
+    assert contract['schema_version'] == 'option_positions_read.assignment_period.v2'
+    assert 'stock-only realized/unrealized' in tool.description
 
 
 def test_deterministic_period_command_includes_closed_lots():
@@ -53,7 +75,7 @@ def test_period_renderer_uses_full_owner_totals_and_preserves_null():
         "query": {"assignment_month": "2026-11"},
         "summary": {"by_currency": {"USD": {
             "stock_unrealized_pnl": {"value": "-126", "coverage": "partial"},
-            "remaining_pnl_with_put": {"value": None, "coverage": "unavailable"},
+            "stock_realized_pnl": {"value": None, "coverage": "unavailable"},
         }}},
         "coverage": {"status": "partial"},
         "rows": [],
@@ -62,6 +84,8 @@ def test_period_renderer_uses_full_owner_totals_and_preserves_null():
     assert "待核实/不可用" in text
     assert "0 条" not in text
     assert "账本估算" in text
+    assert '剩余正股浮盈亏' in text and '正股已实现盈亏' in text
+    assert '含 Put' not in text and '含Put' not in text
 
 
 @pytest.mark.parametrize("scenario", ["open", "sold", "pending", "priced", "wrong_account_quote", "wrong_broker_quote"])
@@ -164,18 +188,23 @@ def test_public_period_schema_to_real_report_refreshes_current_quote(tmp_path, m
         **({"opend_host": "diagnostic-only.invalid", "opend_port": 22222} if scenario == "priced" else {}),
     })
     assert result["ok"], result
+    assert_stock_only_period(result)
+    from src.application.bot.tools import model_observation
+    assert_stock_only_period(model_observation('option_positions_read', result))
     assert len(calls) == (0 if scenario in {"sold", "pending"} else 1), json.dumps(result, ensure_ascii=False)
     if calls:
         assert calls[0][1]["preserve_evidence"] is True
     assert result["data"]["row_count"] == 1
-    assert result["data"]["schema_version"] == "option_positions_read.assignment_period.v1"
+    assert result["data"]["schema_version"] == "option_positions_read.assignment_period.v2"
     assert result["data"]["coverage"]["status"] == "partial"
     assert result["data"]["coverage"]["source_history"] == "unknown"
     row = result["data"]["rows"][0]
     if scenario == "sold":
         assert row["book_shares_remaining"] == 0
         assert row["stock_unrealized_pnl"] == "0"
-        assert row["remaining_pnl_with_put"] == "0"
+        assert row["stock_realized_pnl"] is None
+        assert 'actual_stock_sale_fee_missing' in row['reasons']
+        assert result['data']['summary']['by_currency']['USD']['stock_realized_pnl']['omitted_lot_ids'] == [row['stock_lot_id']]
         assert row["quote_status"] == "not_required"
         assert row["assigned_stock_unrealized_pnl"] == "0"
     elif scenario == "pending":
@@ -185,7 +214,7 @@ def test_public_period_schema_to_real_report_refreshes_current_quote(tmp_path, m
         assert row["assigned_stock_unrealized_pnl"] is None
         assert row["shares_remaining"] is None
         assert row["stock_unrealized_pnl"] is None
-        assert row["remaining_pnl_with_put"] is None
+        assert row["stock_realized_pnl"] is None
     elif scenario == "priced":
         assert calls[0][1]["host"] == "diagnostic-only.invalid"
         assert calls[0][1]["port"] == 22222
@@ -193,7 +222,7 @@ def test_public_period_schema_to_real_report_refreshes_current_quote(tmp_path, m
         assert row["assigned_stock_unrealized_pnl"] == row["stock_unrealized_pnl"]
         assert row["quote_status"] == "fresh"
         assert row["spot_time"] == stamp - 30_000
-        assert row["review_status"] == "partial"
+        assert row["review_status"] == "ready"
         assert "lifecycle_pnl_net" not in row
         assert row["quote"]["quote_time_ms"] == stamp - 30_000
         assert row["quantity_status"] == "ledger_only"
@@ -205,7 +234,7 @@ def test_public_period_schema_to_real_report_refreshes_current_quote(tmp_path, m
         assert row["assigned_stock_unrealized_pnl"] is None
         assert row["stock_unrealized_pnl"] is None
     else:
-        assert row["remaining_pnl_with_put"] is None
+        assert row["stock_unrealized_pnl"] is None
 
 
 def test_inbound_period_payload_does_not_inherit_open_or_fill_as_of():
@@ -262,8 +291,8 @@ def test_actual_bot_observation_keeps_complete_period_totals_when_details_exceed
         row = deepcopy(template)
         row["stock_lot_id"] = "assigned-stock-" + hashlib.sha256(f"batch-{index}".encode()).hexdigest()
         row["stock_unrealized_pnl"] = str(Decimal(index + 1) / Decimal(10))
-        row["remaining_pnl_with_put"] = None if index == 0 else str(index)
-        row["reasons"] = ["actual_put_fee_missing"] if index == 0 else ["source_history_not_proven"]
+        row["stock_realized_pnl"] = None if index == 0 else str(index)
+        row["reasons"] = ["actual_stock_sale_fee_missing"] if index == 0 else ["source_history_not_proven"]
         rows.append(row)
     # This fixture explicitly models the actual report's repeated evidence shape;
     # totals are built by the same financial owner before wire projection.
@@ -279,7 +308,7 @@ def test_actual_bot_observation_keeps_complete_period_totals_when_details_exceed
     assert observed["ok"] is True
     assert conservative_json_tokens(observed) <= MAX_NATIVE_OBSERVATION_TOKENS
     projected = observed["data"]
-    for metric in ("stock_unrealized_pnl", "remaining_pnl_with_put"):
+    for metric in ("stock_unrealized_pnl", "stock_realized_pnl"):
         actual = projected["summary"]["by_currency"]["USD"][metric]
         owner = owner_summary["by_currency"]["USD"][metric]
         assert actual["value"] == owner["value"]
@@ -288,6 +317,7 @@ def test_actual_bot_observation_keeps_complete_period_totals_when_details_exceed
         assert actual["basis"] == owner["basis"]
         account_metric = projected["accounts"][0]["summary"]["by_currency"]["USD"][metric]
         assert account_metric["value"] == owner["value"]
+    assert_stock_only_period(observed)
     assert projected["coverage"] == data["coverage"]
     assert projected["query"] == data["query"]
     assert projected["detail_projection"]["summary_complete"] is True

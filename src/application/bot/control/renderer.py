@@ -562,12 +562,12 @@ def _render_assignment_period(data: dict[str, Any]) -> str:
     for currency, raw in items:
         row = _dict(raw)
         stock = row.get("stock_unrealized_pnl")
-        put = row.get("remaining_pnl_with_put")
-        lines.append(f"{currency}：正股 {metric_text(stock)}；含 Put 净权利金 {metric_text(put)}")
+        realized = row.get("stock_realized_pnl")
+        lines.append(f"{currency}：剩余正股浮盈亏 {metric_text(stock)}；正股已实现盈亏 {metric_text(realized)}")
     cny = _dict(summary.get("cny_estimate"))
     cny_metrics = _dict(cny.get("metrics")) or cny
     if cny:
-        lines.append(f"人民币估算：正股 {metric_text(cny_metrics.get('stock_unrealized_pnl'))}；含 Put {metric_text(cny_metrics.get('remaining_pnl_with_put'))}")
+        lines.append(f"人民币估算：剩余正股浮盈亏 {metric_text(cny_metrics.get('stock_unrealized_pnl'))}；正股已实现盈亏 {metric_text(cny_metrics.get('stock_realized_pnl'))}")
     rows = _list(data.get("rows"))
     lines.append(f"本页批次：{len(rows)}；完整合计以上述 owner 汇总为准。")
     for raw in rows:
@@ -577,8 +577,8 @@ def _render_assignment_period(data: dict[str, Any]) -> str:
             f"接货 {_value(row.get('shares_opened'))}股，账本已售 {_value(row.get('book_shares_sold'))}股，"
             f"账本剩余 {_value(row.get('book_shares_remaining'))}股；"
             f"数量状态 {_value(row.get('quantity_status'))}；"
-            f"正股 {metric_text(row.get('stock_unrealized_pnl'))}，"
-            f"含Put {metric_text(row.get('remaining_pnl_with_put'))}；"
+            f"剩余正股浮盈亏 {metric_text(row.get('stock_unrealized_pnl'))}，"
+            f"正股已实现盈亏 {metric_text(row.get('stock_realized_pnl'))}；"
             f"原因 {row.get('reasons') or []}"
         )
     if data.get("scope_reviews") or data.get("unresolved_stock_sales"):

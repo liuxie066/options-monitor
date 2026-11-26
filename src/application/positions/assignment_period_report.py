@@ -25,7 +25,7 @@ from src.infrastructure.exchange_rates import current_exchange_rate_snapshot, pr
 
 _PERIOD_KEYS = ('assignment_year', 'assignment_month', 'assignment_start_date', 'assignment_end_date')
 _SHANGHAI = ZoneInfo('Asia/Shanghai')
-_METRICS = ('stock_unrealized_pnl', 'remaining_pnl_with_put')
+_METRICS = ('stock_unrealized_pnl', 'stock_realized_pnl')
 
 
 def assignment_period(payload: dict[str, Any], request_at_ms: int) -> dict[str, Any]:
@@ -115,11 +115,8 @@ def _period_leaf(row: dict[str, Any]) -> dict[str, Any]:
         'assigned_at_ms', 'assigned_date', 'opened_at_ms', 'shares_opened', 'shares_sold',
         'shares_remaining', 'book_shares_sold', 'book_shares_remaining', 'quantity_status',
         'status', 'strike', 'assignment_price', 'stock_cost_basis_total',
-        'option_premium_attribution_exact', 'put_open_premium_exact', 'source_option_fee_allocations',
         'sale_event_ids', 'fee_evidence',
-        'stock_unrealized_pnl', 'remaining_pnl_with_put', 'remaining_stock_cost_basis_exact',
-        'put_net_premium', 'allocated_put_net_premium_remaining',
-        'allocated_put_net_premium_sold', 'stock_realized_pnl', 'sold_pnl_with_put',
+        'stock_unrealized_pnl', 'stock_realized_pnl', 'remaining_stock_cost_basis_exact',
         'spot', 'quote', 'reasons', 'valuation_basis', 'confirmed', 'provisional',
     }
     result = {key: value for key, value in row.items() if key in fields}
@@ -149,12 +146,6 @@ def _period_leaf(row: dict[str, Any]) -> dict[str, Any]:
     result['fee_evidence'] = [fact for fact in row.get('fee_evidence', [])
         if fact.get('component') == 'assignment_stock_fee'
         or str(fact.get('component', '')).startswith('stock_sale')]
-    result['fee_evidence'].extend(
-        {**fact, 'component': {'option_open': 'put_open_option_fee',
-                              'option_assignment': 'put_assignment_option_fee'}[fact['component']]}
-        for fact in row.get('source_option_fee_allocations', [])
-        if fact.get('component') in {'option_open', 'option_assignment'}
-    )
     return result
 
 
@@ -312,7 +303,7 @@ def build_assignment_period_report(repo, payload, *, cfg, refresh_assigned_stock
             row['reasons'].append('source_history_not_proven')
         row['valuation_basis'] = 'unavailable' if is_pending else 'confirmed' if confirmed else 'ledger'
         values = {key: row.get(key) for key in (
-            'shares_sold', 'shares_remaining', *_METRICS, 'stock_realized_pnl', 'sold_pnl_with_put')}
+            'shares_sold', 'shares_remaining', *_METRICS)}
         row['confirmed'] = values if confirmed else {key: None for key in values}
         row['provisional'] = ({**values, 'shares_sold': row['book_shares_sold'],
             'shares_remaining': row['book_shares_remaining'], 'basis': 'ledger',
@@ -351,7 +342,7 @@ def build_assignment_period_report(repo, payload, *, cfg, refresh_assigned_stock
         account_summary = summarize_lots(account_rows)
         account_summary['cny_estimate'] = _fx_summary(account_summary, fx, valuation_at)
         accounts.append({'account': account, 'symbols': symbols, 'summary': account_summary})
-    return {'schema_version': 'option_positions_read.assignment_period.v1', 'action': 'assigned-stock',
+    return {'schema_version': 'option_positions_read.assignment_period.v2', 'action': 'assigned-stock',
         'query': {**period, 'request_at_ms': request_at, 'ledger_state_cutoff_ms': request_at,
                   'valuation_at_ms': valuation_at, 'accounts': sorted(allowed_accounts),
                   'symbol': payload.get('symbol')}, 'rows': rows, 'assigned_stock_lots': rows,
@@ -363,7 +354,7 @@ def build_assignment_period_report(repo, payload, *, cfg, refresh_assigned_stock
             if r.get('stock_lot_id') in {lot['stock_lot_id'] for lot in rows}],
         'scope_reviews': reviews, 'assigned_stock_review_rows': reviews, 'quote_refresh': refresh,
         'coverage': {'status': 'partial' if inputs.diagnostics or observations.get('source_history') != 'complete'
-                     or pending or source_gaps or reviews or any(r['quote_status'] == 'missing_quote' for r in rows)
+                     or pending or source_gaps or reviews or any(r[k] is None for r in rows for k in _METRICS)
                      else 'complete', 'ledger_read': 'gap' if inputs.diagnostics else 'complete',
                      'source_history': observations.get('source_history', 'unknown')},
         'pagination': {'has_more': False, 'source': 'full_snapshot'},

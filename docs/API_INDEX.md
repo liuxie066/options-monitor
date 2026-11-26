@@ -227,7 +227,8 @@ Public read-only entry: src/application/ledger/query_api.py, exporting the exist
 由 `src/application/positions/assignment_period_report.py::build_assignment_period_report`
 组装；ledger 只读快照经 `ledger.api.read_assigned_stock_query_inputs`，未入账卖出观察
 经 `trades.inbox.read_stock_sell_observations`。纯金额 owner 为
-`domain/domain/assigned_stock.py::assigned_put_remaining_economics`。原币/CNY、book 与
+`domain/domain/assigned_stock.py::assigned_put_remaining_economics`，期间输出仅含正股
+已实现/未实现盈亏及正股费用，不混入 Put 权利金。原币/CNY、book 与
 核实数量、null/零及来源覆盖契约见 [接货收益](ASSIGNED_STOCK_RETURN_DESIGN.md#put-指派期间当前估值查询)。
 
 期间查询的来源卖出资格由
