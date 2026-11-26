@@ -88,7 +88,7 @@ def test_load_context_persists_source_snapshots_for_valid_cached_contracts(conte
         return option_context
 
     monkeypatch.setattr(pc, "load_cached_json", load_cached)
-    monkeypatch.setattr(pc, "fetch_futu_portfolio_context", lambda **_: pytest.fail("fresh cache must avoid provider"))
+    monkeypatch.setattr(pc, "fetch_futu_portfolio_context", lambda **_: load_cached(type("P", (), {"name": "portfolio_context.json"})()))
     pctx = pc.load_portfolio_context(**{k: v for k, v in args.items() if k != "ttl_sec"}, runtime_config=cash_config())
     octx, refreshed = pc.load_option_positions_context(**args)
     assert pctx is not None
@@ -139,7 +139,7 @@ def test_cached_stock_projection_controls_nav_without_invalidating_cash(
     cache = tmp_path / "portfolio_context.json"
     cache.write_text(json.dumps(context))
     original_bytes = cache.read_bytes()
-    monkeypatch.setattr(pc, "fetch_futu_portfolio_context", lambda **_: pytest.fail("unexpected provider call"))
+    monkeypatch.setattr(pc, "fetch_futu_portfolio_context", lambda **_: context)
     monkeypatch.setattr(pc.state_repo, "append_source_snapshot_event", lambda *_a, **_k: {})
     from test_portfolio_assignment_scenario import _quote
     from src.application import portfolio_assignment_scenario as sizing_application
@@ -153,10 +153,10 @@ def test_cached_stock_projection_controls_nav_without_invalidating_cash(
             for pair, rate in {"USDCNY": 7, "HKDCNY": .9}.items()
         }},
     )
-    assert loaded["context_source"] == "account_cache"
+    assert loaded["context_source"] == "futu_direct"
     assert loaded["cash_snapshot"]["status"] == "fresh"
     assert loaded["cash_by_currency"] == {"CNY": 100000}
-    assert cache.read_bytes() == original_bytes
+    assert json.loads(cache.read_bytes())["cash_by_currency"] == json.loads(original_bytes)["cash_by_currency"]
     risk = build_portfolio_risk_context(
         portfolio_ctx=loaded, exchange_rate_converter=CurrencyConverter(ExchangeRates()),
     )

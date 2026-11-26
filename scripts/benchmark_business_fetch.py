@@ -73,6 +73,7 @@ class Harness:
         for obj, name in ((socket.socket, "connect"), (socket.socket, "connect_ex"),
                           (socket, "create_connection"), (urllib.request, "urlopen")):
             stack.enter_context(patch.object(obj, name, self.deny_network))
+        from src.application import withdrawal_reserve as withdrawals
         from src.application import cash_headroom_query as cash
         from src.application import futu_portfolio_context as provider
         from src.application import pipeline_context as pipeline
@@ -103,7 +104,14 @@ class Harness:
             for pair, rate in (("USDCNY", 7.2), ("HKDCNY", 0.92))}}
         stack.enter_context(patch.object(fx, "_utc_now", lambda: NOW))
         self.fx = fx.project_exchange_rate_snapshot(self.fx_snapshot, purpose="capacity")
-        for module in (cash, provider, pipeline, assignment, reader, prepared, capacity):
+        # Model complete PM reads at the external client boundary; keep reservations real.
+        pm_client = SimpleNamespace(read_cash_flows=lambda account, **_: {
+            "schema_version": "portfolio.cash_flows.v1", "account": account, "source_identity": "pm.cash_flow",
+            "complete": True, "records": [], "row_errors": [],
+            "freshness": {"status": "fresh", "trust_status": "trusted", "observed_at_utc": NOW.isoformat()},
+        })
+        stack.enter_context(patch.object(withdrawals, "resolve_portfolio_management_client", lambda *_a, **_k: pm_client))
+        for module in (cash, provider, pipeline, assignment, reader, prepared, capacity, withdrawals):
             if hasattr(module, "datetime"):
                 stack.enter_context(patch.object(module, "datetime", Clock))
         actual_reader, actual_fetch = reader.load_account_portfolio_context, provider.fetch_futu_portfolio_context
@@ -180,7 +188,7 @@ class Harness:
         if self.mode == "balance_failure":
             raise OSError("offline balance failure")
         return 0, [{"acc_id": kwargs["acc_id"], "trd_env": "REAL", "cn_cash": 1000,
-                    "pending_asset": 0}]
+                    "pending_asset": 0, "currency": "CNH"}]
 
     def stock(self, **kwargs):
         self.hit("sdk_positions_substitute", str(kwargs["acc_id"]))

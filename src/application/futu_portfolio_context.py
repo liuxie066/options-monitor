@@ -985,22 +985,34 @@ def fetch_futu_portfolio_context(
             gateway, "get_account_balance", account_ids, trd_env=trd_env,
             currency="CNH", refresh_cache=True, **controls,
         )
-        from src.application.futu_assignment_pending import observe_assignment_pending
+        from src.application.withdrawal_reserve import observe as observe_withdrawals
 
         balance_rows = _filter_rows_for_account_ids(balance_rows, account_ids, trd_env=trd_env)
         cash_observed_at = datetime.now(timezone.utc).isoformat()
-        shared_funding = verified_shared_funding(
-            balance_rows, account=account, account_id=physical_account_id,
-            environment=trd_env, observed_at=cash_observed_at,
-        )
-        if shared_funding is None:
-            balance_rows, assignment_pending = observe_assignment_pending(
-                gateway, balance_rows, query_rows=_query_rows_for_account_ids, cfg=cfg, account=account,
-                account_id=physical_account_id, environment=trd_env, **controls,
+
+        def refresh_withdrawal_funds():
+            nonlocal balance_rows, cash_observed_at
+            balance_rows = _query_rows_for_account_ids(
+                gateway, "get_account_balance", account_ids, trd_env=trd_env,
+                currency="CNH", refresh_cache=False, **controls,
             )
-            cash_observed_at = assignment_pending.get("funds_observed_at", cash_observed_at)
-        else:
-            assignment_pending = {"status": "verified_mmf", "adjustment": 0.0}
+            balance_rows = _filter_rows_for_account_ids(balance_rows, account_ids, trd_env=trd_env)
+            if len(balance_rows) != 1:
+                raise ValueError("withdrawal funds snapshot unavailable")
+            cash_observed_at = datetime.now(timezone.utc).isoformat()
+            refreshed = build_futu_portfolio_context(
+                balance_rows=balance_rows, position_rows=[], account=account,
+                cash_source_observed_at=cash_observed_at, futu_account_id=str(physical_account_id),
+                broker_account_identifiers=account_ids, trd_env=trd_env,
+                capacity_market=str(cfg.get("_resolved", {}).get("market", "us")),
+            )
+            return refreshed.get("cash_balance_reliable") is True
+
+        withdrawal_summary = observe_withdrawals(
+            cfg=cfg, account=account, account_id=physical_account_id,
+            environment=trd_env, gateway=gateway, controls=controls, persist=write_cache,
+            funds_usable=len(balance_rows) == 1, refresh_funds=refresh_withdrawal_funds,
+        )
         check_fetch_control(deadline, cancelled)
         if exchange_rate_observation is _FX_NOT_PROVIDED:
             try:
@@ -1084,16 +1096,9 @@ def fetch_futu_portfolio_context(
         exchange_rate_observation=exchange_rate_observation,
         position_snapshot_input=snapshot_input,
     )
-    from src.application.futu_assignment_pending import apply_assignment_pending
+    from src.application.withdrawal_reserve import apply as apply_withdrawals
 
-    if shared_funding is not None:
-        from src.application.futu_mmf_funding import apply_mmf_funding
-
-        apply_mmf_funding(context, shared_funding, account=account,
-                          physical_account_id=physical_account_id, environment=trd_env)
-        context["assignment_pending"] = assignment_pending
-    else:
-        apply_assignment_pending(context, assignment_pending)
+    apply_withdrawals(context, withdrawal_summary, balance_rows)
     check_fetch_control(deadline, cancelled)
     return context
 

@@ -61,6 +61,11 @@ class PortfolioManagementClient:
         _validate_view_account_scope(response, query or {})
         return response
 
+    def read_cash_flows(self, *, account: str, timeout: float = 15) -> dict[str, Any]:
+        from src.application.portfolio_management_contract import CASH_FLOWS_PATH
+
+        return self._request("GET", CASH_FLOWS_PATH, query={"account": account}, timeout=timeout)
+
     def read_capital_facts(
         self,
         *,

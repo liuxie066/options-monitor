@@ -19,6 +19,7 @@ from src.application.agent_tools import (
     project,
     runtime,
     receipts,
+    withdrawals,
 )
 from src.application.agent_tools.base import AgentTool
 from src.application.agent_tools.permissions import write_tools_enabled_from_env as _write_tools_enabled_from_env
@@ -41,6 +42,7 @@ AGENT_TOOL_MODULES: tuple[ModuleType, ...] = (
     notifications,
     notification_perception,
     receipts,
+    withdrawals,
 )
 
 

@@ -14,11 +14,11 @@ baseline = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(baseline)
 
 # Counts are for the actual provider and its real gateway/client over a synthetic SDK context.
-EXPECTED = {"scan_cold": 1, "scan_warm": 0, "cash_cli_cold": 1, "cash_tool_cold": 2,
-            "cash_tool_warm": 0, "cross_entry": 2, "prepared": 1, "prepared_new_run": 2,
+EXPECTED = {"scan_cold": 2, "scan_warm": 2, "cash_cli_cold": 2, "cash_tool_cold": 2,
+            "cash_tool_warm": 2, "cross_entry": 5, "prepared": 1, "prepared_new_run": 2,
             "prepared_bad_hash": 1, "prepared_bad_account": 1, "account_isolation": 2,
-            "physical_account_isolation": 2, "path_isolation": 2, "stock_301_cash_fresh": 1,
-            "stock_option_61": 1, "partial_stock": 2, "positions_failure": 2,
+            "physical_account_isolation": 2, "path_isolation": 2, "stock_301_cash_fresh": 2,
+            "stock_option_61": 2, "partial_stock": 2, "positions_failure": 2,
             "balance_failure": 2, "timeout": 2, "cancel": 2, "assignment_pm_unavailable": 1,
             "wheel_cli_cold": 2, "wheel_tool_cold": 2}
 
@@ -47,7 +47,7 @@ def assert_entry_result(case, row):
     elif case not in {"stock_301_cash_fresh", "balance_failure"}:
         assert all(not ctx["stock_errors"] for ctx in row["contexts"])
     if case == "stock_301_cash_fresh":
-        assert row["contexts"][0]["stock_errors"] and not row["contexts"][1]["stock_errors"]
+        assert all(not ctx["stock_errors"] for ctx in row["contexts"])
     if case == "prepared":
         assert row["outcome"] == [True, True, "ready"]
         assert [stage["counts"].get("portfolio_fetch", 0) for stage in row["stages"]] == [1, 0, 0, 0]

@@ -449,3 +449,16 @@ def test_valuation_evidence_rejects_missing_or_misbound_contract(
             supplemental_codes=[],
             price_timeout=10,
         )
+
+
+def test_cash_flows_read_uses_only_account_scoped_get():
+    calls = []
+    def open_request(request, **kwargs):
+        calls.append((request.method, request.full_url, request.data))
+        return _Response({"success": True, "records": []})
+    client = PortfolioManagementClient(urlopen_fn=open_request)
+    assert client.read_cash_flows(account="lx")["records"] == []
+    assert len(calls) == 1
+    assert calls[0][0] == "GET"
+    assert calls[0][1].endswith("/api/v1/cash-flows?account=lx")
+    assert calls[0][2] is None

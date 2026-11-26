@@ -106,15 +106,15 @@ def _use_injected_futu_provider(monkeypatch):
                         lambda _config, *, account, futu_provider: futu_provider)
 
 
-def test_cache_reuse_binds_current_fx_without_mutating_source(tmp_path):
+def test_futu_cache_requires_current_withdrawal_evidence_and_preserves_source(tmp_path):
     ctx = cash_context(exchange_rates={"old": True})
     path = tmp_path / "portfolio_context.json"
     path.write_text(json.dumps(ctx)); before = path.read_bytes()
     os.utime(path, (1, 1))
     fx = {"rates": {"USDCNY": 7}}
     for provided in (fx, {}, None):
-        result = load(tmp_path, lambda **_: pytest.fail("fresh source reused"), exchange_rate_observation=provided)
-        assert result["context_source"] == "account_cache"
+        result = load(tmp_path, lambda **_: deepcopy(ctx), exchange_rate_observation=provided)
+        assert result["context_source"] == "futu_direct"
         assert result["exchange_rates"] is None if provided is None else result["exchange_rates"]["rates"] == {}
         assert result["cash_by_currency"] == ctx["cash_by_currency"]
         assert cash_snapshot_is_usable(result)
@@ -367,14 +367,14 @@ def test_pipeline_explicit_missing_fx_clears_cache(tmp_path, monkeypatch):
     import src.application.pipeline_context as pipeline
     now = datetime.now(timezone.utc)
     monkeypatch.setattr(pipeline, "load_cached_json", lambda _: cash_context(now, exchange_rates={"old": True}))
-    monkeypatch.setattr(pipeline, "fetch_futu_portfolio_context", lambda **_: pytest.fail("cache hit should not fetch"))
+    monkeypatch.setattr(pipeline, "fetch_futu_portfolio_context", lambda **_: cash_context(now, exchange_rates={"old": True}))
     monkeypatch.setattr(pipeline, "_persist_source_snapshot", lambda *_: None)
     result = pipeline.load_portfolio_context(
         data_config="unused", market="富途", account="lx", base=tmp_path,
         state_dir=tmp_path, shared_state_dir=None, log=lambda _: None,
         runtime_config=CONFIG, portfolio_source="futu", exchange_rate_observation=None,
     )
-    assert result["context_source"] == "account_cache"
+    assert result["context_source"] == "futu_direct"
     assert result["exchange_rates"] is None
     assert cash_snapshot_is_usable(result)
 
@@ -553,7 +553,7 @@ def test_public_cash_entries_share_reader_policy(tmp_path, monkeypatch, entry, c
         assert out["ok"], out
         result = out["data"]
     assert result["cash_snapshot"] == expected
-    assert len(calls) == (0 if case == "fresh" else 1)
+    assert len(calls) == 1  # PM withdrawals must be checked even with fresh cached funds
     if entry in {"cash_cli", "cash_tool"}:
         assert result["cash_available_cny"] == (100 if case == "fresh" else None)
         assert result["cash_free_cny"] == (70 if case == "fresh" else None)

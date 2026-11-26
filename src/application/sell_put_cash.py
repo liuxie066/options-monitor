@@ -40,8 +40,12 @@ def sell_put_cash_context_unavailable_reason(
     option_ctx: dict[str, Any] | None,
     portfolio_ctx: dict[str, Any] | None,
 ) -> str:
+    from src.application.portfolio_context_service import withdrawal_reserve_is_usable
+
     if not isinstance(portfolio_ctx, dict) or not cash_snapshot_is_usable(portfolio_ctx):
         return "broker_cash_snapshot_unavailable"
+    if not withdrawal_reserve_is_usable(portfolio_ctx):
+        return "withdrawal_reserve_unavailable"
     if not isinstance(option_ctx, dict):
         return "option_positions_cash_secured_context_unavailable"
     context_status = str(option_ctx.get("context_status") or "").strip().lower()

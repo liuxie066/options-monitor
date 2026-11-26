@@ -47,8 +47,8 @@ def test_missing_broker_rejects_even_valid_cash_cache_before_reading(tmp_path, m
     common = dict(market="富途" if broker == "futu" else "长桥", account=account,
         state_dir=tmp_path, log=lambda _: None, runtime_config=cfg,
         portfolio_source="auto", write_cache=False, now_utc=NOW,
-        fetch_futu_portfolio_context_fn=lambda **_: pytest.fail("must use valid cache"))
-    assert load_account_portfolio_context(**common, load_json_fn=lambda _: cached)["context_source"] == "account_cache"
+        fetch_futu_portfolio_context_fn=lambda **_: cached)
+    assert load_account_portfolio_context(**common, load_json_fn=lambda _: cached)["context_source"] == ("futu_direct" if broker == "futu" else "account_cache")
     absent(monkeypatch, f"broker-{broker}")
     result = load_account_portfolio_context(**common,
         load_json_fn=lambda _: pytest.fail("missing capability must precede cache read"))

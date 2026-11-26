@@ -937,9 +937,9 @@ def test_qa_real_broker_removal_invalidates_fresh_cache_prepared_and_capacity(sa
         cached = cash_portfolio({"cash_by_currency": {"USD": 20000}, "cash_source_observed_at": now.isoformat()}, evaluated_at=now)
         common = dict(market="富途", account="lx", state_dir=scratch, log=lambda _: None,
             runtime_config=cfg, portfolio_source="auto", write_cache=False, now_utc=now,
-            fetch_futu_portfolio_context_fn=forbidden("unexpected broker/cache fallback"))
+            fetch_futu_portfolio_context_fn=lambda **_: cached)
         positive = load_account_portfolio_context(**common, load_json_fn=lambda _: cached)
-        assert positive["context_source"] == "account_cache" and cash_snapshot_is_usable(positive), positive
+        assert positive["context_source"] == "futu_direct" and cash_snapshot_is_usable(positive), positive
         effective = compute_sell_put_effective_cash(cash_by_currency=positive["cash_by_currency"],
             cash_secured_by_currency={}, native_currency="USD", convert_currency=lambda value, *a: value)
         assert effective.available and effective.cash_free == 20000

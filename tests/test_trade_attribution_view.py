@@ -1087,7 +1087,7 @@ def test_capacity_worker_uses_shared_cash_reader_without_writes(tmp_path, monkey
     assert connection.closed
     assert connection.result["portfolio"]["cash_snapshot"]["status"] == "fresh", connection.result["portfolio"]
     assert connection.result["portfolio"]["exchange_rates"] is None
-    assert len(calls) == (0 if cached else 1)
+    assert len(calls) == 1  # Current PM withdrawals must be checked even with cached cash.
     assert {str(p.relative_to(tmp_path)): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
 
 

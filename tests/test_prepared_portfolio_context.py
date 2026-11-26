@@ -1417,6 +1417,8 @@ def _prepare_cached_holdings_receipts(tmp_path, monkeypatch, *, run_id, ages):
         provider_calls.append(kwargs)
         assert kwargs["write_cache"] is False
         assert kwargs["exchange_rate_cache_path"].is_relative_to(tmp_path)
+        if ages[kwargs["account"]] == 0:
+            return dict(cached[kwargs["account"]])
         raise OSError("synthetic holdings refresh failure")
 
     monkeypatch.setattr(prepared, "fetch_futu_portfolio_context", failed_refresh)
@@ -1470,7 +1472,7 @@ def test_stale_holdings_refresh_preserves_cash_through_real_worker_receipt(tmp_p
     from src.application.portfolio_context_service import portfolio_position_snapshot_errors
 
     prepared = _prepare_cached_holdings_receipts(tmp_path, monkeypatch, run_id="holdings-fallback", ages={"lx": 400, "sy": 0})
-    assert [call["account"] for call in prepared.provider_calls] == ["lx"]
+    assert [call["account"] for call in prepared.provider_calls] == ["lx", "sy"]
     for account, receipt in prepared.receipts.items():
         payload = receipt["payload"]
         assert payload["cash_snapshot"]["status"] == "fresh"
