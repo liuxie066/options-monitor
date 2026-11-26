@@ -52,6 +52,16 @@ def read_state(conn, account):
     return json.loads(row[0]) if row else None
 
 
+def foreign_record_ids(conn, account):
+    """PM row identities cannot silently migrate between reservation accounts."""
+    if conn is None:
+        return set()
+    return {key for (payload,) in conn.execute(
+        "SELECT payload FROM account_reserves WHERE account<>?", (account,))
+        for key, record in json.loads(payload)["records"].items()
+        if record["status"] != "cancelled" and not record.get("foreign_owner")}
+
+
 def save_state(conn, account, state):
     conn.execute("INSERT INTO account_reserves VALUES (?,?) ON CONFLICT(account) DO UPDATE SET payload=excluded.payload",
                  (account, json.dumps(state, ensure_ascii=False, sort_keys=True)))
@@ -107,9 +117,17 @@ def observe(*, cfg, account, account_id, environment, gateway, funds_usable=True
     today = (now + timedelta(hours=8)).date()
     previous = proposed = None
     stage = "storage"
+    funds_refresh_failed = False
+
+    def qualified(summary):
+        if funds_refresh_failed:
+            summary.update(status="unavailable", reason="withdrawal_funds_unavailable")
+        return summary
+
     try:
-        with transaction(path or database_path(), persist=persist) as conn:
+        with transaction(path or database_path(), persist=False) as conn:
             previous = read_state(conn, account)
+            foreign_ids = foreign_record_ids(conn, account)
             stage = "pm"
             pm = resolve_portfolio_management_client(cfg, client=client)
             sources = validate_pm(pm.read_cash_flows(account=account, timeout=15), account,
@@ -124,49 +142,76 @@ def observe(*, cfg, account, account_id, environment, gateway, funds_usable=True
             except Exception:
                 flows, flow_complete = [], False
             if flows and refresh_funds is not None:
-                funds_usable = refresh_funds() is True
+                try:
+                    funds_usable = refresh_funds() is True
+                except (TimeoutError, InterruptedError, CancelledError):
+                    raise
+                except Exception:
+                    funds_usable = False
+                funds_refresh_failed = not funds_usable
             proposed = reconcile(previous, sources, flows, today=today, account=account,
                                  binding=f"futu:{environment}:{account_id}",
-                                 flow_complete=flow_complete, funds_usable=funds_usable)
+                                 flow_complete=flow_complete, funds_usable=funds_usable,
+                                 foreign_record_ids=foreign_ids)
             stage = "storage"
             if not persist:
+                stage = "state_revalidation"
+                # The provider read may overlap a manual restore or another market's observation.
+                with transaction(path or database_path(), persist=False) as latest_reader:
+                    if (read_state(latest_reader, account) != previous
+                            or foreign_record_ids(latest_reader, account) != foreign_ids):
+                        stage = "concurrent_state"
+                        raise ValueError("reservation changed during read")
                 if not proposed["records"]:
-                    return {**reserve_summary(proposed), "flow_complete": flow_complete}
+                    return qualified({**reserve_summary(proposed), "flow_complete": flow_complete})
                 if safe_after_save_failure(previous, proposed):
-                    return {**reserve_summary(previous), "flow_complete": flow_complete}
+                    return qualified({**reserve_summary(previous), "flow_complete": flow_complete})
                 return {"status": "unavailable", "reason": "withdrawal_storage_unavailable",
                         "reserved_by_currency": {}}
-            save_state(conn, account, proposed)
+            stage = "state_revalidation"
+            with transaction(path or database_path()) as writer:
+                if (read_state(writer, account) != previous
+                        or foreign_record_ids(writer, account) != foreign_ids):
+                    stage = "concurrent_state"
+                    raise ValueError("reservation changed during observation")
+                stage = "storage"
+                save_state(writer, account, proposed)
         summary = reserve_summary(proposed)
         summary.update(flow_complete=flow_complete, observed_at=now.isoformat(),
                        generation=proposed["generation"])
-        return summary
+        return qualified(summary)
     except (TimeoutError, InterruptedError, CancelledError):
         raise
     except Exception:
-        if stage == "storage" and proposed is not None and safe_after_save_failure(previous, proposed):
+        if (stage == "storage" and not funds_refresh_failed and proposed is not None
+                and safe_after_save_failure(previous, proposed)):
             return {**reserve_summary(previous), "reason": "withdrawal_release_save_failed",
                     "flow_complete": False, "observed_at": now.isoformat()}
         return {"status": "unavailable", "reason": f"withdrawal_{stage}_unavailable",
                 "reserved_by_currency": {}, "observed_at": now.isoformat()}
 
 
-def apply(context, summary, balance_rows):
-    """Only this boundary changes the shared effective cash used by capacities."""
+def pending_cash_component(balance_rows):
+    """Validate the aggregate pending field before any settlement can be released."""
     from math import isfinite
 
-    context["withdrawal_reserve"] = summary
-    context.pop("assignment_pending", None)
     if len(balance_rows) != 1:
-        summary.update(status="unavailable", reason="pending_asset_unavailable")
-        return
+        raise ValueError("pending snapshot missing")
     row = balance_rows[0]
     currency = str(row.get("currency"))
     currency = "CNY" if currency in {"CNH", "RMB"} else currency
+    pending = float(row["pending_asset"])
+    if isinstance(row["pending_asset"], bool) or currency not in {"CNY", "USD", "HKD"} or not isfinite(pending) or pending < 0:
+        raise ValueError("invalid pending")
+    return currency, pending
+
+
+def apply(context, summary, balance_rows):
+    """Only this boundary changes the shared effective cash used by capacities."""
+    context["withdrawal_reserve"] = summary
+    context.pop("assignment_pending", None)
     try:
-        pending = float(row["pending_asset"])
-        if currency not in {"CNY", "USD", "HKD"} or not isfinite(pending) or pending < 0:
-            raise ValueError("invalid pending")
+        currency, pending = pending_cash_component(balance_rows)
     except (KeyError, TypeError, ValueError):
         summary.update(status="unavailable", reason="pending_asset_unavailable")
         return
@@ -182,3 +227,28 @@ def apply(context, summary, balance_rows):
     for ccy, amount in effective.items():
         context["cash_capacity_by_currency"].setdefault(ccy, {})["amount"] = amount
     context["cash_source"] = "futu_cash_with_pending_and_withdrawals"
+
+
+def verify_current_withdrawals(*, cfg, account, context, runtime_root, client=None, now=None):
+    """Requalify frozen capacity against current PM and durable reservations; no broker I/O."""
+    supplied_now = now
+    now = now or datetime.now(timezone.utc)
+    authority = context["capacity_authority"]
+    binding = f'futu:{authority["trd_env"]}:{authority["futu_account_id"]}'
+    expected = context.get("withdrawal_reserve", {}).get("state_fingerprint")
+    if not expected or not runtime_root:
+        raise ValueError("withdrawal evidence missing; repreview required")
+    pm = resolve_portfolio_management_client(cfg, client=client)
+    sources = validate_pm(pm.read_cash_flows(account=account, timeout=15), account,
+                          supplied_now or datetime.now(timezone.utc))
+    path = Path(runtime_root) / "output_shared" / "state" / "withdrawal_reserves.sqlite3"
+    with transaction(path, persist=False) as conn:
+        previous = read_state(conn, account)
+        if previous is None:
+            raise ValueError("durable withdrawal state missing; repreview required")
+        current = reconcile(previous, sources, [], today=(now + timedelta(hours=8)).date(),
+                            account=account, binding=binding, flow_complete=False, funds_usable=False,
+                            foreign_record_ids=foreign_record_ids(conn, account))
+    summary = reserve_summary(current)
+    if summary["status"] != "available" or summary["state_fingerprint"] != expected:
+        raise ValueError("withdrawal evidence changed; repreview required")

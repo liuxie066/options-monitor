@@ -647,7 +647,8 @@ def project_assignment_scenario(
             grouped["opening_market_value_cny"] += market_value
 
     starting_cash = _ZERO
-    cash_complete = not unavailable
+    capacity_unavailable_accounts = set(portfolio_evidence.get("capacity_cash_unavailable_accounts") or [])
+    cash_complete = not unavailable and not capacity_unavailable_accounts
     cash_components: list[dict[str, Any]] = []
     capacity_cash_rows = cash_rows
     if "capacity_cash_holdings" in portfolio_evidence:
@@ -1036,12 +1037,12 @@ def project_assignment_scenario(
     account_cash: dict[str, dict[str, Any]] = {
         account: {
             "opening_cash_mmf_cny": _ZERO,
-            "opening_complete": not unavailable,
+            "opening_complete": not unavailable and account not in capacity_unavailable_accounts and not ("capacity_cash_holdings" in portfolio_evidence and not capacity_cash_rows),
             "put_outflow_cny": _ZERO,
             "call_inflow_cny": _ZERO,
             "known_fees_cny": _ZERO,
             "fees_complete": not unavailable,
-            "cash_complete": not unavailable,
+            "cash_complete": not unavailable and account not in capacity_unavailable_accounts and not ("capacity_cash_holdings" in portfolio_evidence and not capacity_cash_rows),
             "cash_components": [],
         }
         for account in normalized_accounts

@@ -488,7 +488,7 @@ def test_brief_replays_cash_without_using_todays_clock_or_legacy_flags(monkeypat
 
 
 @pytest.mark.parametrize("entry", ["scan_adapter", "cash_cli", "cash_tool", "portfolio_tool"])
-@pytest.mark.parametrize("case", ["fresh", "stale", "unknown"])
+@pytest.mark.parametrize("case", ["fresh", "stale", "unknown", "withdrawal_unavailable"])
 def test_public_cash_entries_share_reader_policy(tmp_path, monkeypatch, entry, case):
     import argparse
     import src.application.pipeline_context as pipeline
@@ -509,6 +509,7 @@ def test_public_cash_entries_share_reader_policy(tmp_path, monkeypatch, entry, c
     config_path.write_text(json.dumps(cfg))
     context = cash_context(NOW - timedelta(seconds=61 if case == "stale" else 0),
                            cash_by_currency={"CNY": 100})
+    context["withdrawal_reserve"] = {"status": "unavailable" if case == "withdrawal_unavailable" else "available", "reserved_by_currency": {}}
     if case == "unknown":
         context["cash_balance_reliable"] = False
     expected = verdict(context, ttl=60)

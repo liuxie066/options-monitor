@@ -18,17 +18,17 @@ def handle(payload):
     if len(ids) != 1:
         raise ValueError("exactly one broker account required")
     environment = settings.get("trd_env", "REAL")
-    gateway = build_ready_futu_broker_gateway(host=settings["host"], port=int(settings["port"]),
-                                             expected_account_ids=set(ids), trd_env=environment,
-                                             is_option_chain_cache_enabled=False)
-    try:
-        result = correction(cfg=cfg, account=account, account_id=next(iter(ids)), environment=environment,
-                            gateway=gateway, record_id=payload["record_id"], action=payload["action"],
-                            flow_ids=payload.get("flow_ids", []), reason=payload["reason"], actor=payload["actor"],
-                            expected_hash=payload.get("expected_hash") if payload.get("confirm") else None,
-                            operation_id=payload.get("operation_id") if payload.get("confirm") else None)
-    finally:
-        gateway.close()
+    def gateway_factory():
+        return build_ready_futu_broker_gateway(
+            host=settings["host"], port=int(settings["port"]), expected_account_ids=set(ids),
+            trd_env=environment, is_option_chain_cache_enabled=False,
+        )
+
+    result = correction(cfg=cfg, account=account, account_id=next(iter(ids)), environment=environment,
+                        gateway_factory=gateway_factory, record_id=payload["record_id"], action=payload["action"],
+                        flow_ids=payload.get("flow_ids", []), reason=payload["reason"], actor=payload["actor"],
+                        expected_hash=payload.get("expected_hash") if payload.get("confirm") else None,
+                        operation_id=payload.get("operation_id") if payload.get("confirm") else None)
     return result, [], {}
 
 

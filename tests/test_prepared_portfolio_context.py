@@ -942,6 +942,10 @@ def test_worker_consumes_published_config_bytes_and_hash(
     )
 
     def _load_account_portfolio_context(**kwargs):
+        assert kwargs["persist_withdrawals"] is True
+        assert kwargs["write_cache"] is False
+        from src.application.withdrawal_reserve import database_path
+        assert database_path().is_relative_to(tmp_path)
         observed.update(kwargs["runtime_config"])
         return {"filters": {"account": "lx"}, "stocks_by_symbol": {}}
 

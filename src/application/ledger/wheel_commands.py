@@ -27,7 +27,7 @@ from domain.domain.wheel import (
     plan_wheel_put_intent_cancel, plan_wheel_put_intent_create,
     project_wheel_call_intents, project_wheel_intents,
 )
-from src.application.portfolio_context_service import evaluate_account_cash_snapshot, cash_snapshot_is_usable
+from src.application.portfolio_context_service import evaluate_account_cash_snapshot, cash_snapshot_is_usable, withdrawal_reserve_is_usable
 from src.application.candidate_snapshot_contract import sha256_text
 from src.application.ledger.decision_snapshot import decision_state_snapshot_from_locked_rows
 from src.application.ledger.position_context import build_position_risk_context as build_option_positions_context
@@ -740,6 +740,10 @@ def _create_wheel_put_intent(
     apply_changes: bool,
     as_of_ms: int,
 ) -> dict[str, Any]:
+    needs_withdrawal_proof = object()
+    proof_checked = False
+    proof_error = None
+
     def _run(sqlite_repo: Any, conn: Any) -> dict[str, Any]:
         rows = sqlite_repo.read_lifecycle_account_rows(account=account, conn=conn)
         existing = [
@@ -840,8 +844,13 @@ def _create_wheel_put_intent(
         if confirmed_cash["max_age_sec"] != portfolio.get("max_age_sec"):
             raise ValueError("Wheel Put cash policy changed; repreview required")
         portfolio["cash_snapshot"] = confirmed_cash
-        if not cash_snapshot_is_usable(portfolio):
+        if not cash_snapshot_is_usable(portfolio) or not withdrawal_reserve_is_usable(portfolio):
             raise ValueError("Wheel Put cash evidence stale or unavailable; repreview required")
+        if apply_changes and portfolio.get("portfolio_source_name") == "futu":
+            if not proof_checked:
+                return needs_withdrawal_proof
+            if proof_error is not None:
+                raise ValueError("Wheel Put withdrawal evidence unavailable; repreview required") from proof_error
         decision_snapshot = decision_state_snapshot_from_locked_rows(
             sqlite_repo, rows,
             account=account,
@@ -923,7 +932,19 @@ def _create_wheel_put_intent(
             direction="put",
         )
 
-    return with_sqlite_repo_transaction(repo, _run)
+    result = with_sqlite_repo_transaction(repo, _run)
+    if result is needs_withdrawal_proof:
+        from src.application.withdrawal_reserve import verify_current_withdrawals
+
+        try:
+            verify_current_withdrawals(cfg=runtime_config, account=account,
+                                       context=_put_portfolio_context(capacity_fact),
+                                       runtime_root=capacity_fact.get("withdrawal_runtime_root"))
+        except Exception as exc:
+            proof_error = exc
+        proof_checked = True
+        result = with_sqlite_repo_transaction(repo, _run)
+    return result
 
 
 def create_wheel_intent(

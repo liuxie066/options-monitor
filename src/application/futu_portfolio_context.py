@@ -945,6 +945,7 @@ def fetch_futu_portfolio_context(
     exchange_rate_observation: Mapping[str, Any] | None | object = _FX_NOT_PROVIDED,
     exchange_rate_cache_path: Path | None = None,
     write_cache: bool = True,
+    persist_withdrawals: bool | None = None,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
@@ -1006,11 +1007,14 @@ def fetch_futu_portfolio_context(
                 broker_account_identifiers=account_ids, trd_env=trd_env,
                 capacity_market=str(cfg.get("_resolved", {}).get("market", "us")),
             )
+            from src.application.withdrawal_reserve import pending_cash_component
+
+            pending_cash_component(balance_rows)
             return refreshed.get("cash_balance_reliable") is True
 
         withdrawal_summary = observe_withdrawals(
             cfg=cfg, account=account, account_id=physical_account_id,
-            environment=trd_env, gateway=gateway, controls=controls, persist=write_cache,
+            environment=trd_env, gateway=gateway, controls=controls, persist=write_cache if persist_withdrawals is None else persist_withdrawals,
             funds_usable=len(balance_rows) == 1, refresh_funds=refresh_withdrawal_funds,
         )
         check_fetch_control(deadline, cancelled)

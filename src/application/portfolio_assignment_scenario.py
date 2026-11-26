@@ -41,7 +41,7 @@ from src.infrastructure.portfolio_management_client import (
     PortfolioManagementHTTPError,
 )
 from src.application.payload_helpers import parse_utc as _iso_datetime
-from src.application.portfolio_context_service import load_account_portfolio_context, cash_snapshot_is_usable, portfolio_position_snapshot_errors
+from src.application.portfolio_context_service import load_account_portfolio_context, cash_snapshot_is_usable, portfolio_position_snapshot_errors, withdrawal_reserve_is_usable
 from src.application.futu_portfolio_context import fetch_futu_portfolio_context, infer_futu_portfolio_settings
 from src.application.market_data_provider import (
     resolve_market_data_provider,
@@ -656,6 +656,8 @@ def _broker_cash_holdings(
     broker = normalize_broker(source)
     label = "Futu" if source == "futu" else source
     cash = context["cash_by_currency"]
+    if source == "futu" and not for_capacity:
+        cash = context.get("cash_gross_by_currency", cash)
     rows: list[dict[str, Any]] = []
     warnings: list[str] = []
     fx = context.get("exchange_rates")
@@ -1030,11 +1032,17 @@ def collect_assignment_portfolio_evidence(
                     account: context.get("source_observed_at") for account, context in futu_contexts.items()
                     if direct_bindings[account]["broker_id"] == "futu"
                 }
-                if any(binding["broker_id"] != "futu" for binding in direct_bindings.values()):
+                if futu_contexts:
                     evidence["capacity_cash_holdings"] = [
                         row for account, context in futu_contexts.items()
+                        if withdrawal_reserve_is_usable(context)
                         for row in _broker_cash_holdings(account, context, for_capacity=True)[0]
                     ]
+                    evidence["capacity_cash_unavailable_accounts"] = [
+                        account for account, context in futu_contexts.items()
+                        if not withdrawal_reserve_is_usable(context)
+                    ]
+                if any(binding["broker_id"] != "futu" for binding in direct_bindings.values()):
                     evidence["broker_observed_at_by_account"] = {
                         account: context.get("source_observed_at") for account, context in futu_contexts.items()
                     }
