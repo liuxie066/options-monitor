@@ -122,7 +122,15 @@ def build_tick_scheduler_context(request: TickSchedulerRequest) -> TickScheduler
         }
         scheduler_view = SchedulerDecisionView.from_payload(scheduler_decision)
         notify_decision_by_account: dict[str, AccountSchedulerDecisionView | None] = {}
-        scan_decision_by_account: dict[str, dict[str, Any]] = {}
+        scan_decision_by_account: dict[str, dict[str, Any]] = {
+            str(account).strip(): {
+                "should_run": False,
+                "reason": reason_global,
+                "source": "trading_day_guard",
+                "scheduler_decision": scheduler_decision,
+            }
+            for account in request.accounts if str(account).strip()
+        }
         should_run_global = False
         request.audit_helper.audit(
             "guard",

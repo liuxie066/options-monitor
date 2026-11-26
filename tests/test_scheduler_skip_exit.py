@@ -12,6 +12,7 @@ import pytest
 from domain.domain.engine import SchedulerDecisionView
 from src.application import multi_account_tick as tick
 from src.application import tick_cron
+from src.application import tick_scheduler_context
 from src.application.tick_guard_flow import TickGuardOutcome
 from src.application.tick_scheduler_context import TickSchedulerContext, TickSchedulerOutcome
 from src.interfaces.cli import main as cli
@@ -22,13 +23,16 @@ from src.interfaces.cli import main as cli
     ("mixed", 2), ("missing", 2), ("incomplete_metric", 2),
     ("early_unknown", 2), ("failure", 7), ("exception", 2),
     ("cancel", 130), ("delivery_failure", 7),
+    ("holiday_us", 0), ("holiday_hk", 0),
 ])
 def test_cron_cli_preserves_proven_skip_and_keeps_failures(monkeypatch, tmp_path, capsys, mode, expected):
     runtime = tmp_path / "runtime"
     runtime.mkdir()
-    config = runtime / "config.hk.json"
+    holiday = mode.startswith("holiday_")
+    market = mode.removeprefix("holiday_") if holiday else "hk"
+    config = runtime / f"config.{market}.json"
     config.write_text(json.dumps({
-        "_generated": {"schema_version": "1.0", "market": "hk", "source_format": "yaml", "generator": "options-monitor"},
+        "_generated": {"schema_version": "1.0", "market": market, "source_format": "yaml", "generator": "options-monitor"},
         "accounts": ["lx", "sy"], "symbols": [], "portfolio": {}, "schedule_hk": {"enabled": True},
     }))
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime))
@@ -46,7 +50,7 @@ def test_cron_cli_preserves_proven_skip_and_keeps_failures(monkeypatch, tmp_path
     monkeypatch.setattr(tick, "run_tick_guard_flow", lambda r: TickGuardOutcome(
         True, 0, r.base_cfg, r.accounts, r.default_account, ZoneInfo("Asia/Shanghai"),
     ))
-    early = mode in {"early", "early_unknown", "delivery_only", "delivery_failure"}
+    early = holiday or mode in {"early", "early_unknown", "delivery_only", "delivery_failure"}
     delivery_only = mode in {"delivery_only", "delivery_failure"}
     decision = {"schema_kind": "scheduler_decision", "schema_version": "1.0", "should_run_scan": False,
                 "is_notify_window_open": False, "in_run_window": delivery_only, "reason": "fixture skip"}
@@ -61,6 +65,14 @@ def test_cron_cli_preserves_proven_skip_and_keeps_failures(monkeypatch, tmp_path
             scan_decision_by_account=per_account, should_run_global=not early, reason_global="fixture skip",
         ), [],
     ))
+    guard_markets = []
+    if holiday:
+        # Exercise the real holiday producer; a fabricated per-account map hid this bug.
+        monkeypatch.setattr(tick, "build_tick_scheduler_context", tick_scheduler_context.build_tick_scheduler_context)
+        def closed_market(_config, guard_market, **_kwargs):
+            guard_markets.append(guard_market)
+            return False, guard_market
+        monkeypatch.setattr(tick, "_is_trading_day_guard_for_market", closed_market)
     forbidden = []
     def reject(name):
         def call(*_a, **_kw):
@@ -97,7 +109,9 @@ def test_cron_cli_preserves_proven_skip_and_keeps_failures(monkeypatch, tmp_path
     monkeypatch.setattr(tick, "run_tick_account_execution", execution)
     # The tested contract starts after account scheduling; external work is never invoked.
     monkeypatch.setattr(tick, "publish_runtime_portfolio_snapshot_shadows", lambda **_kw: None)
+    notification_calls = []
     def notification(*, notification_request, **_kwargs):
+        notification_calls.append(notification_request)
         if mode == "exception":
             raise OSError("fixture failure")
         if mode == "cancel":
@@ -127,13 +141,20 @@ def test_cron_cli_preserves_proven_skip_and_keeps_failures(monkeypatch, tmp_path
     def cron(**kw):
         return real_cron(**kw, preflight_config_fn=None, runtime_root=runtime)
     monkeypatch.setattr(cli, "run_tick_cron", cron)
-    rc = cli.main(["run", "tick-cron", "--market", "hk", "--config", str(config),
+    rc = cli.main(["run", "tick-cron", "--market", market, "--config", str(config),
                                           "--accounts", "lx", "sy", "--lock-path", str(runtime / "tick.lock")])
     assert rc == expected
     assert observed and observed[0].run_id == "inner-current"
     assert len(failures) == (0 if expected == 0 else 2)
     assert not recoveries
     assert not forbidden
+    if holiday:
+        assert guard_markets == [market.upper()]
+        assert set(observed[0].scheduler_skipped_accounts) == {"lx", "sy"}
+        assert not notification_calls
+        assert not (runtime / "output_runs" / "inner-current").exists()
+        assert not (runtime / "output_accounts").exists()
+        assert not list((runtime / "output_runs").glob("*/state/child_tick_completion.json"))
     text = capsys.readouterr().out
     if expected == 0:
         assert "调度跳过" in text
