@@ -3091,12 +3091,29 @@ def _fund_views(brief: Mapping[str, Any]) -> list[str]:
         if total is not None:
             out.append(f"{label}（折CNY）：{_currency_money('CNY', total)}")
             continue
-        out.append(f"{label}（折CNY）：暂不可用")
+        out.append(f"{label}（折CNY）：{'—' if funds.get('withdrawal_reserve') is not None else '暂不可用'}")
         out.extend(
             f"{label}：{_currency_money(currency, amount)}{reliability if label == '现金总额' else ''}"
             for currency, amount in amounts.items()
             if currency in {"CNY", "HKD", "USD"}
         )
+    withdrawal = funds.get("withdrawal_reserve")
+    if isinstance(withdrawal, Mapping):
+        if withdrawal.get("status") != "available":
+            label = "出金记录不可用" if withdrawal.get("reason") == "withdrawal_pm_unavailable" else "担保现金不可用"
+            out.append(f"{label}｜暂停自动开仓")
+        else:
+            for currency, amount in _currency_amounts(withdrawal.get("reserved_by_currency")).items():
+                if amount <= 0:
+                    continue
+                if not withdrawal.get("flow_complete", True):
+                    out.append(f"出金核对失败｜{_currency_money(currency, amount)} 继续预扣")
+                elif "manual" in withdrawal.get("statuses_by_currency", {}).get(currency, []):
+                    out.append(f"出金待核对｜{_currency_money(currency, amount)} 继续预扣")
+                elif "matched" in withdrawal.get("statuses_by_currency", {}).get(currency, []):
+                    out.append(f"出金已扣款｜{_currency_money(currency, amount)} 暂保留预扣")
+                else:
+                    out.append(f"出金待确认｜{_currency_money(currency, amount)} 已预扣")
     transit = funds.get("assignment_pending")
     if isinstance(transit, Mapping) and transit.get("status") != "none":
         if transit.get("status") == "verified_mmf":

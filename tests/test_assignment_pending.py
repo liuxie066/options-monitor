@@ -97,6 +97,8 @@ def test_close_never_credits_unreconciled_or_incomplete_evidence(change):
 @pytest.mark.parametrize("fee_failure", [False, True])
 def test_close_live_facade_queries_fees_and_preserves_whole_balance(monkeypatch, fee_failure):
     from src.application import futu_portfolio_context as fc
+    monkeypatch.setattr("src.application.withdrawal_reserve.observe", lambda **_: {
+        "status": "available", "reserved_by_currency": {}, "flow_complete": True})
     from src.application.daily_decision_brief_renderer import _fund_views
     balance, orders, terms = close_sample()
     today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
@@ -127,15 +129,11 @@ def test_close_live_facade_queries_fees_and_preserves_whole_balance(monkeypatch,
              "account_settings": {"sy": {"futu": {"account_id": "123"}}}},
         account="sy", exchange_rate_observation=None,
     )
-    assert gateway.closed and gateway.fee_calls == 1
-    if fee_failure:
-        assert context["assignment_pending"]["adjustment"] == 0
-        assert context["cash_by_currency"]["CNY"] == 0
-        assert context["cash_by_currency"]["USD"] == pytest.approx(989.49)
-    else:
-        assert context["cash_by_currency"]["USD"] == pytest.approx(1000)
-        assert context["cash_by_currency"]["CNY"] == 0
-        assert "平仓匹配在途" in "".join(_fund_views({"funds": {"assignment_pending": context["assignment_pending"]}}))
+    assert gateway.closed and gateway.fee_calls == 0
+    assert "assignment_pending" not in context
+    assert context["cash_by_currency"]["CNY"] == 7070
+    assert context["cash_by_currency"]["USD"] == pytest.approx(-10.51)
+
 
 
 @pytest.mark.parametrize("contracts", [1, 3])
@@ -187,6 +185,8 @@ def test_observation_reconciles_multiple_deficit_currencies_independently(monkey
 @pytest.mark.parametrize("usd_arrived,hkd_matched", [(False, False), (False, True), (True, False)])
 def test_live_multi_currency_adjustments_use_final_cash_snapshot(monkeypatch, usd_arrived, hkd_matched):
     from src.application import futu_portfolio_context as fc
+    monkeypatch.setattr("src.application.withdrawal_reserve.observe", lambda **_: {
+        "status": "available", "reserved_by_currency": {}, "flow_complete": True})
     today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
     balance, orders, terms = sample(day=today)
     balance["hk_cash"] = -2500
@@ -217,13 +217,14 @@ def test_live_multi_currency_adjustments_use_final_cash_snapshot(monkeypatch, us
              "account_settings": {"lx": {"futu": {"account_id": "123"}}}},
         account="lx", exchange_rate_observation=None,
     )
-    # The final HKD response owns the single fund_assets component; never keep
-    # an earlier USD fund component or re-credit USD that has already arrived.
-    assert context["cash_by_currency"]["USD"] == 0
-    assert context["cash_by_currency"]["HKD"] == 624000 - (0 if hkd_matched else 2500)
-    assert context["cash_by_currency"]["CNY"] == 0
-    for currency in ("USD", "HKD"):
+    # Aggregate funds and pending are included exactly once in their response currency.
+    assert context["cash_by_currency"]["USD"] == -9745
+    assert context["cash_by_currency"]["HKD"] == -2500
+    assert context["cash_by_currency"]["CNY"] == 630000
+    assert "assignment_pending" not in context
+    for currency in ("USD", "HKD", "CNY"):
         assert context["cash_capacity_by_currency"][currency]["amount"] == context["cash_by_currency"][currency]
+
 
 
 def test_unreliable_cash_preserves_none_and_updates_single_match_reason():
@@ -310,7 +311,8 @@ def test_replay_and_withdrawal_of_adjustment():
 @pytest.mark.parametrize("observed_at", ["2026-11-23T16:30:00+00:00", "2026-11-24T07:30:00+00:00"])
 def test_live_facade_fetches_new_whole_balance_and_reports_inference(monkeypatch, observed_at):
     from src.application import futu_portfolio_context as fc
-    from src.application.daily_decision_brief_renderer import _fund_views
+    monkeypatch.setattr("src.application.withdrawal_reserve.observe", lambda **_: {
+        "status": "available", "reserved_by_currency": {}, "flow_complete": True})
     observed = datetime.fromisoformat(observed_at)
     class Clock(datetime):
         @classmethod
@@ -343,10 +345,10 @@ def test_live_facade_fetches_new_whole_balance_and_reports_inference(monkeypatch
         account="lx", exchange_rate_observation=None,
     )
     assert gateway.closed
-    assert [c["currency"] for c in gateway.calls] == ["CNH", "USD"]
-    assert context["cash_by_currency"]["USD"] == 80000
-    assert context["cash_by_currency"]["CNY"] == 0
-    assert "已补入开仓资金" in "".join(_fund_views({"funds": {"assignment_pending": context["assignment_pending"]}}))
+    assert [c["currency"] for c in gateway.calls] == ["CNH"]
+    assert context["cash_by_currency"]["USD"] == -9745
+    assert context["cash_by_currency"]["CNY"] == 628215
+    assert "assignment_pending" not in context
 
 
 def test_incomplete_history_warns_without_suppressing_original_cash(monkeypatch):

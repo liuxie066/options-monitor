@@ -78,6 +78,7 @@ def transport(monkeypatch):
         record("fx", kwargs)
         return None
 
+    monkeypatch.setattr("src.application.withdrawal_reserve.datetime", FrozenDateTime)
     monkeypatch.setattr(futu, "datetime", FrozenDateTime)
     monkeypatch.setattr(futu, "build_ready_futu_broker_gateway", build)
     monkeypatch.setattr(futu, "get_exchange_rates_or_fetch_latest", fx)

@@ -127,7 +127,7 @@ def test_refresh_timeout_and_cancellation_propagate(tmp_path, exception):
         load(tmp_path, failed)
 
 
-@pytest.mark.parametrize(("age", "expected_fetches"), [(60, 0), (61, 1)])
+@pytest.mark.parametrize(("age", "expected_fetches"), [(60, 1), (61, 1)])
 def test_strict_attribution_window_remains_sixty_seconds(tmp_path, age, expected_fetches):
     (tmp_path / "portfolio_context.json").write_text(json.dumps(portfolio(age)))
     calls = []
@@ -158,9 +158,9 @@ def test_frozen_replay_stays_stable_but_new_confirmation_requalifies(monkeypatch
 
 
 @pytest.mark.parametrize(("scenario", "expected_calls"), [
-    ("same_scope_readonly_missing", 2), ("same_scope_write_cache", 1),
-    ("fresh_cache", 0), ("different_path", 2), ("different_account", 2),
-    ("stale_holdings", 1), ("partial_holdings", 2), ("failed_refresh", 2),
+    ("same_scope_readonly_missing", 2), ("same_scope_write_cache", 2),
+    ("fresh_cache", 2), ("different_path", 2), ("different_account", 2),
+    ("stale_holdings", 2), ("partial_holdings", 2), ("failed_refresh", 2),
 ])
 def test_portfolio_fetch_boundary_counts(tmp_path, scenario, expected_calls):
     """Counts one injected portfolio request, not SDK RPCs or production latency."""
@@ -215,7 +215,7 @@ def test_stricter_asset_scope_is_necessary_separate_read(tmp_path):
         calls.append(kwargs)
         return portfolio()
     load(tmp_path, fetch)
-    assert calls == []
-    load(tmp_path, fetch, include_options=True, required_position_asset_types=("stock", "option"))
     assert len(calls) == 1
-    assert calls[0]["include_options"] is True
+    load(tmp_path, fetch, include_options=True, required_position_asset_types=("stock", "option"))
+    assert len(calls) == 2
+    assert calls[1]["include_options"] is True

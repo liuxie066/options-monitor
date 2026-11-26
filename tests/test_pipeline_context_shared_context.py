@@ -730,7 +730,7 @@ def test_load_portfolio_context_rejects_stale_account_cache_with_wrong_stock_acc
         pc.fetch_futu_portfolio_context = old_fetch  # type: ignore[assignment]
 
 
-def test_load_portfolio_context_futu_cache_reuses_matching_account_label(tmp_path: Path) -> None:
+def test_load_portfolio_context_futu_refreshes_matching_cache_for_withdrawals(tmp_path: Path) -> None:
     import src.application.pipeline_context as pc
 
     old_is_fresh = pc.is_fresh
@@ -769,7 +769,7 @@ def test_load_portfolio_context_futu_cache_reuses_matching_account_label(tmp_pat
             return None
 
         pc.load_cached_json = _load_cached  # type: ignore[assignment]
-        pc.fetch_futu_portfolio_context = lambda **_kwargs: (_ for _ in ()).throw(AssertionError("fresh futu cache should be reused"))  # type: ignore[assignment]
+        pc.fetch_futu_portfolio_context = lambda **_kwargs: _load_cached(Path("portfolio_context.json"))  # type: ignore[assignment]
 
         runtime_cfg = {
             "accounts": ["user1"],
@@ -782,8 +782,8 @@ def test_load_portfolio_context_futu_cache_reuses_matching_account_label(tmp_pat
         assert out["portfolio_source_name"] == "futu"
         assert out["filters"]["account"] == "user1"
         assert out["stocks_by_symbol"]["NVDA"]["account"] == "user1"
-        assert out["context_source"] == "account_cache"
-        assert any("portfolio_context source=account_cache account=user1" in x for x in logs)
+        assert out["context_source"] == "futu_direct"
+        assert any("portfolio_context source=futu_direct account=user1" in x for x in logs)
         assert not any("cache rejected due to account mismatch" in x for x in logs)
     finally:
         pc.is_fresh = old_is_fresh  # type: ignore[assignment]

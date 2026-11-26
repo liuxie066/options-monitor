@@ -969,6 +969,9 @@ class _FutuAPIClient:
             self._trade().accinfo_query(**self._trade_kwargs(kwargs))
         )
 
+    def get_cash_flows(self, **kwargs: Any) -> Any:
+        return self._unwrap(self._trade().get_acc_cash_flow(**self._trade_kwargs(kwargs)))
+
     def get_funds(self, **kwargs: Any) -> Any:
         trade = self._trade()
         if hasattr(trade, "acctradinginfo_query"):
@@ -1664,6 +1667,20 @@ class FutuGateway:
             check_fetch_control(deadline, cancelled)
             self._raise_mapped(exc, action="get_account_balance")
         raise AssertionError("unreachable")
+
+    @_with_fetch_control
+    def get_cash_flows(self, *, deadline=None, cancelled=None, **kwargs: Any) -> Any:
+        from src.application.plugin_runtime import require_plugin
+
+        require_plugin("broker-futu")
+        try:
+            check_fetch_control(deadline, cancelled)
+            result = self.client.get_cash_flows(**kwargs)
+            check_fetch_control(deadline, cancelled)
+            return result
+        except Exception as exc:
+            check_fetch_control(deadline, cancelled)
+            self._raise_mapped(exc, action="get_cash_flows")
 
     def get_funds(self, **kwargs: Any) -> Any:
         from src.application.plugin_runtime import require_plugin

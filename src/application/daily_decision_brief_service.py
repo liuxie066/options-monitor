@@ -1675,7 +1675,11 @@ def _build_funds(
     option_positions_context: Mapping[str, Any],
     data_gaps: list[dict[str, Any]],
 ) -> tuple[dict[str, Any], bool]:
-    cash_total = _currency_amounts(portfolio_context.get("cash_by_currency"))
+    from src.application.portfolio_context_service import withdrawal_reserve_is_usable
+
+    effective_cash = _currency_amounts(portfolio_context.get("cash_by_currency"))
+    cash_total = _currency_amounts(portfolio_context.get("cash_gross_by_currency", portfolio_context.get("cash_by_currency")))
+    withdrawal_usable = withdrawal_reserve_is_usable(portfolio_context)
     portfolio_as_of = _parse_datetime(portfolio_context.get("cash_source_observed_at"))
     cash_total_reliable = cash_snapshot_is_usable(portfolio_context)
     if not cash_total_reliable:
@@ -1713,10 +1717,10 @@ def _build_funds(
             scoped_unavailable = set(unavailable) <= mapped_symbols
     reason = "ok"
     opening: dict[str, float] = {}
-    if cash_total_reliable and secured_source_reliable and (unavailable_reliable or scoped_unavailable):
+    if cash_total_reliable and withdrawal_usable and secured_source_reliable and (unavailable_reliable or scoped_unavailable):
         opening = {
-            currency: float((cash_total or {}).get(currency, 0.0)) - float((secured or {}).get(currency, 0.0))
-            for currency in sorted(set(cash_total or {}) | set(secured or {}))
+            currency: float((effective_cash or {}).get(currency, 0.0)) - float((secured or {}).get(currency, 0.0))
+            for currency in sorted(set(effective_cash or {}) | set(secured or {}))
             if currency not in blocked_currencies
         }
     if not secured_reliable:
@@ -1731,6 +1735,8 @@ def _build_funds(
         )
     if not cash_total_reliable:
         reason = "portfolio_cash_unavailable"
+    if not withdrawal_usable:
+        reason = "withdrawal_reserve_unavailable"
 
     option_fx = option_positions_context.get("exchange_rates")
     portfolio_fx = portfolio_context.get("exchange_rates")
@@ -1770,8 +1776,12 @@ def _build_funds(
         ) if secured_reliable else None
     )
     opening_cny: float | None = None
-    if cash_total_cny is not None and secured_total_cny is not None:
-        opening_cny = cash_total_cny - secured_total_cny
+    if cash_total_cny is not None and secured_total_cny is not None and withdrawal_usable:
+        effective_cny = sum_by_currency_to_cny(
+            effective_cash or {}, usdcny_exchange_rate=usdcny_rate,
+            cny_per_hkd_exchange_rate=cny_per_hkd_rate,
+        )
+        opening_cny = effective_cny - secured_total_cny if effective_cny is not None else None
     needed_pairs = {
         f"{currency}CNY" for amounts in (cash_total or {}, secured or {})
         for currency, amount in amounts.items() if currency in {"USD", "HKD"} and amount
@@ -1800,6 +1810,7 @@ def _build_funds(
             "cash_total_by_currency": (cash_total or {}) if cash_total_reliable else {},
             "cash_snapshot": portfolio_context.get("cash_snapshot"),
             "assignment_pending": portfolio_context.get("assignment_pending"),
+            "withdrawal_reserve": portfolio_context.get("withdrawal_reserve"),
             **({"cash_secured_unavailable_by_symbol": dict(unavailable)}
                if isinstance(unavailable, Mapping) and unavailable else {}),
             "cash_secured_unavailable_by_ccy": dict(unavailable_by_ccy) if isinstance(unavailable_by_ccy, Mapping) else {},
@@ -1809,9 +1820,9 @@ def _build_funds(
             "cash_secured_total_cny": secured_total_cny,
             "option_opening_available_cny": opening_cny,
             "cash_total_reliable": cash_total_reliable,
-            "option_opening_reliable": cash_total_reliable and secured_reliable,
+            "option_opening_reliable": cash_total_reliable and secured_reliable and withdrawal_usable,
             "cash_total_cny_unavailable_reason": "现金来源不可靠" if not cash_total_reliable else fx_reason,
-            "option_opening_cny_unavailable_reason": reason if not (cash_total_reliable and secured_reliable) else fx_reason,
+            "option_opening_cny_unavailable_reason": reason if not (cash_total_reliable and secured_reliable and withdrawal_usable) else fx_reason,
             "fx_snapshot_sha256": "" if fx_mismatch else option_hash or portfolio_hash or "",
             "fx_pairs": {
                 pair: {key: row.get(key) for key in ("source", "quote_at_utc", "quality", "reason")}

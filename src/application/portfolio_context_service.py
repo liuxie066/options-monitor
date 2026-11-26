@@ -120,6 +120,12 @@ def cash_snapshot_is_usable(context: Mapping[str, Any]) -> bool:
     return cash_snapshot_evidence_is_complete(context) and context["cash_snapshot"]["status"] == "fresh"
 
 
+def withdrawal_reserve_is_usable(context: Mapping[str, Any]) -> bool:
+    """Keep withdrawal qualification separate from raw broker cash freshness."""
+    reserve = context.get("withdrawal_reserve")
+    return reserve is None or (isinstance(reserve, Mapping) and reserve.get("status") == "available")
+
+
 def _expected_capacity_authority(config: Mapping[str, Any], *, account: str | None) -> dict[str, Any]:
     if resolve_account_type(dict(config), account=account) == "longbridge":
         settings = resolve_account_longbridge_settings(config, account=account)
@@ -293,12 +299,15 @@ def load_account_portfolio_context(
         raise
     except Exception:
         cached = None
-    pending = cached.get("assignment_pending") if isinstance(cached, dict) else None
-    needs_current_pending_evidence = (source_plan.primary_source == "futu"
-                                      and isinstance(pending, dict) and pending.get("status") != "none")
+    # A cached amount cannot attest that PM has no new withdrawal or correction.
+    needs_current_pending_evidence = source_plan.primary_source == "futu"
+    if needs_current_pending_evidence and isinstance(cached, dict):
+        _validate_portfolio_context_account(cached, requested_account=account, log=log, source="account_cache")
     if (
-        isinstance(cached, dict) and not needs_current_pending_evidence
+        isinstance(cached, dict)
         and cached.get("cash_source") != "futu_cash_like_assets_with_pm_mmf"
+        and not (isinstance(cached.get("assignment_pending"), dict)
+                 and cached["assignment_pending"].get("status") not in {None, "none"})
     ):
         cached_snapshot = cached.get("position_snapshot_input")
         if isinstance(cached_snapshot, Mapping):
@@ -309,11 +318,11 @@ def load_account_portfolio_context(
         result = evaluate(cached, "account_cache")
         errors = position_errors(result)
         account_valid = _validate_portfolio_context_account(result, requested_account=account, log=log, source="account_cache")
-        if cash_snapshot_is_usable(result) and not errors and account_valid:
+        if cash_snapshot_is_usable(result) and not errors and account_valid and not needs_current_pending_evidence:
             log(f"[CTX] portfolio_context source=account_cache account={account or '-'}")
             check_fetch_control(deadline, cancelled)
             return result
-        if cash_snapshot_is_usable(result) and account_valid and errors:
+        if cash_snapshot_is_usable(result) and account_valid and (errors or needs_current_pending_evidence):
             trusted_cached_cash = result
     kwargs: dict[str, Any] = {
         "cfg": config, "account": account, "market": resolve_account_broker(config, account=account) if source_plan.primary_source != "futu" else str(market), "base_currency": str((config.get("portfolio") or {}).get("base_currency") or "CNY"),
@@ -341,7 +350,11 @@ def load_account_portfolio_context(
         check_fetch_control(deadline, cancelled)
         log(f"[WARN] portfolio cash provider unavailable: {exc}")
         if trusted_cached_cash is not None:
-            return {**trusted_cached_cash, "position_refresh_error": type(exc).__name__}
+            result = {**trusted_cached_cash, "position_refresh_error": type(exc).__name__}
+            if needs_current_pending_evidence:
+                result["withdrawal_reserve"] = {"status": "unavailable", "reason": "withdrawal_pm_unavailable",
+                                                "reserved_by_currency": {}}
+            return result
         return evaluate({"cash_provider_error": type(exc).__name__}, "unavailable")
     direct_source = source_plan.primary_source + "_direct"
     result = evaluate(context, direct_source)

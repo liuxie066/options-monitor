@@ -380,6 +380,8 @@ om plugins uninstall position-advice         # 预览移除；加 --confirm 才�
 可按账户选择一个或多个通知目标，各目标独立记录回执和重试。均不安装也可使用本地扫描与报告。
 见[安装消息渠道](docs/INSTALL.md#可选消息渠道)及[配置契约](CONFIGS.md#消息渠道)。
 
+富途开仓资金采用现金、基金及在途总额减出金预扣，依赖 PM 完整现金流事实；接口不可用时暂停新增开仓额度。详见[出金预扣与手动订正](docs/WITHDRAWAL_RESERVES.md)。
+
 ## 更多能力与文档
 
 ### 开发者与脚本集成

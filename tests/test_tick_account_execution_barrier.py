@@ -2127,7 +2127,7 @@ def test_real_holdings_fallback_shadow_publishes_replays_and_audits_each_account
             cache = prepared.authorities[account].state_path.parent / "portfolio_context.json"
             assert cache.read_bytes() == prepared.cache_bytes[account]
         assert all(path.read_bytes() == raw for path, raw in sealed_files.items())
-    assert [call["account"] for call in prepared.provider_calls] == ["lx"]
+    assert [call["account"] for call in prepared.provider_calls] == ["lx", "sy"]
     assert not forbidden_calls
     assert [vars(result) for result in legacy] == legacy_before
     assert [event["account"] for event in audit.events] == ["lx", "sy", "lx", "sy"]

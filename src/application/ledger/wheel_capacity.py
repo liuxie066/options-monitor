@@ -84,6 +84,7 @@ def build_shared_cash_capacity_fact(
     fx_snapshot: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Bind canonical physical cash, ledger collateral, intents, and frozen FX."""
+    from src.application.portfolio_context_service import withdrawal_reserve_is_usable
 
     account_value = str(account or "").strip().lower()
     authority = portfolio_context.get("capacity_authority")
@@ -121,6 +122,7 @@ def build_shared_cash_capacity_fact(
     status = "available"
     reason = None
     for condition, unavailable_reason in (
+        (not withdrawal_reserve_is_usable(portfolio_context), "withdrawal_reserve_unavailable"),
         (not account_value or authority_account != account_value, "cash_authority_account_mismatch"),
         (str(authority.get("status") or "").strip().lower() != "available", "cash_authority_unavailable"),
         (not cash_by_currency, "cash_by_currency_missing"),

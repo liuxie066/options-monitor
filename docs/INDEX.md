@@ -55,6 +55,8 @@
 
 ## 技术架构与核心合同
 
+- [出金预扣与手动订正](WITHDRAWAL_RESERVES.md)：PM 出金事实、富途流水匹配、失败处理和预扣恢复。
+
 - [Business Fetch Baseline](BUSINESS_FETCH_BASELINE.md)：指定源码的业务入口取数复用审计与离线耗时；生产测量选择和未覆盖边界。
 
 - [Shared API Index](API_INDEX.md)：按业务能力查共享数据、计算和工作流入口、事实归属、契约、测试及兼容/退役状态；Tool schema 使用 `./om-agent spec`。
