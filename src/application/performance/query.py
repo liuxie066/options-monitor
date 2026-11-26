@@ -23,6 +23,7 @@ _OPTION_PERFORMANCE_INPUT_FIELDS = frozenset(
         "month",
         "year",
         "include_rows",
+        "basis",
         "view",
         "group_by",
         "symbol",
@@ -47,6 +48,12 @@ def normalize_option_performance_request(
     config_key = str(payload.get("config_key") or "us").strip().lower()
     if config_key not in {"us", "hk"}:
         raise PerformanceQueryError("INPUT_ERROR", "config_key must be us or hk")
+    basis = payload.get("basis", "terminated")
+    if basis not in ("terminated", "opening_cohort", "cashflow"):
+        raise PerformanceQueryError("INPUT_ERROR", "basis must be terminated, opening_cohort, or cashflow")
+    if basis == "cashflow" and (payload.get("include_rows") or payload.get("view", "summary") != "summary"
+                               or any(name in payload for name in ("group_by", "symbol", "limit", "cursor"))):
+        raise PerformanceQueryError("INPUT_ERROR", "Cashflow reconciliation supports summary only.")
     include_rows = payload.get("include_rows")
     if include_rows is not None and not isinstance(include_rows, bool):
         raise PerformanceQueryError("INPUT_ERROR", "include_rows must be a boolean")
@@ -80,6 +87,7 @@ def normalize_option_performance_request(
         "month": period_request.month,
         "year": period_request.year,
         "include_rows": bool(include_rows),
+        "basis": basis,
     }
     normalized.update(
         {name: payload[name] for name in ("view", "group_by", "symbol", "limit", "cursor") if name in payload}
@@ -175,7 +183,7 @@ def _page_option_performance(
         raise PerformanceQueryError("INPUT_ERROR", "cursor_invalidated")
     end = min(len(rows), offset + query["limit"])
     result = {name: data[name] for name in ("period", "scope", "freshness", "quality")}
-    result.update({name: data[name] for name in ("schema_version", "metric_semantics") if name in data})
+    result.update({name: data[name] for name in ("schema_version", "metric_semantics", "basis") if name in data})
     result.update(
         view=view,
         group_by=group if view == "breakdowns" else None,
@@ -289,6 +297,7 @@ def option_performance_report_tool(
             account=request.get("account"),
             broker=request.get("broker"),
             include_rows=request["include_rows"],
+            basis=request["basis"],
         )
     except OptionPerformanceReadError as exc:
         raise PerformanceQueryError(

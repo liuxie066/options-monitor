@@ -453,6 +453,7 @@ def _parse_income(
     account: str | None = None
     period = "mtd"
     selector: dict[str, object] = {}
+    basis: str | None = None
     for arg in args:
         normalized = arg.lower()
         if normalized in accounts:
@@ -461,6 +462,11 @@ def _parse_income(
             account = normalized
         elif normalized in {"all", "全部"}:
             continue
+        elif normalized in {"对账", "cashflow", "opening_cohort", "开仓批次"}:
+            selected_basis = "cashflow" if normalized in {"对账", "cashflow"} else "opening_cohort"
+            if basis is not None and basis != selected_basis:
+                raise _bad_arg(command, arg, "只能选择一种统计口径。")
+            basis = selected_basis
         elif normalized in _INCOME_PERIOD_TOKENS:
             period = _INCOME_PERIOD_TOKENS[normalized]
             selector = {}
@@ -485,9 +491,11 @@ def _parse_income(
             raise _bad_arg(
                 command,
                 arg,
-                "支持：/income、/income [账户] mtd|ytd|上月|YYYY-MM|YYYY。",
+                "支持：/income [账户] mtd|ytd|上月|YYYY-MM|YYYY [对账|开仓批次]。",
             )
     payload: dict[str, object] = {"period": period, **selector}
+    if basis:
+        payload["basis"] = basis
     if account:
         payload["account"] = account
     return _intent("option_performance_report", payload)

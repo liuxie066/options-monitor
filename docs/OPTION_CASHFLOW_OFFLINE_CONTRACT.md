@@ -142,10 +142,10 @@ mutate earlier inputs or results.
 
 ## Consumer compatibility
 
-Application bodies use `schema_version='option_performance.report.v3'` and `metric_semantics`;
-the HTTP envelope remains `option_performance.api.v1`. No request or command rename is needed.
-Rows/breakdown pages carry the schema and cohort semantics in both payload and content-hash binding,
-but never attach full-account period totals to symbol-filtered pages. The Tool model contract retains
-the new field and its missing-data reasons. Bot shows period cash separately from opening-cohort cash;
-an old response lacking the new field renders period cash unavailable. Per-contract decision history
-uses “合约期权现金结果”, not period profit. No renderer recalculates cash or repurposes legacy values.
+Public application bodies use schema v4 with explicit basis, defaulting to terminal-period net income;
+the HTTP envelope remains option_performance.api.v1. Reconciliation requires basis=cashflow,
+opening-batch analysis requires basis=opening_cohort. See the [public contract](OPTION_PERFORMANCE_DESIGN.md#public-contract).
+This pure offline entry retains its existing combined period-cash and opening-cohort calculation,
+including supplemental fee and input-visibility rules. It does not inherit the public query default.
+Per-contract decision history keeps “合约期权现金结果”. No renderer recalculates cash or relabels
+legacy opening-cohort values as terminal income.

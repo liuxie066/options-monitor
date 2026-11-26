@@ -115,12 +115,19 @@
 - `portfolio_pnl_bridge`
 - `portfolio_cash_bridge`
 
-`option_performance_report` 提供 MTD/YTD/自然月/自然年的期间期权净现金流
-（`period_option_net_cashflow`，含以前开仓、本期平仓的现金）及独立展示的开仓批次现金结果
-（旧 `option_net_cashflow`）。卖方/买方胜率、收益率的原数值与口径不变。
-`schema_version=option_performance.report.v3` 和 `metric_semantics` 声明两种选择口径；
-rows/breakdowns 仍是开仓批次明细，分页也携带 schema/口径并将其绑定到来源哈希，
-symbol 页不附全账户期间总额。旧服务未返回新字段时，期间现金明确不可用，不拿旧字段替代。
+`option_performance_report` 默认 `period=mtd, basis=terminated`，查询“本月已终结期权净收益”。
+按期间内实际平仓、到期、指派或行权的份额选取，包含以前开仓的期权及部分平仓；
+计入对应开仓收支、终结收支和实际期权费用，排除股票交割本金、股票费用及后续股票盈亏。
+`terminated_option_net_income`、rows/breakdowns、胜率和收益率采用同一终结时点口径。
+支持 MTD/YTD/自然月/自然年；原期间边界和账户/券商范围不变。
+
+`basis=cashflow` 或 `/income [账户] [期间] 对账` 查询期间期权净现金流，只用于对账汇总。
+该口径暂不支持标的/明细分页，不用开仓批次明细冒充期间流水。
+`basis=opening_cohort` 或 `/income [账户] [期间] 开仓批次` 保留原开仓批次分析。
+CLI 对应 `./om option-performance report --basis cashflow|opening_cohort`。
+`schema_version=option_performance.report.v4`、`basis` 和 `metric_semantics` 声明口径；
+每份响应只返回所选净收益/现金指标，分页延续相同口径，symbol 页不附全账户总额。
+显式 HTTP 服务须返回匹配口径的 v4；旧服务或口径不匹配报错，不回退本地或替代金额。
 实际日均未了结占用本金含跨期持仓，仅按已发生时间加权，不作为收益率分母。
 现金保留原币，各现金指标的 CNY 总额只消费已落库 `cash_conversion.v1` 证据；不查当前汇率。
 成交附带费用随成交时间入期，迟到更正重述原期间；有独立事实时间的新扣费/退款才按独立时间入期。
@@ -129,7 +136,7 @@ symbol 页不附全账户期间总额。旧服务未返回新字段时，期间�
 只有独立、当前的同步证据支持时才可称“手续费待同步”，失败或长期异常仍需明确保留。
 输入哈希变化不能证明重建主体、丢失原因或必须重建/backfill。
 `freshness.as_of` 表示统计截止，不是费用同步时间；`/income` 按此标签显示原值。
-正股交易、指派/行权交割现金、PnL 和行情刷新不属于该报告。HTTP 外层保持 v1。
+正股交易、指派/行权的股票交割现金、期权市值浮盈亏和行情刷新不属于该报告。HTTP 外层保持 v1。
 纯领域离线接口及冻结证据限制见[离线合同](OPTION_CASHFLOW_OFFLINE_CONTRACT.md)。
 
 ### 持仓、现金与组合

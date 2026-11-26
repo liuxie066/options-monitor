@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -136,9 +136,14 @@ def reduce_option_performance(
     broker: str | None = None,
     fee_cash_events: Iterable[OptionFeeCashEvent] = (),
     fee_mode: str = "actual",
+    basis: str | None = None,
 ) -> PerformanceReduction:
-    """Reduce one fully resolved ledger projection into weighted cohort facts."""
+    """Reduce one projection; omitted basis preserves the offline combined contract."""
 
+    legacy_report = basis is None
+    basis = "opening_cohort" if legacy_report else basis
+    if basis not in {"opening_cohort", "terminated", "cashflow"}:
+        raise ValueError("basis must be terminated, opening_cohort, or cashflow")
     account_scope = str(account or "").strip().lower() or None
     account_values = None if accounts is None else tuple(accounts) if not isinstance(accounts, (str, bytes)) else accounts
     if account_values is not None and (
@@ -156,6 +161,15 @@ def reduce_option_performance(
         projection, period=period, accounts=account_scopes or None, broker=broker_scope,
         fee_cash_events=fee_cash_events, fee_mode=fee_mode,
     )
+    if basis == "cashflow":
+        return PerformanceReduction(
+            period=period, facts=(), breakdowns={}, diagnostics=(), cashflow_facts=cashflow_facts,
+            bundle={"period_option_net_cashflow": period_cashflow,
+                    "status": period_cashflow["status"], "missing": period_cashflow["missing"]},
+        )
+    allocations_by_lot: dict[str, list[OptionEconomicAllocation]] = defaultdict(list)
+    for allocation in projection.allocations:
+        allocations_by_lot[allocation.target_lot_id].append(allocation)
     diagnostics = tuple(
         item
         for item in projection.diagnostics
@@ -169,7 +183,7 @@ def reduce_option_performance(
     diagnostics = tuple(
         item
         for item in diagnostics
-        if _diagnostic_in_period(item, lots_by_id=lots_by_id, period=period)
+        if basis == "terminated" or _diagnostic_in_period(item, lots_by_id=lots_by_id, period=period)
     )
     if any(item.severity == "error" and item.code not in PERFORMANCE_PARTIAL_PROJECTION_CODES for item in diagnostics):
         raise PerformanceScopeError("ledger projection contains an in-scope error")
@@ -188,16 +202,21 @@ def reduce_option_performance(
     selected_lot_ids = {
         lot_id
         for lot_id, lot in lots_by_id.items()
-        if period.contains(lot.opened_at_ms)
+        if (period.contains(lot.opened_at_ms) if basis == "opening_cohort" else (
+            lot.opened_at_ms < period.effective_end_exclusive_at_ms and (
+                any(period.contains(a.closed_at_ms) for a in allocations_by_lot.get(lot_id, ()))
+                or (_expiration_end_ms(lot.contract_key.expiration_ymd) <= period.effective_end_exclusive_at_ms
+                    and sum(a.contracts for a in allocations_by_lot.get(lot_id, ())
+                            if a.closed_at_ms < period.effective_end_exclusive_at_ms) < lot.contracts_opened)
+                or lot_id in failed_lot_ids
+            )
+        ))
         and (not account_scopes or lot.contract_key.account in account_scopes)
         and (not broker_scope or lot.contract_key.broker == broker_scope)
     }
     if selected_lot_ids - set(opens_by_lot) - failed_lot_ids:
         raise PerformanceScopeError("effective opening facts are incomplete")
 
-    allocations_by_lot: dict[str, list[OptionEconomicAllocation]] = defaultdict(list)
-    for allocation in projection.allocations:
-        allocations_by_lot[allocation.target_lot_id].append(allocation)
     unknown_lots = set(allocations_by_lot) - set(lots_by_id)
     if unknown_lots:
         raise PerformanceScopeError("economic allocation targets an unknown lot")
@@ -226,7 +245,7 @@ def reduce_option_performance(
     facts: list[WeightedOptionFact] = []
     for lot_id in sorted(lots_by_id):
         lot = lots_by_id[lot_id]
-        if not period.contains(lot.opened_at_ms):
+        if lot_id not in selected_lot_ids:
             continue
         if account_scopes and lot.contract_key.account not in account_scopes:
             continue
@@ -256,6 +275,25 @@ def reduce_option_performance(
             )
         )
 
+    allocation_facts = tuple(sorted(facts, key=_fact_sort_key))
+    if basis == "terminated":
+        facts = [fact for fact in allocation_facts
+                 if (fact.terminal_at_ms is not None and period.contains(fact.terminal_at_ms))
+                 or fact.state in {"failed", "unresolved_after_expiry"}]
+        # Missing lifecycle evidence must not become a proved zero or an earned opening credit.
+        terminal_cash_missing = {
+            cash["source_event_id"]: set(cash["missing"])
+            for cash in cashflow_facts if cash["fact_kind"] == "option_trade_cash_gross"
+        }
+        checked = []
+        for fact in facts:
+            missing = {*fact.win_missing, *terminal_cash_missing.get(fact.terminal_event_id, ())}
+            checked.append(replace(
+                fact, option_net_cashflow=None, status=MetricStatus.PARTIAL,
+                cash_missing=tuple(sorted({*fact.cash_missing, *missing})),
+                missing=tuple(sorted({*fact.missing, *missing})),
+            ) if missing else fact)
+        facts = checked
     ordered_facts = tuple(sorted(facts, key=_fact_sort_key))
     breakdowns = _breakdowns(
         ordered_facts,
@@ -269,6 +307,7 @@ def reduce_option_performance(
     cny_total = _cny_cashflow_total(
         ordered_facts,
         events=projection.effective_cash_events,
+        allocation_facts=allocation_facts if basis == "terminated" else None,
     )
     cny_missing = set(cny_total["missing"])
     bundle = {
@@ -300,13 +339,14 @@ def reduce_option_performance(
             accounts=account_scopes, broker=broker_scope,
         ),
     }
-    bundle = {
-        **bundle,
-        "period_option_net_cashflow": period_cashflow,
-        "status": max((bundle["status"], period_cashflow["status"]),
-                      key={"observed": 0, "estimated": 1, "partial": 2}.__getitem__),
-        "missing": tuple(sorted({*bundle["missing"], *period_cashflow["missing"]})),
-    }
+    if legacy_report:
+        bundle = {
+            **bundle,
+            "period_option_net_cashflow": period_cashflow,
+            "status": max((bundle["status"], period_cashflow["status"]),
+                          key={"observed": 0, "estimated": 1, "partial": 2}.__getitem__),
+            "missing": tuple(sorted({*bundle["missing"], *period_cashflow["missing"]})),
+        }
     return PerformanceReduction(
         period=period,
         facts=ordered_facts,
@@ -872,12 +912,14 @@ def _cny_cashflow_total(
     facts: Sequence[WeightedOptionFact],
     *,
     events: Sequence[TradeEvent],
+    allocation_facts: Sequence[WeightedOptionFact] | None = None,
 ) -> dict[str, Any]:
     missing = {reason for fact in facts for reason in fact.cash_missing}
     events_by_id = {event.event_id: event for event in events}
     amount = Decimal(0)
-    component_keys: set[tuple[str, str]] = set()
-    for fact in facts:
+    components_by_event: dict[tuple[str, str], list[tuple[str, Decimal]]] = defaultdict(list)
+    selected_ids = {fact.fact_id for fact in facts}
+    for fact in allocation_facts if allocation_facts is not None else facts:
         if fact.state == "failed":
             continue
         components = (
@@ -897,8 +939,12 @@ def _cny_cashflow_total(
         for event_id, fact_kind, native_amount in components:
             if not event_id or native_amount is None:
                 continue
-            component_keys.add((event_id, fact_kind))
-    for event_id, fact_kind in sorted(component_keys):
+            weight = (Decimal(fact.contracts) if event_id == fact.open_event_id
+                      and fact_kind == "option_trade_cash_gross" else native_amount)
+            components_by_event[event_id, fact_kind].append((fact.fact_id, weight))
+    for (event_id, fact_kind), parts in sorted(components_by_event.items()):
+        if not any(fact_id in selected_ids for fact_id, _ in parts):
+            continue
         amount_cny, issue = _validated_cny_amount(
             events_by_id.get(event_id),
             fact_kind=fact_kind,
@@ -906,7 +952,20 @@ def _cny_cashflow_total(
         if amount_cny is None:
             missing.add(issue or "cash_conversion_missing")
             continue
-        amount = quantize_money(amount + amount_cny)
+        if allocation_facts is None:
+            amount = quantize_money(amount + amount_cny)
+            continue
+        event = events_by_id[event_id]
+        native_total = (Decimal(event.contracts) if event.event_type == "open" and fact_kind == "option_trade_cash_gross"
+                        else next(item.amount for item in cash_facts_for_trade_event(event) if item.fact_kind == fact_kind))
+        # Cumulative rounding conserves the persisted event conversion across partial closes.
+        cumulative = previous_cny = Decimal(0)
+        for fact_id, native_amount in parts:
+            cumulative += native_amount
+            cumulative_cny = quantize_money(amount_cny * cumulative / native_total) if native_total else Decimal(0)
+            if fact_id in selected_ids:
+                amount += cumulative_cny - previous_cny
+            previous_cny = cumulative_cny
     return {
         "currency": "CNY",
         "amount": None if missing else amount,

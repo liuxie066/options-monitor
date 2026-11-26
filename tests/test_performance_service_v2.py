@@ -143,6 +143,7 @@ def _build_report(repo, **overrides):
         repo,
         **{
             "period": _period(),
+            "basis": "opening_cohort",
             "config_key": "us",
             "configured_accounts": ("lx",),
             **overrides,
@@ -176,7 +177,7 @@ def test_service_reads_one_tuple_and_serializes_only_the_canonical_contract() ->
         ]
     )
 
-    report = _build_report(repo, configured_accounts=("lx", "sy"), include_rows=True)
+    report = _build_report(repo, configured_accounts=("lx", "sy"), include_rows=True, basis="terminated")
 
     assert report["daily_occupied_capital"]["by_currency"]["USD"] == {
         "amount": 5000.0, "status": "observed", "missing": [],
@@ -185,12 +186,12 @@ def test_service_reads_one_tuple_and_serializes_only_the_canonical_contract() ->
     assert set(report) == {
         "schema_version",
         "metric_semantics",
-        "period_option_net_cashflow",
+        "basis",
         "period",
         "scope",
         "coverage",
         "freshness",
-        "option_net_cashflow",
+        "terminated_option_net_income",
         "sell_option_win_rate",
         "buy_option_win_rate",
         "option_return",
@@ -217,26 +218,22 @@ def test_service_reads_one_tuple_and_serializes_only_the_canonical_contract() ->
         "as_of": "2026-09-02T23:59:59.999+08:00",
     }
     assert len(report["quality"]["ledger_input_hash"]) == 64
-    assert set(report["rows"][0]) == _ROW_FIELDS
-    assert report["option_net_cashflow"]["by_currency"]["USD"]["total"]["amount"] == 100.0
-    cny_total = report["option_net_cashflow"]["cny_total"]
+    assert set(report["rows"][0]) == (_ROW_FIELDS - {"option_net_cashflow"}) | {"terminated_option_net_income"}
+    assert report["terminated_option_net_income"]["by_currency"]["USD"]["amount"] == 100.0
+    cny_total = report["terminated_option_net_income"]["cny_total"]
     assert cny_total["currency"] == "CNY"
     assert cny_total["amount"] == 680.0
     assert cny_total["status"] == "observed"
     assert cny_total["missing"] == []
     assert report["quality"]["status"] == "observed"
     assert not _contains_not_observed(report)
-    assert report["schema_version"] == "option_performance.report.v3"
+    assert report["schema_version"] == "option_performance.report.v4"
     assert report["metric_semantics"]["option_return"] == {
-        "selection": "opening_cohort", "numerator": "option_net_cashflow",
+        "selection": "terminal_event_time", "numerator": "terminated_option_net_income",
     }
-    period_cash = report["period_option_net_cashflow"]
-    assert period_cash["schema_version"] == "period_option_net_cashflow.v1"
-    assert period_cash["by_currency"]["USD"]["total"]["amount"] == 100.0
-    assert period_cash["by_currency"]["USD"]["gross"]["amount"] == 100.0
-    assert period_cash["by_currency"]["USD"]["fees"]["amount"] == 0.0
-    assert period_cash["cny_total"]["amount"] == 680.0
-    assert "cashflow_facts" not in report and "facts" not in period_cash
+    assert "option_net_cashflow" not in report and "period_option_net_cashflow" not in report
+    assert report["basis"] == "terminated"
+    assert report["breakdowns"]["symbols"][0]["terminated_option_net_income"]["by_currency"]["USD"]["amount"] == 100.0
 
 
 def test_service_period_cash_includes_prior_opening_close_without_changing_cohort() -> None:
@@ -244,7 +241,12 @@ def test_service_period_cash_includes_prior_opening_close_without_changing_cohor
     closed = _event("close", "close", "2026-09-02T10:00:00", target_lot_id="lot-1")
     report = _build_report(_Repo([opened.to_dict(), closed.to_dict()]), include_rows=True)
 
-    assert report["period_option_net_cashflow"]["by_currency"]["USD"]["total"]["amount"] == -100.0
+    cashflow = _build_report(_Repo([opened.to_dict(), closed.to_dict()]), basis="cashflow")
+    assert cashflow["period_option_net_cashflow"]["by_currency"]["USD"]["total"]["amount"] == -100.0
+    assert "option_net_cashflow" not in cashflow and "terminated_option_net_income" not in cashflow
+    assert "period_option_net_cashflow" not in report
+    income = _build_report(_Repo([opened.to_dict(), closed.to_dict()]), basis="terminated")
+    assert income["terminated_option_net_income"]["by_currency"]["USD"]["amount"] == 100.0
     assert report["option_net_cashflow"]["by_currency"] == {}
     assert report["option_return"]["by_currency"] == {}
     assert report["sell_option_win_rate"]["eligible_contracts"] == 0

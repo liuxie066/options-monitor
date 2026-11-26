@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -9,22 +8,14 @@ import pytest
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.agent_tools import positions
 from src.application.bot import tools as bot_tools
-from src.application.performance.service import METRIC_SEMANTICS, REPORT_SCHEMA_VERSION, OptionPerformanceReadError
+from src.application.performance.service import _metric_semantics, REPORT_SCHEMA_VERSION, OptionPerformanceReadError
 
 
 def _report(*, include_rows: bool = False) -> dict[str, Any]:
     value: dict[str, Any] = {
         "schema_version": REPORT_SCHEMA_VERSION,
-        "metric_semantics": deepcopy(METRIC_SEMANTICS),
-        "period_option_net_cashflow": {
-            "schema_version": "period_option_net_cashflow.v1",
-            "selection": "cash_event_effective_time",
-            "time_policy": "trade_event_time_with_explicit_fee_effective_time",
-            "fee_mode": "actual",
-            "by_currency": {},
-            "cny_total": {"currency": "CNY", "amount": 0, "status": "observed", "missing": []},
-            "status": "observed", "missing": [], "fact_count": 0,
-        },
+        "metric_semantics": _metric_semantics("terminated"),
+        "basis": "terminated",
         "period": {
             "kind": "mtd", "start_date": "2026-09-01", "as_of_date": "2026-09-02",
             "start_at_ms": 1788192000000, "end_exclusive_at_ms": 1788364800000,
@@ -37,7 +28,7 @@ def _report(*, include_rows: bool = False) -> dict[str, Any]:
             "included_count": 1, "total_count": 1, "omitted_count": 0,
         },
         "freshness": {"status": "historical", "as_of": "2026-09-02T23:59:59.999+08:00"},
-        "option_net_cashflow": {
+        "terminated_option_net_income": {
             "by_currency": {},
             "cny_total": {"currency": "CNY", "amount": 0, "status": "observed", "missing": []},
         },
@@ -62,6 +53,19 @@ def _report(*, include_rows: bool = False) -> dict[str, Any]:
     }
     if include_rows:
         value["rows"] = [{"fact_id": "fact-1", "status": "observed", "missing": []}]
+    return value
+
+
+def _legacy_report():
+    value = _report()
+    value.pop("basis")
+    value["schema_version"] = "option_performance.report.v3"
+    value["option_net_cashflow"] = value.pop("terminated_option_net_income")
+    value["period_option_net_cashflow"] = {
+        "schema_version": "period_option_net_cashflow.v1", "by_currency": {},
+        "cny_total": {"currency": "CNY", "amount": 0, "status": "observed", "missing": []},
+        "status": "observed", "missing": [],
+    }
     return value
 
 
@@ -121,8 +125,8 @@ def test_option_performance_report_is_the_canonical_payload_without_legacy_prese
     assert data["daily_occupied_capital"] == _report()["daily_occupied_capital"]
     assert warnings == []
     assert set(data) == {
-        "schema_version", "metric_semantics", "period_option_net_cashflow",
-        "period", "scope", "coverage", "freshness", "option_net_cashflow",
+        "schema_version", "metric_semantics", "basis",
+        "period", "scope", "coverage", "freshness", "terminated_option_net_income",
         "sell_option_win_rate", "buy_option_win_rate", "option_return",
         "daily_occupied_capital", "breakdowns", "quality", "rows",
     }
@@ -272,12 +276,12 @@ def test_option_performance_tool_schema_exposes_only_the_frozen_inputs() -> None
     assert set(tool.input_schema) == {
         "config_key", "config_path", "data_config", "account", "broker", "period",
         "as_of_date", "month", "year",
-        "include_rows", "view", "group_by", "symbol", "limit", "cursor",
+        "include_rows", "basis", "basis", "view", "group_by", "symbol", "limit", "cursor",
     }
     assert tool.input_schema["period"]["enum"] == ["mtd", "ytd", "month", "year"]
     assert set(tool.bot_input_fields) == {
         "config_key", "account", "broker", "period", "as_of_date", "month", "year",
-        "view", "group_by", "symbol", "limit", "cursor",
+        "basis", "view", "group_by", "symbol", "limit", "cursor",
     }
 
     payload, error = bot_tools.build_tool_payload(
