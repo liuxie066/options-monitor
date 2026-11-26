@@ -415,17 +415,22 @@ unit 名称，单实例可使用 `options-monitor-opend.service`，多实例按�
 
 输出会列出当前 active release、保留 release、待删除旧 release、缓存目录和预计释放空间。默认至少保留 2 个 release（当前版本 + 最近一个回滚版本）；真正删除必须加 `--confirm`。清理边界固定为旧 release 和显式允许的缓存，不会删除 `$RUNTIME`、SQLite、`output_shared` / `output_runs`、locks、runtime config、用户 overlay config、当前 active release 或回滚 release。可选项包括 `--include-apt-cache`、`--journal-vacuum-size 64M`、`--cleanup-downloads`、`--cleanup-pip-cache`。
 
-如果希望升级成功后自动清理旧 release：
+正常升级成功后默认自动清理旧 release，无需再传清理开关：
 
 ```bash
 ./om update apply \
   --repo-root /opt/options-monitor/current \
   --runtime-root "$RUNTIME" \
-  --confirm \
-  --cleanup-after-upgrade
+  --confirm
 ```
 
-后置清理只在升级成功、symlink 已切到目标 release、runtime config rebuild/validate 成功、active release 可确认且至少保留 2 个 release 时执行。确认升级时 `--repo-root` 必须是 current symlink 字面路径；如果传成真实 release 目录，会 fail fast，不会先 clone 到错误的 `releases/releases` 结构。
+后置清理只在升级成功、symlink 已切到目标 release、runtime config rebuild/validate 成功、active release 可确认且至少保留 2 个 release 时执行。默认保留当前版本及版本号最高的另一个 release，并额外保护本次升级前实际运行的 release。含历史状态或未知归属的目录沿用原保护规则，保留数可能超过 `--cleanup-keep-releases`（默认 2）。仅清理符合既有规则的旧 release 和 `_downloads`，不清理运行数据、日志或 pip 缓存；随后共享 venv 清理仍保护所有保留 release 的引用。
+
+预览列出后置清理操作但不会删除；确认升级并通过本次服务切换检查才执行。升级失败或回滚不会触发后置清理。清理失败不回滚已成功的升级，结果单独记录在 `upgrade_status.json.post_upgrade_cleanup`；正常清理回执包含删除路径和文件字节数，文件字节数不等同于磁盘实际空闲增量。`--cleanup-after-upgrade` 保留兼容，但已不再需要。Bot 将清理选项冻结到预览对应的待确认操作；缺少该字段的旧待确认操作维持原先不自动清理的约定。
+
+使用 `--no-restart-services` 时跳过 release 后置清理，保留可能仍被旧进程使用的目录；回执为 `status=skipped`、`reason=service_restart_required`。
+
+此默认行为由发起升级的控制器执行；安装本版本不会改变尚在运行的旧控制器，从新版本发起的后续升级才采用新默认。确认升级时 `--repo-root` 必须是 current symlink 字面路径；如果传成真实 release 目录，会 fail fast，不会先 clone 到错误的 `releases/releases` 结构。
 
 检查：
 

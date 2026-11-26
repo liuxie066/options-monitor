@@ -2143,6 +2143,45 @@ def test_inbound_upgrade_defaults_forward_activation_preservation(
 
     assert args["restart_services"] is False
     assert args["preserve_activation_state"] is True
+    assert args["cleanup_after_upgrade"] is True
+
+
+@pytest.mark.parametrize("explicit_target", [False, True])
+@pytest.mark.parametrize("cleanup_enabled", [False, True])
+def test_upgrade_cleanup_preview_is_frozen_for_worker(monkeypatch, tmp_path, explicit_target, cleanup_enabled):
+    from src.application.bot.control import upgrade_operations as upgrade
+
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    monkeypatch.setattr(upgrade, "service_upgrade_check", lambda **kwargs: _upgrade_check_payload(
+        kwargs, current_version="1.2.110", target_version="1.2.111",
+    ))
+    calls = []
+    monkeypatch.setattr(upgrade, "service_upgrade", lambda **kwargs: calls.append(kwargs) or {"ok": True})
+    arguments = {"target_version": "1.2.111"} if explicit_target else {}
+    if not cleanup_enabled:
+        arguments["cleanup_after_upgrade"] = False
+    payload = upgrade._build_operation_payload("upgrade_now", arguments)
+    preview = upgrade._preview_operation(payload)
+    assert preview["upgrade"]["cleanup_after_upgrade"] is cleanup_enabled
+    assert any("cleanup old releases" in op for op in preview["upgrade"]["planned_operations"]) is cleanup_enabled
+    upgrade._freeze_preview_target(payload, preview)
+    assert payload["arguments"]["cleanup_after_upgrade"] is cleanup_enabled
+    assert payload["arguments"]["cleanup_keep_releases"] == 2
+    upgrade._apply_operation(payload)
+    assert calls[0]["cleanup_after_upgrade"] is cleanup_enabled
+    assert calls[0]["cleanup_keep_releases"] == 2
+    assert calls[0]["target_version"] == "1.2.111"
+
+
+def test_upgrade_legacy_pending_operation_does_not_gain_cleanup(monkeypatch):
+    from src.application.bot.control import upgrade_operations as upgrade
+
+    calls = []
+    monkeypatch.setattr(upgrade, "service_upgrade", lambda **kwargs: calls.append(kwargs) or {"ok": True})
+    payload = {"operation_type": "upgrade_now", "arguments": {"target_version": "1.2.111"}}
+    upgrade._apply_operation(payload)
+    assert calls[0]["cleanup_after_upgrade"] is False
+    assert "cleanup_after_upgrade" not in payload["arguments"]
 
 
 def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -2190,7 +2229,11 @@ def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tm
     assert preview["tool_name"] == "inbound.upgrade"
     assert preview["data"]["response_text"].startswith("升级预览：立即升级")
     assert "未执行升级" in preview["data"]["response_text"]
-    assert preview["data"]["payload"]["arguments"] == {"target_version": "1.2.111", "release_tag": "v1.2.111"}
+    assert "cleanup old releases after successful upgrade" in preview["data"]["response_text"]
+    assert preview["data"]["payload"]["arguments"] == {
+        "target_version": "1.2.111", "release_tag": "v1.2.111",
+        "cleanup_after_upgrade": True, "cleanup_keep_releases": 2,
+    }
     assert preview["data"]["control"]["tool_name"] == "inbound.upgrade"
     assert preview["data"]["control"]["safety_class"] == "admin_preview"
     assert preview["data"]["control"]["requires_confirmation"] is True
@@ -2271,7 +2314,10 @@ def test_inbound_upgrade_cancel_persists_readback_trace(monkeypatch: pytest.Monk
 
     assert preview["ok"] is True
     assert preview["data"]["status"] == "previewed"
-    assert preview["data"]["payload"]["arguments"] == {"target_version": "1.2.111", "release_tag": "v1.2.111"}
+    assert preview["data"]["payload"]["arguments"] == {
+        "target_version": "1.2.111", "release_tag": "v1.2.111",
+        "cleanup_after_upgrade": True, "cleanup_keep_releases": 2,
+    }
     operation_id = preview["data"]["operation_id"]
 
     cancelled = handle_bot_response(

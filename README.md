@@ -451,6 +451,8 @@ om bot run --text "评价一下我的持仓"
 | 了解已发布版本的升级条件与回滚边界 | [发布与升级流程（仓库文档）](https://github.com/liuxie066/options-monitor/blob/main/docs/RELEASE_PROCESS.md) |
 | 查找其他主题 | [完整文档索引](docs/INDEX.md) |
 
+正常升级成功后默认维护旧版本，保护当前版、实际前序和历史状态目录；跳过服务重启时不清理。执行条件和回执见[升级维护说明](docs/DEPLOY_LINUX_MAC.md)。
+
 旧配置升级前，先阅读[开关迁移说明](CONFIGURATION_GUIDE.md#配置开关迁移)，预览迁移并核对通知意图，不要直接套用新配置覆盖旧数据。运行包及 macOS 服务升级的源码能力不等于目标平台已经验收；发布资格和实际环境验证见[发布与升级流程（仓库文档）](https://github.com/liuxie066/options-monitor/blob/main/docs/RELEASE_PROCESS.md)。
 
 ## 风险提示

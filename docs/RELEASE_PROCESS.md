@@ -746,7 +746,7 @@ receipt 和实际导入校验，`preserve_managed_plugin` 不使用源码插件�
 
 依赖哈希使用 v2 格式标记，因此历史缓存首次重建一次，防止复用仍混有旧插件代码的 venv；旧 16 位哈希
 目录进入正常保留策略。成功升级收尾自动清理未保留的共享 venv，默认当前加最近两个其它缓存，并保护仍被
-保留 release 引用的缓存；这与下面 opt-in 的 release 清理独立。配置及审计字段见 [配置契约](../CONFIGS.md#升级共享-venv-保留数)。
+保留 release 引用的缓存；该策略在下面的 release 清理之后执行。配置及审计字段见 [配置契约](../CONFIGS.md#升级共享-venv-保留数)。
 首次进入包含本改动的 release，旧控制器仍执行旧逻辑；通常从该 release 发起的下一次升级开始复用新缓存，
 如需首次迁移也使用新逻辑，须按上文的新控制器方式驱动。
 
@@ -775,17 +775,18 @@ release 清理默认 dry-run，不删除文件：
 
 清理只处理旧 release 和显式允许的缓存，不会触碰 `/var/lib/options-monitor`、SQLite、`output*`、locks、runtime config、用户 overlay config、当前 active release 或最近一个 rollback release。未知历史目录及备份默认保留，含 `output_shared` 历史状态的 Python 发布目录也会保留；清理不再解析或验证旧 Pi 迁移回执，也不据此自动转换或删除历史数据。需要额外清理系统缓存时可加 `--include-apt-cache` 或 `--journal-vacuum-size 64M`。
 
-确认升级成功后也可以追加后置清理：
+正常升级成功后默认执行后置清理，CLI、定时升级和 Bot 升级采用同一默认策略：
 
 ```bash
 ./om update apply \
   --repo-root /opt/options-monitor/current \
   --runtime-root /var/lib/options-monitor \
-  --confirm \
-  --cleanup-after-upgrade
+  --confirm
 ```
 
-后置清理只在升级成功、symlink 已切到目标 release、runtime config rebuild/validate 成功、active release 可确认且至少保留 2 个 release 时执行。`--repo-root` 不是 symlink 字面路径时，确认升级会 fail fast，不会提前 clone 到错误的 release 布局。
+后置清理只在升级成功、symlink 已切到目标 release、runtime config rebuild/validate 成功、active release 可确认且至少保留 2 个 release 时执行。默认保留当前版本及版本号最高的另一个 release，并额外保护本次升级前实际运行的 release；历史状态和未知归属目录沿用原保护规则，保留数可能超过 `--cleanup-keep-releases`（默认 2）。仅清理旧 release 和 `_downloads`，不清理运行数据、日志或 pip 缓存。升级失败或回滚不会触发清理；清理失败不回滚成功升级，单独记录到 `upgrade_status.json.post_upgrade_cleanup`。正常清理回执包含删除路径和文件字节数，后者不等同于磁盘实际空闲增量。
+
+预览包含清理操作但不删除，`--cleanup-after-upgrade` 仅保留兼容；Bot 将清理选项冻结到待确认操作，缺少字段的旧待确认操作仍不自动清理。使用 `--no-restart-services` 时不自动清理 release，保留旧进程可能使用的目录，回执为 `status=skipped`、`reason=service_restart_required`。默认行为由发起升级的控制器执行，从新版本发起的后续升级才采用新默认。`--repo-root` 不是 symlink 字面路径时，确认升级会 fail fast，不会提前 clone 到错误的 release 布局。
 
 回滚同样默认 dry-run：
 

@@ -630,6 +630,7 @@ def _service_cleanup_under_transition_lock(
     releases_root: str | Path | None = None,
     runtime_root: str | Path | None = None,
     keep_releases: int = 2,
+    protected_releases: tuple[Path, ...] = (),
     include_apt_cache: bool = False,
     journal_vacuum_size: str | None = None,
     cleanup_downloads: bool = False,
@@ -692,6 +693,9 @@ def _service_cleanup_under_transition_lock(
             break
         kept.append(release.resolve())
     kept.extend(path for path in retained_legacy if path not in kept)
+    # Upgrade knows the actual predecessor; version ordering alone can miss it.
+    protected = {path.resolve() for path in protected_releases}
+    kept.extend(path.resolve() for path in releases_list if path.resolve() in protected and path.resolve() not in kept)
     kept_set = {path.resolve() for path in kept}
     delete_releases = [path for path in releases_list if path.resolve() not in kept_set]
 

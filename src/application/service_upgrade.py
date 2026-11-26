@@ -3743,7 +3743,7 @@ def service_upgrade(
     allow_major: bool = False,
     restart_services: bool = True,
     preserve_activation_state: bool = False,
-    cleanup_after_upgrade: bool = False,
+    cleanup_after_upgrade: bool = True,
     cleanup_keep_releases: int = 2,
     plugin_asset_dir: str | Path | None = None,
     run_cmd: Callable[..., Any] = subprocess.run,
@@ -3911,7 +3911,7 @@ def service_upgrade(
             "restart long-running services" if restart_services else "skip service restart",
             "after success, retain current shared venv plus runtime.upgrade_keep_venvs recent others (default 2), protecting retained release references",
         ]
-        if cleanup_after_upgrade:
+        if cleanup_after_upgrade and restart_services:
             planned.append(f"cleanup old releases after successful upgrade, keep {status_base['cleanup_keep_releases']} releases")
         if not confirm:
             try:
@@ -4286,7 +4286,14 @@ def service_upgrade(
 
         cleanup_result: dict[str, Any] | None = None
         if cleanup_after_upgrade:
-            if not symlink_switched or runtime_config_prepare.get("status") != "prepared":
+            if not restart_services:
+                cleanup_result = {
+                    "ok": True,
+                    "status": "skipped",
+                    "changed": False,
+                    "reason": "service_restart_required",
+                }
+            elif not symlink_switched or runtime_config_prepare.get("status") != "prepared":
                 cleanup_result = {
                     "ok": True,
                     "status": "skipped",
@@ -4299,45 +4306,55 @@ def service_upgrade(
                 # The outer transition guard covers both cleanup calls and terminal publication.
                 from src.application.service_cleanup import _service_cleanup_under_transition_lock
 
-                cleanup_plan = _service_cleanup_under_transition_lock(
-                    repo_root=repo_link,
-                    releases_root=releases,
-                    runtime_root=runtime,
-                    keep_releases=max(2, int(cleanup_keep_releases or 2)),
-                    cleanup_downloads=True,
-                    cleanup_pip_cache=False,
-                    include_apt_cache=False,
-                    journal_vacuum_size=None,
-                    confirm=False,
-                    run_cmd=run_cmd,
-                )
-                if not cleanup_plan.get("ok"):
-                    cleanup_result = {
-                        **cleanup_plan,
-                        "status": "skipped",
-                        "changed": False,
-                        "reason": "cleanup-after-upgrade could not confirm active release",
-                    }
-                elif len(cleanup_plan.get("kept_releases", [])) < max(2, int(cleanup_keep_releases or 2)):
-                    cleanup_result = {
-                        **cleanup_plan,
-                        "status": "skipped",
-                        "changed": False,
-                        "reason": "cleanup-after-upgrade requires at least keep_releases retained releases",
-                    }
-                else:
-                    cleanup_result = _service_cleanup_under_transition_lock(
+                try:
+                    cleanup_plan = _service_cleanup_under_transition_lock(
                         repo_root=repo_link,
                         releases_root=releases,
                         runtime_root=runtime,
                         keep_releases=max(2, int(cleanup_keep_releases or 2)),
+                        protected_releases=(previous_dir,),
                         cleanup_downloads=True,
                         cleanup_pip_cache=False,
                         include_apt_cache=False,
                         journal_vacuum_size=None,
-                        confirm=True,
+                        confirm=False,
                         run_cmd=run_cmd,
                     )
+                    if not cleanup_plan.get("ok"):
+                        cleanup_result = {
+                            **cleanup_plan,
+                            "status": "skipped",
+                            "changed": False,
+                            "reason": "cleanup-after-upgrade could not confirm active release",
+                        }
+                    elif len(cleanup_plan.get("kept_releases", [])) < max(2, int(cleanup_keep_releases or 2)):
+                        cleanup_result = {
+                            **cleanup_plan,
+                            "status": "skipped",
+                            "changed": False,
+                            "reason": "cleanup-after-upgrade requires at least keep_releases retained releases",
+                        }
+                    else:
+                        cleanup_result = _service_cleanup_under_transition_lock(
+                            repo_root=repo_link,
+                            releases_root=releases,
+                            runtime_root=runtime,
+                            keep_releases=max(2, int(cleanup_keep_releases or 2)),
+                            protected_releases=(previous_dir,),
+                            cleanup_downloads=True,
+                            cleanup_pip_cache=False,
+                            include_apt_cache=False,
+                            journal_vacuum_size=None,
+                            confirm=True,
+                            run_cmd=run_cmd,
+                        )
+                except Exception as exc:
+                    # Maintenance must not hide a completed upgrade or trigger compensation.
+                    cleanup_result = {
+                        "ok": False,
+                        "status": "cleanup_failed",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
 
         venv_cleanup_result = _cleanup_upgrade_venvs(
             cache_root=cache, releases_root=releases, target_dir=target_dir, runtime_root=runtime,
