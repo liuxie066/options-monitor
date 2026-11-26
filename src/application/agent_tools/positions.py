@@ -1067,7 +1067,7 @@ OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
         "Never substitute either cash metric for income. Cohort open returns assume expiry; daily principal "
         "includes carry-in and is not the return denominator. CNY uses persisted event FX, never live quotes/FX. "
         "actual_fee_missing/fee_estimated mean unconfirmed actual fees, not sync status; never estimate net amounts. "
-        "Only independent current evidence proves pending sync; preserve failures/overdue evidence. Hash changes "
+        "Only independent current evidence proves pending sync; preserve failed or overdue evidence. A hash change "
         "prove neither rebuild loss/actor nor a need to rebuild/backfill. freshness.as_of is statistical cutoff, "
         "not sync time. Explain gaps only for affected metrics/currencies."
 
