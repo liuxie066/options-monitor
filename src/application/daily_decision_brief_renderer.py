@@ -811,8 +811,12 @@ def _render_user_view(
         )
         if projection == "fixed_report" and view.get("wheel_batches"):
             lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} Wheel"])
+            section = None
             for item in view["wheel_batches"]:
-                lines.extend([_VISIBLE_BLANK_LINE, f"**{_flat_title(item['title'])}**"])
+                if item["coverage_section"] != section:
+                    section = item["coverage_section"]
+                    lines.extend([_VISIBLE_BLANK_LINE, f"**{section}**"])
+                lines.extend([_VISIBLE_BLANK_LINE, _flat_title(item["title"]) if item.get("compact_line") else f"**{_flat_title(item['title'])}**"])
                 lines.extend(_flat_field_line(detail) for detail in item.get("details") or [])
         return _bounded_markdown(lines)
 
@@ -897,8 +901,12 @@ def _render_user_view(
     ]
     if wheel_batches:
         lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} Wheel"])
+        section = None
         for item in wheel_batches:
-            lines.extend([_VISIBLE_BLANK_LINE, f"**{_flat_title(item['title'])}**"])
+            if item["coverage_section"] != section:
+                section = item["coverage_section"]
+                lines.extend([_VISIBLE_BLANK_LINE, f"**{section}**"])
+            lines.extend([_VISIBLE_BLANK_LINE, _flat_title(item["title"]) if item.get("compact_line") else f"**{_flat_title(item['title'])}**"])
             for detail in item.get("details") or []:
                 lines.append(_flat_field_line(detail))
         lines.extend(f"展示范围｜{note}" for note in wheel_omissions)
@@ -1021,8 +1029,12 @@ def _render_user_view_blocks(
         if not rows:
             return []
         result = [_Block(heading("Wheel"))]
+        section = None
         for index, item in enumerate(rows):
-            text = "\n".join([emphasis(_flat_title(item['title'])), *[
+            if item["coverage_section"] != section:
+                section = item["coverage_section"]
+                result.append(_Block(emphasis(section)))
+            text = "\n".join([_flat_title(item["title"]) if item.get("compact_line") else emphasis(_flat_title(item["title"])), *[
                 _flat_field_line(detail) for detail in item.get("details") or []
             ]])
             gap = has_gap(text)
@@ -1792,14 +1804,40 @@ def _wheel_recommendation_group_key(row: Mapping[str, Any]) -> tuple[Any, ...] |
 
 
 def _group_wheel_batches(
-    rows: list[dict[str, Any]], *, recommendations: bool = False,
+    rows: list[dict[str, Any]], *, recommendations: bool = False, summaries: bool = False,
 ) -> list[dict[str, Any]]:
     key_for = _wheel_recommendation_group_key if recommendations else _wheel_assignment_group_key
     keys = [key_for(row) for row in rows]
+    if summaries:
+        # Summarize known, unreserved Call shares with no candidate.
+        keys = []
+        for row in rows:
+            coverage = row.get("coverage") or {}
+            identity = tuple(str(row.get(field) or "").strip()
+                             for field in ("account", "symbol", "broker", "currency"))
+            covered_contracts = row.get("active_option_contracts") or []
+            contract_keys = {
+                (str(contract.get("underlying_symbol") or ""), str(contract.get("option_type") or ""),
+                 str(contract.get("expiration_ymd") or ""), str(contract.get("strike") or ""))
+                for contract in covered_contracts if isinstance(contract, Mapping)
+            }
+            fully_covered = (coverage.get("status") == "full"
+                             and coverage.get("committed_shares") == coverage.get("target_shares")
+                             and len(contract_keys) == 1 and all(next(iter(contract_keys)))
+                             and len(covered_contracts) == sum(isinstance(item, Mapping) for item in covered_contracts))
+            safe = (all(identity) and row.get("wheel_branch_id")
+                    and _lower(row.get("direction")) == "call"
+                    and ((coverage.get("status") == "none" and coverage.get("committed_shares") == 0)
+                         or fully_covered)
+                    and coverage.get("reserved_shares") == 0)
+            keys.append((*identity, _lower(row.get("status")), row.get("reason_code"),
+                         tuple(sorted(str(reason) for reason in row.get("reason_codes") or [])),
+                         row.get("candidate_evidence_reason"), _wheel_diagnostic_signature(row),
+                         tuple(sorted(contract_keys))) if safe else None)
     unsafe_symbols = {
         _upper(row.get("symbol"))
         for row, key in zip(rows, keys)
-        if not recommendations and _lower(row.get("direction") or "call") == "call" and key is None
+        if not recommendations and not summaries and _lower(row.get("direction") or "call") == "call" and key is None
     }
     cohorts: dict[tuple[Any, ...], list[int]] = {}
     for index, key in enumerate(keys):
@@ -1833,7 +1871,8 @@ def _group_wheel_batches(
             )
             for row in members
         }
-        branch_ids = [str(row["wheel_branch_id"]) for row in members]
+        branch_ids = [str(branch) for row in members
+                      for branch in (row.get("display_branch_ids") or [row["wheel_branch_id"]])]
         quantities: list[tuple[int, int, int, int, int]] = []
         for row in members:
             coverage = row.get("coverage") or {}
@@ -1882,7 +1921,7 @@ def _group_wheel_batches(
             grouped["granted_contracts"] = grouped["recommended_contracts"]
             for field in ("candidate_call_net_premium", "projected_lifecycle_net_pnl_if_called"):
                 grouped[field] = sum((_decimal(row[field]) for row in members), Decimal(0))
-        else:
+        elif not summaries:
             grouped["display_assignment_price"] = key[4]
         grouped["display_branch_ids"] = branch_ids
         replacements[indices[0]] = grouped
@@ -1897,16 +1936,12 @@ def _wheel_batch_views(
     delivery_kind: str,
     selected_rows: list[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
-    rows = [dict(item) for item in selected_rows]
+    rows = _group_wheel_batches([dict(item) for item in selected_rows], summaries=True)
     # Keep first-seen symbol order and original branch order within each symbol.
     symbol_order = {symbol: index for index, symbol in enumerate(dict.fromkeys(
         _upper(row.get("symbol")) for row in rows
     ))}
     rows.sort(key=lambda row: symbol_order[_upper(row.get("symbol"))])
-    symbol_counts: dict[str, int] = {}
-    for row in rows:
-        symbol = _upper(row.get("symbol"))
-        symbol_counts[symbol] = symbol_counts.get(symbol, 0) + 1
     market = _upper(brief.get("market"))
     out: list[dict[str, Any]] = []
     for row in rows:
@@ -1915,12 +1950,6 @@ def _wheel_batch_views(
             row.get("wheel_branch_id") or row.get("position_lot_id") or ""
         ).strip()
         grouped_count = row.get("display_batch_count")
-        suffix = (
-            f" · {grouped_count} 批合计" if row.get("display_recommendation_group") else
-            f" · {row['display_assignment_price']:g}P · {grouped_count} 批"
-            if grouped_count else
-            f" · 分支 {branch_id[-8:]}" if symbol_counts.get(symbol, 0) > 1 else ""
-        )
         direction = _lower(row.get("direction") or "call")
         shares = max(0, int(row.get("shares_remaining") or 0))
         contracts = max(0, int(row.get("recommended_contracts") or 0))
@@ -1951,7 +1980,7 @@ def _wheel_batch_views(
             and type(row.get("shares_remaining")) is int
             and all(type(coverage.get(key)) is int and coverage[key] >= 0
                     for key in ("target_shares", "committed_shares", "reserved_shares", "available_shares"))
-            and target == shares
+            and target == shares and target > 0
             and committed + coverage["reserved_shares"] <= target
             and coverage["available_shares"] == target - committed - coverage["reserved_shares"]
         )
@@ -2045,8 +2074,7 @@ def _wheel_batch_views(
                 details.append(f"观察候选：{contract}；待交收确认，额度确认前不可执行")
             if row.get("reason_code"):
                 reasons.append(row["reason_code"])
-            if grouped_count:
-                reasons.extend(coverage.get("reason_codes") or [])
+            reasons.extend(coverage.get("reason_codes") or [])
             reasons = reasons or [row.get("status")]
             if compact_coverage and coverage["available_shares"] == 0:
                 reasons = [reason for reason in reasons
@@ -2057,9 +2085,42 @@ def _wheel_batch_views(
                 )))
         details.extend(_wheel_candidate_diagnostic_details(row))
         details.extend(_candidate_required_data_details(row))
+        section = "待安排" if direction == "put" else "覆盖待核实"
+        title = f"{symbol} · Wheel {direction.title()}"
+        compact_line = False
+        if direction == "call" and compact_coverage:
+            section = "未覆盖" if committed < target else "已覆盖"
+            title = f"{symbol} · {'未覆盖' if committed < target else '已覆盖'} {target - committed if committed < target else committed:,} 股"
+            # Existing coverage is a fact; reservations are still uncovered shares.
+            details = [detail for detail in details if not detail.startswith("CC 覆盖：")]
+            if 0 < committed < target:
+                details.insert(0, f"已覆盖：{committed:,} 股")
+            if committed == target:
+                ordinary = {"wheel_capacity_fully_committed_or_reserved", "ready", "option_open", "wheel_call_open"}
+                reasons = [*(row.get("reason_codes") or []), row.get("reason_code")]
+                safe = (row.get("recommended_contracts") == 0 and not row.get("observation_candidate")
+                        and _lower(row.get("status")) in {"ready", "option_open", "call_open", "wheel_call_open"}
+                        and not coverage.get("reason_codes")
+                        and all(not reason or reason in ordinary for reason in reasons)
+                        and not _wheel_candidate_diagnostic_details(row)
+                        and not _candidate_required_data_details(row))
+                if safe and len(set(contracts_text)) == 1 and "合约信息" not in contracts_text[0]:
+                    title = f"{symbol} · {committed:,} 股 · {contracts_text[0]}"
+                    details = []
+                    compact_line = True
+                elif len(set(contracts_text)) > 1:
+                    details = [detail for detail in details if not detail.startswith("覆盖期权：")]
+                    details.insert(0, "各合约覆盖股数待核实")
+                    details[1:1] = [f"覆盖期权：{contract}" for contract in dict.fromkeys(contracts_text)]
+        elif direction == "call":
+            title = f"{symbol} · 覆盖待核实"
+        # The section carries the state, so omit the repeated status label.
+        details = [detail.removeprefix("状态：") for detail in details]
         out.append(
             {
-                "title": f"{symbol} · Wheel {direction.title()}{suffix}",
+                "title": title,
+                "coverage_section": section,
+                "compact_line": compact_line,
                 "symbol": symbol,
                 "selection_tier": row.get("selection_tier", "C"),
                 "selection_rank": row.get("selection_rank", len(out)),
@@ -2067,6 +2128,8 @@ def _wheel_batch_views(
                 "details": details,
             }
         )
+    order = {"未覆盖": 0, "待安排": 1, "覆盖待核实": 2, "已覆盖": 3}
+    out.sort(key=lambda item: order[item["coverage_section"]])
     return out
 
 
