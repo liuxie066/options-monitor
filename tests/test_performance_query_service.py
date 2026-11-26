@@ -51,6 +51,8 @@ def service(tmp_path, monkeypatch):
         writer.upsert_trade_event(
             replace(event, lot_id=f"lot-{n}", contract_key=replace(event.contract_key, underlying_symbol=f"TEST{n}"))
         )
+        close = _event(f"close-{n}", "close", "2026-09-02T10:00:00", target_lot_id=f"lot-{n}")
+        writer.upsert_trade_event(replace(close, contract_key=replace(close.contract_key, underlying_symbol=f"TEST{n}")))
     cfg = {"accounts": ["lx", "sy"], "portfolio": {}}
     monkeypatch.setattr(query_http, "load_runtime_config", lambda **kw: (tmp_path / "config.us.json", cfg))
     monkeypatch.setattr(
@@ -103,8 +105,8 @@ def test_real_client_cli_tool_and_bot_use_the_canonical_result(service, monkeypa
         mask_path=lambda p: "<bound-runtime>",
     )
     assert data == expected and warnings == []
-    assert data["schema_version"] == "option_performance.report.v3"
-    assert data["period_option_net_cashflow"]["by_currency"]["USD"]["total"]["amount"] == 600
+    assert data["schema_version"] == "option_performance.report.v4"
+    assert data["terminated_option_net_income"]["by_currency"]["USD"]["amount"] == 300
     status, envelope = _request(url, QUERY)
     assert status == 200
     assert envelope["schema_version"] == "option_performance.api.v1"
@@ -129,7 +131,7 @@ def test_real_client_cli_tool_and_bot_use_the_canonical_result(service, monkeypa
         data_config=None,
         account=None,
         broker=None,
-        period="month",
+        period="month", basis="terminated",
         month="2026-09",
         year=None,
         as_of_date=None,
@@ -143,8 +145,8 @@ def test_real_client_cli_tool_and_bot_use_the_canonical_result(service, monkeypa
     response = bot_tools.call_read_tool(
         "option_performance_report", payload, allowed_tools=("option_performance_report",), now_ms=1
     )
-    assert response["ok"] and response["data"]["option_net_cashflow"] == expected["option_net_cashflow"]
-    for key in ("schema_version", "metric_semantics", "period_option_net_cashflow"):
+    assert response["ok"] and response["data"]["terminated_option_net_income"] == expected["terminated_option_net_income"]
+    for key in ("schema_version", "metric_semantics", "basis"):
         assert response["data"][key] == expected[key]
     rejected, error = bot_tools.build_tool_payload("option_performance_report", {"config_path": "/bad"})
     assert rejected is None and "unsupported" in error
@@ -427,7 +429,7 @@ def test_public_tool_rejects_malformed_service_pages(service, monkeypatch, view,
 @pytest.mark.parametrize("view,field", [
     ("summary", "view"), ("rows", "view"), ("breakdowns", "view"),
     ("rows", "rows"), ("rows", "pagination"), ("rows", "source"), ("rows", "next_cursor"),
-    ("summary", "period_option_net_cashflow"), ("summary", "option_net_cashflow"),
+    ("summary", "basis"), ("summary", "terminated_option_net_income"),
     ("summary", "sell_option_win_rate"), ("summary", "buy_option_win_rate"),
     ("summary", "option_return"), ("summary", "daily_occupied_capital"),
     ("summary", "breakdowns"), ("breakdowns", "group_by"),
@@ -762,8 +764,12 @@ def test_service_business_page_accepts_valid_empty_pages(monkeypatch, view, vari
         wire_data["additive_future_field"] = {"accepted": True}
         wire_data["quality"]["additive_future_field"] = ["accepted"]
     elif variant == "older-body":
-        for name in ("schema_version", "metric_semantics", "period_option_net_cashflow"):
+        for name in ("schema_version", "metric_semantics", "basis"):
             wire_data.pop(name, None)
+    if variant == "older-body":
+        result, evidence = _service_business_page_execute(monkeypatch, wire_data)
+        assert not result["ok"] and result["error"]["code"] == "SERVICE_ERROR", evidence
+        return
     expected = deepcopy(wire_data)
     if view in {"rows", "breakdowns"}:
         expected["pagination"].pop("page_cursor")
@@ -773,7 +779,7 @@ def test_service_business_page_accepts_valid_empty_pages(monkeypatch, view, vari
     assert result["warnings"] == [] and result["meta"] == {}, evidence
     if view in {None, "summary"}:
         if variant != "older-body":
-            assert result["data"]["period_option_net_cashflow"]["fact_count"] == 0, evidence
+            assert result["data"]["terminated_option_net_income"]["cny_total"]["amount"] == 0, evidence
         assert all(rows == [] for rows in result["data"]["breakdowns"].values()), evidence
     else:
         assert result["data"]["rows"] == [], evidence
@@ -789,7 +795,7 @@ def test_service_business_page_accepts_valid_empty_pages(monkeypatch, view, vari
         pytest.param("summary", ("coverage",), None, id="null-coverage"),
         pytest.param("summary", ("freshness",), ..., id="missing-freshness"),
         pytest.param("summary", ("quality",), [], id="invalid-quality"),
-        pytest.param("summary", ("option_net_cashflow",), ..., id="missing-cashflow"),
+        pytest.param("summary", ("terminated_option_net_income",), ..., id="missing-income"),
         pytest.param("summary", ("sell_option_win_rate",), [], id="invalid-sell-win-rate"),
         pytest.param("summary", ("buy_option_win_rate",), None, id="null-buy-win-rate"),
         pytest.param("summary", ("option_return",), ..., id="missing-return"),
@@ -915,3 +921,26 @@ def test_service_business_page_regression_success_envelope_requires_business_pag
     assert error.get("code") == "SERVICE_ERROR", evidence
     assert "service_protocol_invalid" in error.get("details", {}).get("reason_codes", []), evidence
     assert result["data"] == {}, evidence
+
+
+@pytest.mark.parametrize("basis,metric", [("terminated", "terminated_option_net_income"),
+                                           ("cashflow", "period_option_net_cashflow"),
+                                           ("opening_cohort", "option_net_cashflow")])
+def test_income_basis_survives_control_service_tool_and_model(service, monkeypatch, basis, metric):
+    from src.application.bot.control.inbound_control import execute_explicit_control
+    from src.application.bot.control.contracts import BotInboundRequest, ControlCommand
+
+    monkeypatch.setenv("OM_PERFORMANCE_SERVICE_URL", service[0])
+    monkeypatch.setenv("OM_PERFORMANCE_SERVICE_TOKEN", TOKEN)
+    payload = {**QUERY, "basis": basis}
+    command = ControlCommand("option_performance_report", {"period": "month", "month": "2026-09", "basis": basis})
+    result = execute_explicit_control(command, request=BotInboundRequest(text="/income", sender_id="test", config_key="us"),
+                                      command_id="income-basis-test", operation_store=None)
+    assert result.ok and result.payload == payload
+    response = bot_tools.call_read_tool("option_performance_report", {**payload, "view": "summary"},
+                                       allowed_tools=("option_performance_report",))
+    observation = bot_tools.model_observation("option_performance_report", response)
+    assert observation["ok"]
+    assert observation["data"]["basis"] == basis and metric in observation["data"]
+    assert not (({"terminated_option_net_income", "period_option_net_cashflow", "option_net_cashflow"} - {metric})
+                & observation["data"].keys())

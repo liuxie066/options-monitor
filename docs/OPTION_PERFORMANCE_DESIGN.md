@@ -3,28 +3,28 @@
 Status: current contract.
 
 A broker-confirmed zero-price option close ends capital time at the execution timestamp even while
-its cause is pending. Complete cash and fee evidence can support return; win rate waits for the
-resolved cause. Previously accepted closes without a terminal ledger event require separate repair.
+its cause is pending. In opening-cohort analysis, complete cash and fee evidence can support return;
+win rate waits for the resolved cause. Default terminated income also waits for that cause. Previously accepted closes without a terminal ledger event require separate repair.
 
 This document is the canonical owner of the option-performance contract. Current source and tests
-remain the runtime authority. One report carries separate event-time period cash and preserved
-opening-cohort metrics; there is no parallel reducer, dual read/write, or automatic historical backfill.
+remain the runtime authority. The default report is terminal-period option net income. Reconciliation
+cashflow and opening-cohort analysis are explicit bases of the same query and reducer; there is no
+dual read/write or automatic historical backfill.
 
 ## Goal
 
 Replace the mixed performance report with one option-only statistical module that:
 
-- calculates period cash, opening-cohort cash/wins/returns and actual daily occupied capital from one canonical ledger source;
+- calculates terminal-period net income, explicit reconciliation cashflow or opening-cohort analysis from one canonical ledger source;
 - applies one calculation path to Short Put, Short Call, Long Put, and Long Call legs;
 - treats strategy as attribution and grouping rather than a second calculation system;
 - supports MTD, YTD, natural-month, and natural-year periods and opening cohorts;
-- keeps public entry names, read-only behavior and original cohort fields while adding period cash;
-- removes PnL, stock, valuation, read-time FX, and legacy compatibility behavior from the report
-  path while reusing persisted event-time conversion evidence for each cash metric's CNY total.
+- keeps public entry names and read-only behavior; makes terminated income the default and retains explicit cohort analysis;
+- excludes stock, valuation and read-time FX while reusing persisted event-time conversion evidence.
 
 ## Non-goals
 
-- Realized, unrealized, gross, net, period-total, or combined PnL.
+- Mark-to-market, account-total or combined stock-and-option PnL.
 - Stock settlement principal, stock trades, stock fees, assigned-stock return, dividends, interest,
   margin movements, NAV, buying power, broker margin, or current holdings value.
 - Custom-range queries.
@@ -36,7 +36,7 @@ Replace the mixed performance report with one option-only statistical module tha
 - VERSION, release, deployment, service changes, production writes, or ledger repair.
 
 Assigned-stock reporting remains owned by its independent read model. Assignment is retained here
-only as a terminal option outcome needed by the Short-option win rate.
+as terminal option income and a Short-option win-rate outcome; stock principal and stock fees stay outside.
 
 ## Success Signals
 
@@ -46,18 +46,17 @@ The refactor is complete only when all of the following are true:
    application API and projects it once. Position lots, economic allocations, fees, lifecycle state,
    and strategy attribution are derived from that snapshot rather than joined from independent report
    sources.
-2. All metrics use one canonical projection. Period cash selects cash events; cohort metrics select
-   opening contract-share facts. A public adapter, renderer, bridge, or
+2. All metrics use one canonical projection. Default income selects terminal contract-share facts;
+   reconciliation selects cash events; explicit cohort analysis selects opening contract-share facts. A public adapter, renderer, bridge, or
    strategy view does not recalculate cash, capital-days, or win rates.
-3. For a complete currency, `option_net_cashflow.total.amount =
+3. In explicit opening-cohort analysis, for a complete currency, `option_net_cashflow.total.amount =
    option_net_cashflow.open.amount + option_net_cashflow.terminated.amount`. Each component carries
    its own status. An expired share with unresolved terminal state may leave `total` observed while
    making `open` and `terminated` partial rather than being forced into either side.
 4. Parent totals and every dimension conserve contract counts, cash, and capital-days before rates are
    calculated.
-5. The report contains no stock, PnL, valuation, quote, read-time FX, or legacy-period fields. Its
-   only cross-currency values are the two root cash metrics' CNY totals backed by persisted event-time
-   `cash_conversion.v1` evidence.
+5. The report contains no stock, valuation, quote or read-time FX fields. Its root income/cash CNY
+   total is backed by persisted event-time `cash_conversion.v1` evidence, never current FX.
 6. `./om option-performance report`, `option_performance_report`, and `/income` keep their names and
    produce the same canonical facts for equal inputs.
 7. Unsupported old parameters fail explicitly; none is silently ignored or translated.
@@ -77,8 +76,9 @@ The refactor is complete only when all of the following are true:
 The option-only report uses canonical projection, natural-period windows and fail-closed evidence.
 Current public contracts include:
 
-- Report bodies declare `option_performance.report.v3` and `metric_semantics`; period cash is
-  `period_option_net_cashflow.v1`. Original cohort cash, rates, win samples and row shapes are preserved.
+- Report bodies declare `option_performance.report.v4`, `basis` and `metric_semantics`. Default
+  `basis=terminated` uses terminal-time income; `basis=cashflow` is reconciliation;
+  `basis=opening_cohort` preserves opening-batch calculations. Only the selected income/cash metric is published.
 - The pure offline entry and live service share the domain reducer. Explicit supplemental/replacement
   fee inputs affect only period cash; original cohort metrics still use ledger-attached fees.
   Frozen archive provenance is content/time validated, not independently authenticated;
@@ -130,7 +130,7 @@ Ownership boundaries:
   proportional allocation with deterministic rounding.
 - Fee provenance, fee facts, and domain money precision are ledger-owned or lower-level primitives.
   `domain.domain.ledger` must not import `domain.domain.performance`.
-- `domain.domain.performance` owns period cash-event selection, cohort selection, contract-share state, native and persisted-FX CNY
+- `domain.domain.performance` owns terminal-event selection, period cash-event selection, cohort selection, contract-share state, native and persisted-FX CNY
   net cash flow, capital-days, win counts, dimensions, aggregation, and quality.
 - `src.application.performance` loads the frozen event stream, normalizes scope, and calls the domain
   owner. It does not load assigned-stock rows, evidence repositories, marks, rates, or quotes.
@@ -216,7 +216,8 @@ Public period kinds are exactly `mtd`, `ytd`, `month`, and `year`. Dates use `As
 whose openings predate the period. Trade-attached fees use trade time. Independently evidenced fees
 use their explicit effective time; later corrections of attached fees restate the original trade period.
 
-For `option_net_cashflow`, rows/breakdowns, wins and returns, selection is by each leg's opening date.
+For explicit `basis=opening_cohort`, `option_net_cashflow`, rows/breakdowns, wins and returns
+select by each leg's opening date.
 A leg is admitted when its opening date falls in
 the requested period window. For an admitted leg, all canonical lifecycle cash and state transitions
 before `end_exclusive_at_ms` participate. A close inside the period for a leg opened before the period
@@ -290,9 +291,41 @@ partial/null rather than continuing capital to `as_of_date` or inventing a settl
 
 ## Metric Contract
 
+### Default Terminal-Period Option Net Income
+
+The default public query is `period=mtd, basis=terminated`, displayed as **本月已终结期权净收益**.
+YTD and natural periods use the same rule over their selected windows. The root metric is
+`terminated_option_net_income`: `by_currency[currency] -> amount, status, missing`, with a root
+`cny_total -> currency, amount, status, missing`.
+
+Select disjoint option shares whose actual terminal event falls in the Shanghai half-open period,
+regardless of their opening date. Include buy-to-close, sell-to-close, authoritative expiry,
+assignment and exercise. A partial close admits only its ended shares. Exclude still-open shares
+and future terminal events. Net income is allocated opening option cash plus terminal option cash,
+minus allocated actual opening fees and actual terminal option fees. Stock settlement principal,
+stock fees and subsequent stock returns never enter this metric.
+
+Reuse ledger economic allocations and the existing fee, lifecycle, capital and strategy owners.
+Missing actual fees produce partial/null for the affected currency. Unresolved expiry or terminal
+cause remains a visible evidence gap, not inferred income or a complete zero. Physical settlement
+and expiry cannot carry nonzero option principal; the period-cash owner's validation also guards
+terminal income. Native income can remain observed when only CNY conversion is missing.
+
+CNY uses original event-time conversion evidence. Allocate opening gross CNY by contract shares;
+allocate opening fee CNY by the ledger's actual fee allocations. Cumulative rounding in canonical
+allocation order conserves the original conversion across partial closes and reporting periods.
+Never include the full opening-event amount for a partial close. Terminal cash uses its own event FX.
+
+Rows and every breakdown use the same terminal selection and expose `terminated_option_net_income`
+in place of the cohort cash key; there is no open/terminated cash split in this basis. Win-rate
+classification and principal formulas below remain unchanged, but their samples are the selected
+terminal shares. Return duration is opening to actual termination, with the existing one-day floor.
+Actual daily occupied principal remains independently based on period overlap including carry-in.
+
 ### Period Option Net Cash Flow
 
-The public Chinese name is **期间期权净现金流**. The root `period_option_net_cashflow` selects
+
+Explicit `basis=cashflow` is the reconciliation summary. Its public Chinese name is **期间期权净现金流**. The root `period_option_net_cashflow` selects
 cash facts in `[start_at_ms,end_exclusive_at_ms)` and has no open/terminated split:
 
 ```text
@@ -321,7 +354,7 @@ legacy cohort cash/returns. Full input, visibility and fee contracts live in the
 
 ### Opening-Cohort Option Cash Result
 
-The public Chinese name is **开仓批次期权现金结果**. Its compatibility key is `option_net_cashflow`;
+Explicit `basis=opening_cohort` retains **开仓批次期权现金结果**. Its compatibility key is `option_net_cashflow`;
 its numbers, components and original return numerator remain unchanged. It overlaps with period cash
 and must not be added to it. The following formulas apply to the admitted opening cohort only:
 
@@ -496,8 +529,7 @@ its actual calendar days, rather than a fixed 30-day denominator.
 
 Use the same native-currency principal basis listed below. This measures option principal, not
 broker margin. It is independent of `option_return.average_occupied_capital` and is **not the
-return denominator**. Original cashflow, returns, quality, and opening-cohort rows/breakdowns
-retain their contracts.
+return denominator**. Rows, breakdowns, returns and wins use the selected terminal or opening basis.
 
 Each currency reports `amount, status, missing`. Unavailable/conflicting terminal or principal
 evidence and affected economic diagnostics produce `amount=null, status=partial`; never infer an
@@ -505,7 +537,7 @@ expiry closure. Fee, cash FX, and strategy attribution gaps alone do not block p
 completeness is reported by its own status and missing reasons, independently of root quality.
 Known-currency zero occupancy is observed zero; an entirely empty scope has an empty currency map.
 Default/summary Tool Gateway and CLI reads preserve the metric; row/breakdown pages retain their
-existing cohort shape. Bot displays partial amounts as “-（证据不完整）”.
+selected terminal/cohort shape. Bot displays partial amounts as “-（证据不完整）”.
 
 Occupied-capital basis:
 
@@ -646,9 +678,10 @@ for eligibility/outcome flags; and `null` for unproved nullable values. Domain c
 Decimal and apply domain precision before the one public serializer converts them. Objects use sorted
 keys and lists use the deterministic ordering defined here.
 
-Every breakdown member uses the original cohort metric bundle below. The root also publishes
-`period_option_net_cashflow` and independent `daily_occupied_capital`; its
-bundle-level `status` and `missing` are serialized as `quality.status` and `quality.missing`:
+Every breakdown uses the selected terminal or opening-cohort bundle. The cohort shape below is
+retained for explicit cohort analysis; terminal income replaces its cash key and split as described
+above. Both income bases retain independent root `daily_occupied_capital`. Reconciliation returns
+period cash only. Bundle `status` and `missing` serialize as `quality.status` and `quality.missing`:
 
 ```text
 option_net_cashflow
@@ -680,8 +713,8 @@ bundle uses this fixed aggregation:
 therefore has observed zero cash/count facts, not-applicable rates, and an `observed` bundle. Every
 bundle in a successful report is exactly `observed` or `partial`.
 
-Root `quality` covers the complete requested payload: period cash, the cohort metric bundle and every emitted
-breakdown bundle. Its `status` is `partial` when any of those bundles is `partial`; it is
+Root `quality` covers the selected income/cash bundle and every emitted breakdown bundle.
+Daily capital retains its independent evidence status. Its `status` is `partial` when any of those bundles is `partial`; it is
 otherwise `observed`. `quality.missing` is the sorted unique union of all requested bundle reason
 codes and relevant scoped diagnostic reason codes. Detailed event/lot context stays in
 `quality.diagnostics`. A partial breakdown may therefore make root quality partial without changing
@@ -725,11 +758,11 @@ option_performance_report
 
 The report remains read-only. Supported public inputs are `config_key`, optional `config_path` and
 `data_config`, optional `account` and `broker`, `period=mtd|ytd|month|year`, the matching selector
-(`as_of_date` for MTD/YTD, `month=YYYY-MM`, or `year=YYYY`), and optional `include_rows`.
+(`as_of_date` for MTD/YTD, `month=YYYY-MM`, or `year=YYYY`), optional `include_rows`, and `basis=terminated|cashflow|opening_cohort` (default `terminated`).
 `start_date`, `end_date`, `range`, and `refresh_quotes` remain unsupported and are rejected as invalid.
 `/income` accepts account plus MTD, YTD, an exact natural month, an exact natural year, or `上月`.
 `include_rows` remains available to direct Tool Gateway and CLI callers but is absent from the
-Bot-visible schema and fixed to `false`; Bot evidence is the canonical aggregate only.
+Bot-visible schema and fixed to `false`; Bot uses `view=summary|breakdowns|rows` with bounded pagination; only the bulk `include_rows` flag is excluded.
 
 For Bot only, the current-message selector fence attests a closed grammar before any ledger read:
 
@@ -746,13 +779,20 @@ ledger read. The Host does not translate a natural month/year into MTD/YTD. Dire
 CLI, `/income`, and Control callers pass canonical `month=YYYY-MM` or `year=YYYY` and rely on the
 period owner for validation.
 
-The body declares `schema_version=option_performance.report.v3` and `metric_semantics`, owned by
-`src.application.performance.service`. The new period metric is additive; `option_net_cashflow`
-retains its opening-cohort numbers/shape. `metric_semantics` explicitly binds the return numerator
-to `option_net_cashflow` and marks rows/breakdowns/wins/returns as cohort metrics. It also marks actual
-daily occupied capital as period overlap including carry-in. There is no version selector or second
-implementation. A new Bot receiving an old body renders period cash unavailable, never relabels old
-cash as period cash. Decision history calls its original per-contract amount “合约期权现金结果”.
+The body declares `schema_version=option_performance.report.v4`, `basis`, and `metric_semantics`,
+owned by `src.application.performance.service`. Default income, rows, breakdowns, wins and returns
+use `terminal_event_time`; the return numerator is `terminated_option_net_income`. Explicit cohort
+analysis keeps `option_net_cashflow`; reconciliation exposes only `period_option_net_cashflow`.
+These fields do not coexist in one public response. The pure offline entry retains its existing
+opening-cohort plus period-cash contract and does not adopt the public default.
+
+`./om option-performance report --basis cashflow` and `/income [account] [period] 对账` select
+reconciliation. `--basis opening_cohort` or `/income [account] [period] 开仓批次` selects batch analysis.
+Reconciliation currently supports summary only; rows, symbol filters and breakdowns are rejected
+instead of returning unrelated cohort details. Terminal and cohort modes retain existing pagination.
+The service client requires v4 with matching basis/semantics and never substitutes an old v3 cash
+result for default income. A mismatched/old service fails explicitly without local fallback.
+Decision history retains its per-contract “合约期权现金结果” label.
 
 The one shared option-performance public adapter owns error translation and reuses the existing
 `AgentToolError` contract:
@@ -821,8 +861,8 @@ truncated; an irreducible response or unsupported body size returns an explicit 
 The display cursor wraps a canonical page cursor and a within-page position; replay revalidates
 source, frozen report time and current local account authority before displaying more data.
 Row/breakdown pages carry `schema_version` and `metric_semantics`; both participate in the canonical
-source hash, so a semantic change invalidates continuation. These pages contain cohort rows only,
-including under a symbol filter; full-account `period_option_net_cashflow` totals are not attached.
+source hash, so a semantic change invalidates continuation. These pages contain only the selected
+terminal/cohort rows, including under a symbol filter; full-account totals are not attached.
 `page_cursor` is internal to this adapter and is omitted from Tool responses. Old unwrapped Tool
 cursors require a fresh query. Tool calls with no pagination/view selectors retain the existing
 full structured contract; public Bot input normalization selects summary by default.
@@ -868,20 +908,24 @@ performance, Tool, CLI, Bot, schema and paging tests.
 Minimal result shape:
 
 ```text
-schema_version = option_performance.report.v3
-metric_semantics                 # period cash vs opening cohort; return numerator is option_net_cashflow
+schema_version = option_performance.report.v4
+basis = terminated | cashflow | opening_cohort
+metric_semantics                 # binds selection and return numerator to basis
 period
   kind, start_date, as_of_date, start_at_ms, end_exclusive_at_ms,
   statistic_days, reporting_timezone, freshness_status
 scope
   config_key, accounts, brokers
-period_option_net_cashflow
+terminated_option_net_income       # terminated only
+  by_currency[currency] -> amount, status, missing
+  cny_total -> currency=CNY, amount, status, missing
+period_option_net_cashflow         # cashflow reconciliation only
   schema_version = period_option_net_cashflow.v1
   selection, time_policy, fee_mode, status, missing, fact_count
   by_currency[currency]
     total, gross, fees -> amount, status, missing
   cny_total -> currency=CNY, amount, status, missing
-option_net_cashflow
+option_net_cashflow                # opening_cohort only
   by_currency
     total       -> amount, status, missing
     open        -> amount, status, missing
@@ -1000,8 +1044,9 @@ All in-repository consumers must switch atomically to the new canonical fields. 
 deleted PnL or stock cash, or derive a CNY amount other than the canonical root `cny_total`.
 
 - The option-performance renderer, Control `/income`, Bot projection, and Tool contract use the
-  canonical fields without recalculation. Period cash is primary and cohort cash is separately
-  labelled; old responses without period cash remain explicitly unavailable for that metric.
+  canonical fields without recalculation. Terminal income is the default; reconciliation cash and
+  opening-cohort analysis require explicit basis selection. The service client rejects mismatched
+  schema/basis rather than interpreting old cash as income.
 - `portfolio_pnl_bridge` cannot use this report after `pnl.period_total_net` is removed. Its public
   route may remain, but option PnL must be explicitly unavailable until a separate authoritative PnL
   source is designed.

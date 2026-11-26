@@ -49,10 +49,15 @@ def test_catalog_and_scene_preserve_all_baseline_input_constraints() -> None:
     # Only schema description annotations are excluded; names, defaults and
     # every validation keyword remain.
     catalog = tools.tool_descriptions(list(AGENT_TOOL_REGISTRY))
-    assert _constraint_fingerprint(catalog) == "d83ea595b77ad4c9b77c3db214a992777b3e7735853d263e065641cfc5ad0f63"
     # Independent additive-change proof: removing only the four new cohort
     # selectors exactly reproduces every prior tool constraint/default.
     baseline = deepcopy(catalog)
+    performance_schema = next(item["input_schema"] for item in baseline if item["name"] == "option_performance_report")
+    assert _without_descriptions(performance_schema["properties"].pop("basis")) == {
+        "type": "string", "enum": ["terminated", "cashflow", "opening_cohort"],
+    }
+    # The new basis selector is the only constraint change in this task.
+    assert _constraint_fingerprint(baseline) == "d83ea595b77ad4c9b77c3db214a992777b3e7735853d263e065641cfc5ad0f63"
     positions_schema = next(item["input_schema"] for item in baseline if item["name"] == "option_positions_read")
     additions = {
         "assignment_year": {"type": "integer", "minimum": 1, "maximum": 9999},

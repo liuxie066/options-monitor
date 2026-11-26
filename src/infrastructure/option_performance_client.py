@@ -87,11 +87,19 @@ def _validate_business_page(data: dict, payload: dict) -> None:
         "period", "scope", "coverage", "freshness", "quality", "breakdowns",
     )):
         raise ValueError
-    # Additive report fields may be absent in older compatible business bodies.
-    for name in ("period_option_net_cashflow", "metric_semantics"):
-        if name in data and not isinstance(data[name], dict):
-            raise ValueError
-    if "schema_version" in data and not isinstance(data["schema_version"], str):
+    basis = payload.get("basis", "terminated")
+    if data.get("schema_version") != "option_performance.report.v4" or data.get("basis") != basis:
+        raise ValueError
+    if not isinstance(data.get("metric_semantics"), dict):
+        raise ValueError
+    income_key = "terminated_option_net_income" if basis == "terminated" else "option_net_cashflow"
+    primary = "period_option_net_cashflow" if basis == "cashflow" else income_key
+    selection = {"terminated": "terminal_event_time", "opening_cohort": "opening_cohort",
+                 "cashflow": "cash_event_effective_time"}.get(basis)
+    if selection is None or data["metric_semantics"].get(primary) != selection:
+        raise ValueError
+    if any(name in data for name in {"period_option_net_cashflow", "option_net_cashflow",
+                                    "terminated_option_net_income"} - {primary}):
         raise ValueError
 
     def object_rows(value):
@@ -103,11 +111,10 @@ def _validate_business_page(data: dict, payload: dict) -> None:
     if ("rows" in data or rows_required) and not object_rows(data.get("rows")):
         raise ValueError
     if expected_view == "summary":
-        if "period_option_net_cashflow" in data.get("metric_semantics", {}) and "period_option_net_cashflow" not in data:
-            raise ValueError
-        if any(not isinstance(data.get(name), dict) for name in (
-            "option_net_cashflow", "sell_option_win_rate", "buy_option_win_rate", "option_return", "daily_occupied_capital",
-        )):
+        metrics = (primary,) if basis == "cashflow" else (
+            primary, "sell_option_win_rate", "buy_option_win_rate", "option_return", "daily_occupied_capital",
+        )
+        if any(not isinstance(data.get(name), dict) for name in metrics):
             raise ValueError
         return
     if expected_view not in {"rows", "breakdowns"}:

@@ -11,7 +11,7 @@ import pytest
 
 from src.application.bot.control.renderer import render_canonical_tool_result
 from src.application.trades import auto_intake, order_fee_sync, order_fee_timing
-from test_option_performance_agent_tool import _report
+from test_option_performance_agent_tool import _legacy_report as _report
 from test_order_fee_sync import EVENT_MS, _Provider, _repo_with_bare_option_event
 
 

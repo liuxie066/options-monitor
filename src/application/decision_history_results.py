@@ -44,7 +44,7 @@ def attach_trade_results(result: dict[str, Any], *, ledger_path, scope, account)
         period = PeriodWindow("history", "UTC", "1970-01-01", now.date().isoformat(), 0, now_ms + 1, 0, now_ms, "partial_current")
         repo = SimpleNamespace(list_trade_events=lambda: events, list_position_lots=lambda: [])
         facts = build_option_period_performance(repo, period=period, config_key="history", configured_accounts=[account],
-                                               account=account, include_rows=True)["rows"]
+                                               account=account, include_rows=True, basis="opening_cohort")["rows"]
         by_open: dict[str, list[dict[str, Any]]] = {}
         for fact in facts:
             by_open.setdefault(fact["open_event_id"], []).append(fact)

@@ -182,8 +182,7 @@ def test_incomplete_assignment_is_visible_in_brief_without_trade_capacity(tmp_pa
     assert '合约乘数来源未核实，暂停推荐' in message
     assert '指派交割金额或实际费用证据不完整，暂停推荐' in message
     expanded = render_fixed_report(brief, context=_scheduled_context(), limits={'max_items_per_account': 0})
-    assert 'NVDA｜Wheel Call' in expanded
-    assert 'CC 覆盖｜未覆盖 · 100 股' in expanded
+    assert 'NVDA｜未覆盖 100 股' in expanded
     assert '合约乘数来源未核实，暂停推荐' in expanded
     assert '指派交割金额或实际费用证据不完整，暂停推荐' in expanded
 

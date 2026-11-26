@@ -378,28 +378,44 @@ def _render_option_performance(data: dict[str, Any]) -> str:
     period_kind = str(period.get("kind") or "-").strip()
     period_kind_label = {"mtd": "MTD", "ytd": "YTD"}.get(period_kind, period_kind)
     period_label = f"{period.get('start_date') or '-'} 至 {period.get('as_of_date') or '-'}"
-    lines = [
-        f"期权收益统计完成（{scope_label}，{period_kind_label}，{period_label}）：",
-        f"- 期间期权净现金流：{_canonical_cashflow_text(data.get('period_option_net_cashflow'), period=True)}",
-        f"- 开仓批次期权现金结果：{_canonical_cashflow_text(data.get('option_net_cashflow'))}",
-        f"- 卖方胜率：{_canonical_win_rate_text(data.get('sell_option_win_rate'))}",
-        f"- 买方胜率：{_canonical_win_rate_text(data.get('buy_option_win_rate'))}",
-        f"- 期权收益率：{_canonical_option_return_text(data.get('option_return'))}",
-        f"- 日均占用：{_canonical_daily_capital_text(data.get('daily_occupied_capital'))}",
-    ]
+    basis = data.get("basis", "opening_cohort")
+    lines = [f"期权收益统计完成（{scope_label}，{period_kind_label}，{period_label}）："]
+    if basis == "cashflow":
+        lines.append(f"- 期间期权净现金流：{_canonical_cashflow_text(data.get('period_option_net_cashflow'), period=True)}")
+    elif basis == "terminated":
+        label = {"mtd": "本月", "ytd": "本年"}.get(period_kind, "所选期间") + "已终结期权净收益"
+        lines.append(f"- {label}：{_canonical_cashflow_text(data.get('terminated_option_net_income'), income=True)}")
+    else:
+        if "basis" not in data:
+            lines.append(f"- 期间期权净现金流：{_canonical_cashflow_text(data.get('period_option_net_cashflow'), period=True)}")
+        lines.append(f"- 开仓批次期权现金结果：{_canonical_cashflow_text(data.get('option_net_cashflow'))}")
+    if basis != "cashflow":
+        lines.extend([
+            f"- 卖方胜率：{_canonical_win_rate_text(data.get('sell_option_win_rate'))}",
+            f"- 买方胜率：{_canonical_win_rate_text(data.get('buy_option_win_rate'))}",
+            f"- 期权收益率：{_canonical_option_return_text(data.get('option_return'))}",
+            f"- 日均占用：{_canonical_daily_capital_text(data.get('daily_occupied_capital'))}",
+        ])
     statistical_cutoff = _dict(data.get("freshness")).get("as_of")
     if statistical_cutoff:
         lines.insert(1, f"统计截止：{statistical_cutoff}（非手续费同步时间）")
     missing = [str(item) for item in _list(quality.get("missing")) if str(item)]
     if missing:
         lines.append("缺失证据：" + "；".join(missing[:6]))
-    lines.append("收益率计时：已终止部分按开仓至实际终止时间，未平仓部分按开仓至到期日结束，均至少计 1 天；未平仓收益率按持有至到期估算。")
-    lines.append("日均占用：按统计期内实际未了结时间加权，含跨期持仓、不计未来时间；不是收益率分母。")
-    lines.append("口径：期间现金按现金事件有效时间统计，成交附带费用沿用成交时间；费用更正追溯原期间。开仓批次现金结果、胜率和收益率保留原口径，与期间现金不可相加；不提供 option PnL。")
+    if basis == "terminated":
+        lines.append("口径：按期间内实际平仓、到期、指派或行权的份额统计，计入对应开仓收支和实际期权费用；不含股票交割及后续股票盈亏。")
+        lines.append("收益率计时：按开仓至实际终结时间，至少计 1 天。")
+    elif basis == "cashflow":
+        lines.append("对账口径：按期间内现金事件有效时间统计；包含跨期持仓的收付，不代表已终结收益。")
+    else:
+        lines.append("收益率计时：已终止部分按开仓至实际终止时间，未平仓部分按开仓至到期日结束，均至少计 1 天；未平仓收益率按持有至到期估算。")
+        lines.append("口径：期间现金按现金事件有效时间统计，成交附带费用沿用成交时间；费用更正追溯原期间。开仓批次现金结果、胜率和收益率保留原口径，与期间现金不可相加；不提供 option PnL。")
+    if basis != "cashflow":
+        lines.append("日均占用：按统计期内实际未了结时间加权，含跨期持仓、不计未来时间；不是收益率分母。")
     return "\n".join(lines)
 
 
-def _canonical_cashflow_text(value: Any, *, period: bool = False) -> str:
+def _canonical_cashflow_text(value: Any, *, period: bool = False, income: bool = False) -> str:
     cashflow = _dict(value)
     if period and not cashflow:
         return "不可用（服务未提供期间现金指标）"
@@ -407,14 +423,18 @@ def _canonical_cashflow_text(value: Any, *, period: bool = False) -> str:
     parts: list[str] = []
     for currency, raw in sorted(by_currency.items()):
         components = _dict(raw)
+        if income:
+            components = {"total": components}
         component_text = []
         labels = (("total", "合计"), ("gross", "成交现金"), ("fees", "费用现金")) if period else (
             ("total", "合计"), ("open", "未终止"), ("terminated", "已终止"))
+        if income:
+            labels = (("total", "合计"),)
         for key, label in labels:
             metric = _dict(components.get(key))
             amount = _float_or_none(metric.get("amount"))
             text = f"{label} {amount:,.2f}" if amount is not None else f"{label} -"
-            if period and metric.get("status") == "partial":
+            if (period or income) and metric.get("status") == "partial":
                 text = f"{label} -（证据不完整）"
             if amount is None and metric.get("status") == "partial" and any(
                 reason in {"actual_fee_missing", "fee_estimated", "fee_missing", "exercise_fee_missing"}

@@ -194,7 +194,8 @@ def test_wheel_cohort_is_one_budget_item_before_account_and_total_caps() -> None
     view = build_daily_brief_user_view(brief, delivery_kind="fixed_report", limits={"max_items_per_account": 0})
     assert len(view["wheel_batches"]) == 2
     assert not any("Wheel 另有" in note for note in view["selection_omissions"])
-    assert any("42 批" in row["title"] for row in view["wheel_batches"])
+    assert any(len(row["display_branch_ids"]) == 42 for row in view["wheel_batches"])
+    assert all("42 批" not in row["title"] for row in view["wheel_batches"])
 
 
 def test_sealed_rank_two_does_not_skip_another_strategys_rank_two() -> None:

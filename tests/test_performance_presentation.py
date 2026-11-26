@@ -243,7 +243,7 @@ def test_capture_invalid_scope_is_translated_before_dependencies(monkeypatch):
 
 
 @pytest.mark.parametrize("view", ["rows", "breakdowns"])
-def test_scoped_pages_preserve_cohort_semantics_without_account_period_totals(monkeypatch, view):
+def test_scoped_pages_preserve_terminal_semantics_without_account_period_totals(monkeypatch, view):
     report = _large_report()
     _patch_dependencies(monkeypatch, report=report)
     symbol = "TEST" if view == "rows" else "GROUP-0"
@@ -251,7 +251,7 @@ def test_scoped_pages_preserve_cohort_semantics_without_account_period_totals(mo
     data = positions.OPTION_PERFORMANCE_REPORT_TOOL.call(payload)[0]
     assert data["schema_version"] == report["schema_version"]
     assert data["metric_semantics"] == report["metric_semantics"]
-    assert data["metric_semantics"][view] == "opening_cohort"
+    assert data["metric_semantics"][view] == "terminal_event_time"
     assert "period_option_net_cashflow" not in data
     assert "option_net_cashflow" not in data
     assert data["scope"]["symbol"] == symbol
@@ -273,14 +273,17 @@ def test_page_cursor_binds_schema_and_metric_semantics(monkeypatch, field):
 
 def test_model_summary_preserves_period_missing_reasons_and_semantics(monkeypatch):
     report = _report()
-    report["period_option_net_cashflow"].update(status="partial", missing=["fee_missing"])
+    report["basis"] = "cashflow"
+    report["metric_semantics"] = {"period_option_net_cashflow": "cash_event_effective_time"}
+    report.pop("terminated_option_net_income")
+    report["period_option_net_cashflow"] = {"status": "partial", "missing": ["fee_missing"]}
     report["period_option_net_cashflow"]["by_currency"] = {
         "USD": {name: {"amount": None, "status": "partial", "missing": ["fee_missing"]}
                 for name in ("total", "gross", "fees")},
     }
     _patch_dependencies(monkeypatch, report=report)
     response = bot_tools.call_read_tool(
-        "option_performance_report", {**QUERY, "view": "summary"},
+        "option_performance_report", {**QUERY, "view": "summary", "basis": "cashflow"},
         allowed_tools=("option_performance_report",), now_ms=_ms("2026-10-01T12:00:00"),
     )
     observation = bot_tools.model_observation("option_performance_report", response)
@@ -301,6 +304,9 @@ def test_current_period_freezes_across_body_row_and_business_pages(service, monk
     for n in range(3):
         event = _event(f"oct-open-{n}", "open", "2026-10-31T10:00:00")
         service[1].upsert_trade_event(replace(event, lot_id=f"oct-lot-{n}", contract_key=replace(event.contract_key, underlying_symbol=f"OCT{n}", expiration_ymd="2026-11-30")))
+
+        close = _event(f"oct-close-{n}", "close", "2026-10-31T11:00:00", target_lot_id=f"oct-lot-{n}")
+        service[1].upsert_trade_event(replace(close, contract_key=replace(close.contract_key, underlying_symbol=f"OCT{n}", expiration_ymd="2026-11-30")))
 
     class Clock(datetime):
         timestamp_ms = int(datetime.fromisoformat(instant).timestamp() * 1000)

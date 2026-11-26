@@ -267,7 +267,7 @@ def _tool_payload(
                 raise AgentToolError("SCOPE_ERROR", "Performance query runtime scope is inconsistent.")
             base = {"config_key": config_key}
         payload = {**base, "period": str(arguments.get("period") or "mtd")}
-        for key in ("account", "broker", "as_of_date", "month", "year"):
+        for key in ("account", "broker", "as_of_date", "month", "year", "basis"):
             if arguments.get(key) not in (None, ""):
                 payload[key] = arguments[key]
         return payload

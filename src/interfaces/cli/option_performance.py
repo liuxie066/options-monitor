@@ -77,6 +77,8 @@ def add_option_performance_commands(subparsers: argparse._SubParsersAction) -> N
     report.add_argument("--month", default=None, help="Natural month YYYY-MM")
     report.add_argument("--year", default=None, help="Natural year YYYY")
     report.add_argument("--include-rows", action="store_true")
+    report.add_argument("--basis", choices=["terminated", "cashflow", "opening_cohort"], default="terminated",
+                        help="Default terminal-period option net income; cashflow for reconciliation")
 
     serve = sub.add_parser("serve", help="serve the canonical read-only query on authenticated loopback HTTP")
     _add_config_args(serve)
@@ -139,6 +141,7 @@ def _report_payload(args: argparse.Namespace) -> dict[str, Any]:
     return {
         **_scope_payload(args),
         "period": args.period,
+        "basis": args.basis,
         "as_of_date": args.as_of_date,
         "month": args.month,
         "year": args.year,

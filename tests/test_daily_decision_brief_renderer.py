@@ -417,7 +417,7 @@ def test_fixed_report_renders_wheel_after_combo_yield() -> None:
     )
 
     assert message.index("## 组合增强") < message.index("## Wheel")
-    assert "NVDA｜Wheel Call" in message
+    assert "NVDA｜覆盖待核实" in message
     assert "剩余股份｜100 股" in message
     assert "建议｜卖出 1 张 08-21 $110 Call" in message
     assert "最终全部叫走后预计总收益｜$1,320.00" in message
@@ -488,9 +488,9 @@ def test_same_wheel_call_recommendations_share_one_item(render) -> None:
     original = deepcopy(brief)
     message = render(brief, context=_scheduled_context(),
                      limits={"max_total_items": 1, "max_candidates_per_strategy": 1})
-    assert message.count("FUTU｜Wheel Call") == 1
-    assert "3 批" in message and "分支 call-" not in message
-    assert "CC 覆盖｜未覆盖 · 300 股" in message
+    assert message.count("FUTU｜未覆盖") == 1
+    assert "分支 call-" not in message
+    assert "FUTU｜未覆盖 300 股" in message
     assert "建议｜卖出 3 张 02-19 $110 Call" in message
     assert "建议限价｜USD 3.2" in message
     assert "本轮预计净权利金｜$951.54" in message
@@ -587,8 +587,8 @@ def test_wheel_recommendation_alert_groups_only_selected_branches() -> None:
             "strategy_family": "wheel", "representative": row, "contract_count": 1})
     for render in (render_candidate_alert, render_candidate_alert_card_markdown, render_candidate_alert_text):
         message = render(brief, identities[:2], context=_scheduled_context())
-        assert message.count("FUTU｜Wheel Call") == 1
-        assert "2 批合计" in message
+        assert message.count("FUTU｜未覆盖") == 1
+        assert "FUTU｜未覆盖 200 股" in message
         assert "建议｜卖出 2 张" in message
         assert "本轮预计净权利金｜$634.36" in message
         assert "最终全部叫走后预计总收益｜$3,495.24" in message
@@ -660,8 +660,8 @@ def test_fixed_report_groups_same_assignment_without_hiding_warning() -> None:
         assert sum("3690.HK" in item["title"] for item in wheel) == 3
         if not blocked:
             assert any("0700.HK" in item["title"] for item in wheel)
-        grouped = next(item for item in wheel if "77.5P" in item["title"])
-        assert "3 批" in grouped["title"]
+        grouped = next(item for item in wheel if len(item["display_branch_ids"]) == 3)
+        assert len(grouped["display_branch_ids"]) == 3
         assert "1,500 股" in " ".join(grouped["details"])
         assert "成交归属待人工确认" in " ".join(grouped["details"])
         assert "分支合计剩余：1,500 股" in grouped["details"]
@@ -669,7 +669,7 @@ def test_fixed_report_groups_same_assignment_without_hiding_warning() -> None:
         assert all(f"{index:08d}" not in " ".join(grouped["details"]) for index in (1, 2, 3))
         for render in (render_fixed_report, render_fixed_report_card_markdown):
             message = render(current, limits={"max_items_per_account": 0}, context=_scheduled_context())
-            assert "77.5P" in message
+            assert "77.5P" not in message
             assert "1,500 股" in message
             assert "成交归属待人工确认" in message
     full = build_daily_brief_user_view(
@@ -681,7 +681,7 @@ def test_fixed_report_groups_same_assignment_without_hiding_warning() -> None:
     grouped = next(item for item in build_daily_brief_user_view(
         brief, delivery_kind="fixed_report", limits={"max_items_per_account": 0},
         context=_scheduled_context(),
-    )["wheel_batches"] if "77.5P" in item["title"])
+    )["wheel_batches"] if len(item["display_branch_ids"]) == 3)
     assert "成交归属待人工确认" in " ".join(grouped["details"])
 
 
@@ -767,7 +767,7 @@ def test_candidate_alert_renders_only_selected_wheel_branch() -> None:
         ),
     ):
         assert "NVDA｜Wheel Put" in message
-        assert "NVDA｜Wheel Call" not in message
+        assert "NVDA｜覆盖待核实" not in message
 
 
 @pytest.mark.parametrize("reason,detail", [
@@ -2507,8 +2507,8 @@ def test_wheel_no_recommendation_status_is_readable(direction, reason, expected)
         "status": "ready", "reason_code": reason, "recommended_contracts": 0,
     }]
     message = render_fixed_report(brief, limits={"max_items_per_account": 0}, context=_scheduled_context())
-    assert f"NVDA｜Wheel {direction.title()}" in message
-    assert f"状态｜{expected}" in message
+    assert ("NVDA｜覆盖待核实" if direction == "call" else "NVDA｜Wheel Put") in message
+    assert expected in message
     if reason != "unknown_wheel_reason":
         assert reason not in message
 
@@ -2553,14 +2553,16 @@ def test_compact_wheel_keeps_quantities_reservations_and_conflicts(status, commi
     }]
     for render in (render_fixed_report, render_fixed_report_card_markdown):
         message = render(brief, limits={"max_items_per_account": 0}, context=_scheduled_context())
-        assert f"CC 覆盖｜{expected}" in message
+        assert f"NVDA｜{'已覆盖 500' if committed == 500 else '未覆盖 ' + str(500-committed)} 股" in message
+        if committed == 250:
+            assert "已覆盖｜250 股" in message
         assert "剩余股份｜" not in message
         assert "分支剩余｜" not in message
         assert "分支额度已覆盖或预留" not in message
         if reserved:
             assert "意图预留｜250 股" in message
         if reason == "no_candidate":
-            assert "状态｜暂无合适合约" in message
+            assert "暂无合适合约" in message
         if reason == "strategy_attribution_conflict":
             assert "成交策略归属冲突，暂停新增建议" in message
 
@@ -2599,7 +2601,8 @@ def test_wheel_keeps_same_symbol_adjacent_with_stable_branch_order(delivery_kind
     assert symbols == ["3690.HK"] * (len(symbols)-1) + ["0700.HK"]
     if delivery_kind != "fixed_report":
         ids = [row["wheel_branch_id"][-8:] for row in rows if row["symbol"] == "3690.HK"]
-        assert all(branch in item["title"] for branch,item in zip(ids,view["wheel_batches"]))
+        assert all(branch not in item["title"] for branch,item in zip(ids,view["wheel_batches"]))
+        assert [branch[-8:] for item in view["wheel_batches"] for branch in item["display_branch_ids"] if branch.startswith("meituan")] == ids
 
 
 def test_grouped_wheel_preserves_distinct_covered_contracts_and_missing_details() -> None:
@@ -2614,12 +2617,14 @@ def test_grouped_wheel_preserves_distinct_covered_contracts_and_missing_details(
             "expiration_ymd":"2026-11-27", "strike":"80" if index<2 else "85", "option_type":"call"}]
     for render in (render_fixed_report, render_fixed_report_card_markdown):
         message=render(brief, limits={"max_items_per_account": 0})
-        assert "2026-11-27 80 Call；2026-11-27 85 Call" in message
+        assert "2026-11-27 80 Call" in message
+        assert "2026-11-27 85 Call" in message
+        assert "各合约覆盖股数待核实" in message
         assert "建议：卖出" not in message
     brief["wheel_batches"][1].pop("active_option_contracts")
     grouped = next(item for item in build_daily_brief_user_view(
         brief, delivery_kind="fixed_report", limits={"max_items_per_account": 0},
-    )["wheel_batches"] if "77.5P" in item["title"])
+    )["wheel_batches"] if len(item["display_branch_ids"]) == 3)
     assert "合约信息不完整" in " ".join(grouped["details"])
 
 
@@ -3259,3 +3264,87 @@ def test_settlement_combines_gap_and_fund_scopes_without_losing_currency():
     assert 'OTHER 期权平仓待结算确认（USD）' in message
     assert 'FUTU 期权平仓待结算确认（HKD）' in message
     assert message.count('期权平仓待结算确认') == 2
+
+
+def _wheel_coverage_copy_brief():
+    brief = _hk_assigned_wheel_brief()
+    base = brief['wheel_batches'][0]
+    brief['wheel_batches'] = []
+    for index, shares in enumerate((200, 100, 300, 100)):
+        row = deepcopy(base)
+        row.update(symbol='0700.HK', wheel_branch_id=f'copy-{index}',
+                   position_lot_id=f'stock-{index}', shares_remaining=shares,
+                   assignment_price=400 + index, assigned_at_ms=1000 + index,
+                   status='ready', reason_code='no_candidate', reason_codes=[])
+        row['coverage'].update(status='none', target_shares=shares, committed_shares=0,
+                               reserved_shares=0, available_shares=shares, reason_codes=[])
+        if index == 3:
+            row.update(status='call_open', reason_code='wheel_call_open')
+            row['coverage'].update(status='full', committed_shares=shares, available_shares=0)
+            row['active_option_contracts'] = [{'underlying_symbol':'0700.HK', 'option_type':'call',
+                'expiration_ymd':'2026-12-30', 'strike':460}]
+        brief['wheel_batches'].append(row)
+    return brief
+
+
+@pytest.mark.parametrize('render', [render_fixed_report, render_fixed_report_card_markdown,
+                                    render_fixed_report_text, render_query_brief])
+def test_wheel_uncovered_summary_and_covered_single_line_preserve_source(render):
+    brief = _wheel_coverage_copy_brief()
+    original = deepcopy(brief)
+    message = render(brief, limits={'max_items_per_account':0}, context=_scheduled_context())
+    assert message.count('0700.HK｜未覆盖 600 股') == 1
+    assert message.count('暂无合适合约') >= 1
+    assert '0700.HK｜100 股｜2026-12-30 460 Call' in message
+    assert message.index('未覆盖 600 股') < message.index('100 股｜2026-12-30')
+    assert '分支 copy-' not in message and 'CC 覆盖' not in message
+    assert 'Wheel Call' not in message and '400P' not in message
+    assert brief == original
+    view = build_daily_brief_user_view(brief, delivery_kind='fixed_report', limits={'max_items_per_account':0})
+    assert view['wheel_batches'][0]['display_branch_ids'] == ['copy-0', 'copy-1', 'copy-2']
+    assert view['wheel_batches'][1]['details'] == []
+
+
+@pytest.mark.parametrize('status', ['data_unavailable', 'failed', 'linkage_unresolved'])
+def test_fully_covered_abnormal_status_is_not_compressed(status):
+    brief = _wheel_coverage_copy_brief()
+    row = brief['wheel_batches'][-1]
+    brief['wheel_batches'] = [row]
+    row.update(status=status, reason_code=None, reason_codes=[])
+    view = build_daily_brief_user_view(brief, delivery_kind='fixed_report', limits={'max_items_per_account':0})
+    item = view['wheel_batches'][0]
+    assert not item['compact_line']
+    assert item['details']
+    assert '覆盖期权：2026-12-30 460 Call' in item['details']
+
+
+@pytest.mark.parametrize('difference', ['broker', 'currency', 'account', 'reason', 'duplicate'])
+def test_wheel_summary_preserves_scope_reason_and_branch_isolation(difference):
+    brief = _wheel_coverage_copy_brief()
+    brief['wheel_batches'] = brief['wheel_batches'][:2]
+    first, second = brief['wheel_batches']
+    if difference in {'broker', 'currency', 'account'}:
+        second[difference] = 'other'
+    elif difference == 'reason':
+        second['reason_code'] = 'data_unavailable'
+    else:
+        second['wheel_branch_id'] = first['wheel_branch_id']
+    view = build_daily_brief_user_view(brief, delivery_kind='query', limits={'max_items_per_account':0})
+    assert len(view['wheel_batches']) == 2
+
+
+@pytest.mark.parametrize('same_contract', [False, True])
+def test_covered_wheel_groups_only_the_same_contract(same_contract):
+    brief = _wheel_coverage_copy_brief()
+    first = brief['wheel_batches'][-1]
+    second = deepcopy(first)
+    second.update(wheel_branch_id='covered-other', position_lot_id='stock-other',
+                  assignment_price=450, assigned_at_ms=2000)
+    if not same_contract:
+        second['active_option_contracts'][0]['strike'] = 470
+    brief['wheel_batches'] = [first, second]
+    view = build_daily_brief_user_view(brief, delivery_kind='fixed_report', limits={'max_items_per_account':0})
+    assert len(view['wheel_batches']) == (1 if same_contract else 2)
+    if same_contract:
+        assert view['wheel_batches'][0]['title'] == '0700.HK · 200 股 · 2026-12-30 460 Call'
+        assert view['wheel_batches'][0]['display_branch_ids'] == ['copy-3', 'covered-other']

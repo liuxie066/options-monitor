@@ -28,7 +28,7 @@ _ALIASES = {
     "trade_attribution_read": "成交 归属 attribution",
     "daily_decision_brief_read": "每日 简报 期权监控 最新报告 daily brief",
     "close_advice_read": "平仓 建议 close advice",
-    "option_performance_report": "收益 收入 胜率 绩效 月度 年度 mtd ytd performance income returns",
+    "option_performance_report": "收益 收入 已终结 平仓 到期 指派 对账 现金流 胜率 绩效 月度 年度 mtd ytd performance income returns",
     "symbol_resolve": "标的 代码 中文名 别名 resolve symbol alias",
     "symbol_config_read": "标的 配置 阈值 门槛 delta 行权价 config threshold",
     "notification_perception_read": "通知 发送 送达 跳过 未通知 notification delivery skipped",

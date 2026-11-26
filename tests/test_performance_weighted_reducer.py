@@ -284,6 +284,62 @@ def _project_and_reduce(events, **kwargs):
     return projection, reduce_option_performance(projection, period=_period(), **kwargs)
 
 
+def test_terminated_basis_selects_cross_month_shares_not_opening_cash():
+    events = [
+        _event('carry', 'open', '2026-08-20T10:00:00', lot_id='carry', contracts=3, price=10, fee=3, fx_rate=7),
+        _event('aug-close', 'close', '2026-08-31T10:00:00', target_lot_id='carry', price=2, fee=1, close_type='buy_to_close'),
+        _event('sep-close', 'close', '2026-09-02T10:00:00', target_lot_id='carry', price=3, fee=2, close_type='buy_to_close', fx_rate=6),
+        _event('new-open', 'open', '2026-09-01T10:00:00', lot_id='new', price=5),
+    ]
+    projection = project_trade_events(events)
+    result = reduce_option_performance(projection, period=_period(), basis='terminated')
+    assert [f.terminal_event_id for f in result.facts] == ['sep-close']
+    cash = result.bundle['option_net_cashflow']
+    assert cash['by_currency']['USD']['total']['amount'] == Decimal('697')
+    assert cash['cny_total']['amount'] == Decimal('5181')  # 999 * 7 - 302 * 6
+    assert result.bundle['sell_option_win_rate']['eligible_contracts'] == 1
+    assert result.bundle['option_return']['by_currency']['USD']['capital_days'] == Decimal('130000')
+    assert result.breakdowns['symbols'][0]['option_net_cashflow']['by_currency']['USD']['total']['amount'] == Decimal('697')
+    legacy = reduce_option_performance(projection, period=_period())
+    assert legacy.bundle['option_net_cashflow']['by_currency']['USD']['total']['amount'] == Decimal('500')
+
+
+@pytest.mark.parametrize('side,kind,event_type,close_type,price,expected', [
+    ('short', 'put', 'assignment', 'assignment', 0, '98'),
+    ('short', 'call', 'close', 'expire_auto_close', 0, '98'),
+    ('long', 'put', 'close', 'expire_auto_close', 0, '-102'),
+    ('long', 'call', 'close', 'sell_to_close', 2, '98'),
+    ('long', 'call', 'exercise', 'exercise', 0, '-102'),
+])
+def test_terminated_basis_lifecycle_includes_only_option_cash(side, kind, event_type, close_type, price, expected):
+    key = _key(side=side, option_type=kind)
+    result = reduce_option_performance(project_trade_events([
+        _event('open', 'open', '2026-08-20T10:00:00', key=key, lot_id='lot', fee=1),
+        _event('end', event_type, '2026-09-02T10:00:00', key=key, target_lot_id='lot', price=price, fee=1, close_type=close_type,
+               raw={'stock_settlement': {'shares': 100, 'price': 100, 'side': 'buy', 'currency': 'USD',
+                                         'fees': 99, 'fee_provenance': {'basis': 'actual', 'amount': 99, 'source': 'test'}}}),
+    ]), period=_period(), basis='terminated')
+    assert result.bundle['option_net_cashflow']['by_currency']['USD']['total']['amount'] == Decimal(expected)
+
+
+@pytest.mark.parametrize('fee_basis', [None, 'estimated'])
+def test_terminated_basis_missing_actual_fee_is_not_zero_or_gross(fee_basis):
+    result = reduce_option_performance(project_trade_events([
+        _event('open', 'open', '2026-08-20T10:00:00', lot_id='lot'),
+        _event('end', 'close', '2026-09-02T10:00:00', target_lot_id='lot', price=.2, fee_basis=fee_basis, close_type='buy_to_close'),
+    ]), period=_period(), basis='terminated')
+    assert result.bundle['option_net_cashflow']['by_currency']['USD']['total']['amount'] is None
+    assert result.bundle['option_net_cashflow']['cny_total']['amount'] is None
+
+
+def test_terminated_basis_missing_expiry_evidence_cannot_be_reported_as_zero():
+    result = reduce_option_performance(project_trade_events([
+        _event('open', 'open', '2026-08-20T10:00:00', lot_id='lot', key=_key(expiration='2026-09-01')),
+    ]), period=_period(), basis='terminated')
+    assert result.bundle['option_net_cashflow']['by_currency']['USD']['total']['amount'] is None
+    assert 'terminal_evidence_missing' in result.bundle['missing']
+
+
 def _reduce_with_lx_diagnostic(projection, diagnostic):
     return reduce_option_performance(
         replace(projection, diagnostics=[diagnostic]),
