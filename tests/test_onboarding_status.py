@@ -106,4 +106,4 @@ def test_home_broken_config_reports_repair_without_reinitializing(tmp_path, monk
         raise AgentToolError(code="CONFIG_ERROR", message="broken source")
     monkeypatch.setattr(home, "_home_state", fail)
     assert home.interactive_home(lambda _: pytest.fail("must not dispatch writes")) == 2
-    assert "不会重建已有配置" in capsys.readouterr().out
+    assert "无法读取配置或扫描结果，请运行 om doctor 排查。" in capsys.readouterr().out

@@ -205,7 +205,7 @@ def test_notify_symbols_markdown_put_layout() -> None:
 **[lx] 腾讯｜CSP｜2026-04-29 460P**
 收益｜权利金=5.720 (HKD) | 年化 17.21% | 净收 557
 合约｜行权价=460 | 数量=1张(默认) | DTE=26
-风控｜风险=中性 | delta=-0.23 | IV=缺失(告警未提供iv)
+风控｜风险=中性 | delta=-0.23 | IV=暂不可用
 资金｜保证金占用=¥110,720 (CNY)
 操作｜建议挂单=5.720
 备注｜通过准入后，收益/风险组合较强，值得优先看。
@@ -235,11 +235,11 @@ def test_notify_symbols_markdown_put_layout_missing_fields_have_reasons() -> Non
 
     assert "nan" not in out.lower()
     assert "行权价=156" in out
-    assert "年化 缺失(告警未提供年化)" in out
-    assert "保证金占用=缺失(告警未提供cash_req_cny/cash_req)" in out
+    assert "年化 暂不可用" in out
+    assert "保证金占用=暂不可用" in out
     assert "同标的CSP占用" not in out
-    assert "delta=缺失(告警未提供delta)" in out
-    assert "IV=缺失(告警未提供iv)" in out
+    assert "delta=暂不可用" in out
+    assert "IV=暂不可用" in out
 
 
 def test_notify_symbols_markdown_call_layout_ignores_changes_input() -> None:
@@ -273,10 +273,10 @@ def test_notify_symbols_markdown_call_layout_missing_fields_have_reasons() -> No
 
     assert "nan" not in out.lower()
     assert "行权价=180" in out
-    assert "年化 缺失(告警未提供年化)" in out
-    assert "delta=缺失(告警未提供delta)" in out
-    assert "IV=缺失(告警未提供iv)" in out
-    assert "持仓｜总股数=缺失(告警未提供shares) | 已占用=缺失(告警未提供shares) | 可用=缺失(告警未提供shares) | 可覆盖=缺失(告警未提供cover)张" in out
+    assert "年化 暂不可用" in out
+    assert "delta=暂不可用" in out
+    assert "IV=暂不可用" in out
+    assert "持仓｜总股数=暂不可用 | 已占用=暂不可用 | 可用=暂不可用 | 可覆盖=暂不可用张" in out
 
 
 def test_notify_symbols_markdown_put_chain_uses_upstream_fields_when_available() -> None:
@@ -364,9 +364,9 @@ def test_notify_symbols_markdown_put_chain_missing_fields_keep_reasons() -> None
         net_income=524.99, dte=76, strike=156.0,
     )
 
-    assert "保证金占用=缺失(告警未提供cash_req_cny/cash_req)" in out
-    assert "delta=缺失(告警未提供delta)" in out
-    assert "IV=缺失(告警未提供iv)" in out
+    assert "保证金占用=暂不可用" in out
+    assert "delta=暂不可用" in out
+    assert "IV=暂不可用" in out
 
 
 def test_notify_symbols_markdown_put_shows_same_symbol_position_usage() -> None:

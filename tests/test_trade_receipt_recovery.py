@@ -382,7 +382,8 @@ def test_transient_lock_failure_then_due_retry_sends_distinct_success_once(tmp_p
     assert failed["retry_policy"] == {"attempt_count": 1, "max_attempts": 20, "remaining": 19,
                                       "retryable": True, "retry_delay_sec": 60}
     assert "数据库短暂争用" in calls[0]["message"]
-    assert "剩余 19 次" in calls[0]["message"]
+    assert "将自动重试，无需重复提交" in calls[0]["message"]
+    assert "剩余 19 次" not in calls[0]["message"]
     assert not repo.list_trade_events()
     assert process(_payload())["reason"] == "inbox_pending"
     assert len(calls) == 1
@@ -438,7 +439,7 @@ def test_unknown_ledger_readback_only_checks_until_absence_is_proven(tmp_path, m
     monkeypatch.setattr(auto_intake, "open_trade_reconciliation_evidence_repo", lambda *_a: (_ for _ in ()).throw(sqlite3.OperationalError("database is locked")))
     failed = _processor(tmp_path, repo, monkeypatch, _successful_sender(calls))(_payload())
     assert failed["receipt_kind"] == "verification_pending"
-    assert "核对前不会重复录入" in calls[0]["message"]
+    assert "仍在核对，请勿重复提交" in calls[0]["message"]
     path = tmp_path / "ledger.sqlite3.trade_intake_inbox.sqlite3"
     _advance(monkeypatch)
     assert inbox.claim_trade_payload(path, inbox_id=_inbox_id(_payload()), repo=repo) is None

@@ -250,11 +250,17 @@ def report_system_failure(
         }
         atomic_write_json(path, _prune_state(state))
     message = message or render_system_notice(
-        component=unit,
+        component="扫描服务" if "tick" in unit else "运行服务",
         status="❌ 不可用",
-        fields=(("run_id", run_id), ("market", market), ("account", account),
-                ("failure_code", failure_code), ("stage", stage), ("rc", rc),
-                ("first_error_at", first_error_at), ("opend_login_state", opend_login_state)),
+        fields=(("市场", market), ("账户", account), ("时间", first_error_at),
+                ("影响", "本轮扫描失败，暂无最新结果" if "tick" in unit else "运行服务异常，相关功能暂不可用"),
+                ("处理", {
+                    "OPEND_NEEDS_PHONE_VERIFY": "请在 OpenD 完成手机验证后恢复数据连接",
+                    "OPEND_NEEDS_PIC_VERIFY": "请在 OpenD 完成图片验证后恢复数据连接",
+                    "OPEND_LOGIN_INVALID": "OpenD 登录已失效，请重新登录",
+                    "TRADE_INTAKE_HEARTBEAT_STALE": "成交监听长时间未更新，请检查监听服务",
+                    "TRADE_INTAKE_PROCESS_DOWN": "成交监听已停止，请检查监听服务",
+                }.get(failure_code, "请查询运行状态，确认故障原因"))),
     )
     try:
         delivery = _send(base, config, message, hashlib.sha256((key + incident_at).encode()).hexdigest(), **({"account": account} if uses_proactive_fanout(config) else {}))
@@ -315,7 +321,7 @@ def report_system_recovery(
             retire_system_failure(base=base, unit=unit, market=market, account=account,
                                   failure_code="SYSTEM_RECOVERY_DELIVERY_UNCONFIRMED", stage="recovery_delivery")
         return "suppressed"
-    message = message or render_system_notice(component=unit, status="✅ 已恢复", fields=(("market", market), ("account", account), ("failure_code", failure_code), ("stage", stage)))
+    message = message or render_system_notice(component="扫描服务" if "tick" in unit else "运行服务", status="✅ 已恢复", fields=(("市场", market), ("账户", account)))
     try:
         recovery_key = hashlib.sha256((key + incident_at + "-recovery").encode()).hexdigest()
         delivery = _send(base, config, message, recovery_key, **({"account": account} if uses_proactive_fanout(config) else {}))
@@ -407,9 +413,9 @@ def report_system_meta_signal(
         "reason": reason,
     }, ensure_ascii=False, separators=(",", ":")), file=sys.stderr)
     if external:
-        notice = render_system_notice(component=unit, status="❌ 不可用" if degraded else "✅ 已恢复",
-                                      fields=(("market", market), ("account", account),
-                                              ("failure_code", failure_code), ("stage", stage), ("reason", reason)))
+        notice = render_system_notice(component="系统告警", status="❌ 不可用" if degraded else "✅ 已恢复",
+                                      fields=(("市场", market), ("账户", account),
+                                              ("影响", "故障记录或通知异常，请查询运行状态" if degraded else "故障记录或通知已恢复")))
         try:
             controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
             delivery = _send(

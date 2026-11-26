@@ -670,7 +670,8 @@ def test_build_trade_intake_receipt_message_marks_unresolved() -> None:
     assert "状态｜❌ 未记录" in msg
     assert msg.startswith("# OM · 回执 · lx")
     assert "类型｜成交" in msg
-    assert "missing_required_fields:multiplier" in msg
+    assert "成交暂未记录，需要核查" in msg
+    assert "missing_required_fields:multiplier" not in msg
     assert "9992.HK" in msg
 
 
@@ -712,7 +713,7 @@ def test_build_trade_intake_receipt_message_marks_ambiguous_assigned_stock_sale_
     assert "状态｜⚠️ 待确认" in msg
     assert msg.startswith("# OM · 回执 · lx")
     assert "类型｜成交" in msg
-    assert "确认前不会自动写入" in msg
+    assert "确认后才能记录" in msg
     assert "A｜FUTU USD；剩余 100 股；成本 120.0/股" in msg
     assert "B｜FUTU USD；剩余 100 股；成本 117.45/股" in msg
     assert "下一步｜回复“选择 A”" in msg
@@ -736,7 +737,8 @@ def test_build_trade_intake_receipt_message_marks_projection_verification_failur
 
     assert "状态｜❌ 写入异常" in msg
     assert "状态｜✅ 已完成" not in msg
-    assert "projection_verification_failed" in msg
+    assert "成交记录与持仓核对不一致，需要核查" in msg
+    assert "projection_verification_failed" not in msg
 
 
 def test_build_trade_intake_receipt_message_marks_same_expiry_combo_relation_pending() -> None:
@@ -865,3 +867,12 @@ def test_lifecycle_receipt_renders_status_once():
     for transition in ("needs_review", "resolution_confirmed", "option_leg_closed"):
         message = build_trade_lifecycle_notification_message({**payload, "transition_type": transition})
         assert message.count("状态｜") == 1
+
+
+def test_duplicate_receipt_does_not_claim_trade_was_not_recorded():
+    from src.application.trades.receipt import build_trade_intake_receipt_message
+    text = build_trade_intake_receipt_message(deal={}, result={
+        'status': 'skipped', 'reason': 'duplicate_deal_id', 'account': 'lx'})
+    assert '状态｜✅ 已处理' in text
+    assert '无需重复提交' in text
+    assert '未记录' not in text

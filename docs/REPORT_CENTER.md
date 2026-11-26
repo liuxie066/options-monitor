@@ -51,6 +51,7 @@ om report schedule [--format text|json]
 - `run`：只对 `migrated: true` 的报告生效。`--dry-run` 只生成并打印，不创建运行目录，不写历史；`--no-deliver` 只在本地生成报告，跳过外部投递。
 - `history`：按 UTC 时间倒序读取 `<runtime_root>/reports/<report_id>/*/run.json`。
 - `show`：默认显示 markdown 产物；`--artifact report.json` 可查看结构化产物。
+- 周度配置报告正文优先展示复核结论、边界依据和数据缺口；价格来源、判定方法与配置明细置于附录。正文不显示本机配置路径或配置构建过程，完整来源仍保留在结构化产物中。
 - `schedule`：输出每个报告的调度条目；JSON 里包含 launchd label、`StartCalendarInterval`、plist 路径是否存在、迁移状态和保留策略。
 
 ## 产物目录与运行清单

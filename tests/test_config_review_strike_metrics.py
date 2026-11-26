@@ -81,7 +81,7 @@ def test_real_report_cli_persists_each_conclusion(tmp_path, monkeypatch, capsys,
     payload = json.loads((run_dir / "report.json").read_text())
     markdown = (run_dir / "report.md").read_text()
     assert payload["conclusion"]["state"] == receipt["summary"]["conclusion"] == expected
-    assert markdown.index(f"**结论：{expected}**") < markdown.index("## 指标 A")
+    assert markdown.index(f"**结论：{expected}**") < markdown.index("## 行权价边界筛选")
     assert (run_dir / "candidate_evidence.json").is_file()
     if expected == "无需调整":
         assert payload["strike_rejections"]["count"] == 0

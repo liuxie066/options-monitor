@@ -326,10 +326,12 @@ def test_expiry_reason_projection_and_both_renderer_paths_deduplicate_only_match
     brief = {"data_gaps": gaps}
     normal = _strategy_data_gap_reminders(brief)
     degraded = _fixed_report_error_reminders(brief, strategy_failure_items=[])
-    assert normal == degraded and len(normal) == 3
-    assert sum(JAN in text and "来源冲突" in text for text in normal) == 1
-    assert any(FEB in text and "前复权" in text for text in normal)
-    assert any(JAN in text and "覆盖不足" in text for text in normal)
+    assert normal == degraded == ["0123.HK CSP：历史波动率数据不足，候选结果不完整"]
+    assert {(scope["expiration"], scope["rv_reason"]) for scope in summary["affected_scopes"]} == {
+        (JAN, "calendar_source_conflict"),
+        (FEB, "qfq_history_session_gap"),
+        (JAN, "calendar_coverage_incomplete"),
+    }
 
 
 @pytest.mark.parametrize("market", ["HK", "US"])

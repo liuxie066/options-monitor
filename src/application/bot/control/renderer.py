@@ -318,14 +318,14 @@ def _render_cash_headroom(data: dict[str, Any], _tool_result: dict[str, Any]) ->
     unavailable_reason = str(data.get("cash_secured_unavailable_reason") or "").strip()
     if data.get("cash_secured_usage_reliable") is False:
         reason = f"：{unavailable_reason}" if unavailable_reason else "。"
-        return f"{account_prefix}CSP 担保金是否超过现金加货基暂时不能确认{reason}\n数据来源：OM cash headroom query".strip()
+        return f"{account_prefix}CSP 担保金是否超过现金加货基暂时不能确认{reason}\n按 OM 资金记录计算。".strip()
 
     used = _float_or_none(data.get("cash_secured_used_cny"))
     available = _float_or_none(data.get("cash_available_total_cny"))
     if used is None or available is None:
         return (
             f"{account_prefix}CSP 担保金是否超过现金加货基暂时不能确认：缺少 CNY 折算后的担保金或现金类资产。\n"
-            "数据来源：OM cash headroom query"
+            "按 OM 资金记录计算。"
         ).strip()
 
     free = _float_or_none(data.get("cash_free_total_cny"))
@@ -345,7 +345,7 @@ def _render_cash_headroom(data: dict[str, Any], _tool_result: dict[str, Any]) ->
     source = str(data.get("cash_source") or "").strip()
     if source:
         lines.append(f"- 现金口径：{source}")
-    lines.append("数据来源：OM cash headroom query")
+    lines.append("按 OM 资金记录计算。")
     return "\n".join(lines)
 
 
@@ -516,7 +516,7 @@ def _render_positions(data: dict[str, Any]) -> str:
     status = _value(query.get("status") if query else filters.get("status") or "open")
     scope = _position_scope_text(account_label=account_label, status=status, query=query, filters=filters)
     if not rows:
-        return f"{scope}：0 条。\n数据源：OM 本地 SQLite position_lots"
+        return f"{scope}：0 条。\n按 OM 账本计算。"
 
     lines = [f"{scope}：{len(rows)} 条"]
     for row_raw in rows:
@@ -533,7 +533,7 @@ def _render_positions(data: dict[str, Any]) -> str:
     bootstrap_status = str(bootstrap.get("status") or "").strip()
     if bootstrap_status.startswith("degraded"):
         lines.append("账本提示：" + _value(bootstrap.get("message") or bootstrap_status))
-    lines.append("数据源：OM 本地 SQLite position_lots")
+    lines.append("按 OM 账本计算。")
     return "\n".join(lines)
 
 
@@ -546,13 +546,13 @@ def _render_assignment_period(data: dict[str, Any]) -> str:
     if query:
         period = query.get("assignment_period") or query.get("period") or query
         lines.append(f"指派期间（Asia/Shanghai）：{period}")
-    lines.append(f"覆盖状态：{_value(coverage.get('status'))}；历史来源未完全核实时仅为账本估算。")
+    lines.append(f"数据覆盖：{_display_status(coverage.get('status'))}；未核实部分仅为账本估算。")
 
     def metric_text(metric: Any) -> str:
         if isinstance(metric, dict):
             amount = metric.get("value")
             state = metric.get("coverage") or metric.get("status")
-            return f"{amount if amount is not None else '待核实/不可用'}（{state or '见覆盖说明'}）"
+            return f"{amount if amount is not None else '待核实/不可用'}（{_display_status(state)}）"
         return str(metric) if metric is not None else "待核实/不可用"
 
     currencies = summary.get("by_currency") or {}
@@ -569,17 +569,17 @@ def _render_assignment_period(data: dict[str, Any]) -> str:
     if cny:
         lines.append(f"人民币估算：剩余正股浮盈亏 {metric_text(cny_metrics.get('stock_unrealized_pnl'))}；正股已实现盈亏 {metric_text(cny_metrics.get('stock_realized_pnl'))}")
     rows = _list(data.get("rows"))
-    lines.append(f"本页批次：{len(rows)}；完整合计以上述 owner 汇总为准。")
+    lines.append(f"以上为全部批次合计，下方展示其中 {len(rows)} 个批次。")
     for raw in rows:
         row = _dict(raw)
         lines.append(
             f"{_value(row.get('account'))} {_value(row.get('symbol'))} {_value(row.get('stock_lot_id'))}："
             f"接货 {_value(row.get('shares_opened'))}股，账本已售 {_value(row.get('book_shares_sold'))}股，"
             f"账本剩余 {_value(row.get('book_shares_remaining'))}股；"
-            f"数量状态 {_value(row.get('quantity_status'))}；"
+            f"数量状态 {_display_status(row.get('quantity_status'))}；"
             f"剩余正股浮盈亏 {metric_text(row.get('stock_unrealized_pnl'))}，"
             f"正股已实现盈亏 {metric_text(row.get('stock_realized_pnl'))}；"
-            f"原因 {row.get('reasons') or []}"
+            + ("部分记录尚未核实，相关收益以可用数据为准" if row.get("reasons") else "")
         )
     if data.get("scope_reviews") or data.get("unresolved_stock_sales"):
         lines.append("存在未归属/来源缺口，受影响指标以空值及覆盖说明为准。")
@@ -944,18 +944,16 @@ def _render_runs(data: dict[str, Any]) -> str:
     if selected:
         scheduler = _dict(selected.get("scheduler"))
         lines = [
-            f"运行 {selected.get('run_id') or '-'}：{_value(selected.get('status'))}",
+            f"运行 {selected.get('run_id') or '-'}：{_display_status(selected.get('status'))}",
             f"时间：{_value(selected.get('mtime_utc'))}",
-            f"扫描：{_yes_no(selected.get('ran_scan'))}，通知：{_yes_no(selected.get('sent'))}",
+            f"扫描：{_display_bool(selected.get('ran_scan'))}，通知：{_display_bool(selected.get('sent'))}",
             f"账户：{_csv(selected.get('accounts'))}",
-            f"原因：{_value(selected.get('reason'))}",
         ]
         if scheduler:
             lines.append(
                 "调度："
-                f"scan={_yes_no(scheduler.get('should_run_scan'))} "
-                f"notify={_yes_no(scheduler.get('should_notify'))} "
-                f"{_value(scheduler.get('reason'))}"
+                f"计划扫描：{_display_bool(scheduler.get('should_run_scan'))} "
+                f"通知时段：{_display_bool(scheduler.get('should_notify'))} "
             )
         return "\n".join(lines)
 
@@ -973,12 +971,11 @@ def _render_runs(data: dict[str, Any]) -> str:
         lines.append(
             "- "
             f"{_value(row.get('run_id'))} "
-            f"{_value(row.get('status'))} "
+            f"{_display_status(row.get('status'))} "
             f"{_value(row.get('mtime_utc'))} "
-            f"scan={_yes_no(row.get('ran_scan'))} "
-            f"sent={_yes_no(row.get('sent'))} "
-            f"accounts={_csv(row.get('accounts'))} "
-            f"reason={_value(row.get('reason'))}"
+            f"扫描执行：{_display_bool(row.get('ran_scan'))} "
+            f"通知发送：{_display_bool(row.get('sent'))} "
+            f"账户：{_csv(row.get('accounts'))} "
         )
     if len(runs) > 8:
         lines.append(f"... 还有 {len(runs) - 8} 条未展示。")
@@ -1006,12 +1003,12 @@ def _render_logs(data: dict[str, Any]) -> str:
         lines.append(
             "- "
             f"{_value(entry.get('kind') or 'log')} "
-            f"exists={_yes_no(entry.get('exists'))} "
+            f"exists={_display_bool(entry.get('exists'))} "
             f"tail={_value(entry.get('tail_line_count'))}"
         )
         error = str(entry.get("error_code") or "").strip()
         if error:
-            lines.append(f"  error_code: {error}")
+            lines.append(f"  错误代码：{error}")
     if len(files) > 3:
         lines.append(f"... 还有 {len(files) - 3} 个文件未展示。")
     return "\n".join(lines)
@@ -1027,11 +1024,11 @@ def _render_runtime_status(data: dict[str, Any], tool_result: dict[str, Any]) ->
         status = "ok"
     else:
         status = _value(summary.get("latest_status") or "unknown")
-    lines = [f"OM 状态：{status}"]
+    lines = [f"OM 状态：{_display_status(status)}"]
 
     latest_status = summary.get("latest_status")
     if latest_status:
-        lines.append(f"最新状态：{latest_status}")
+        lines.append(f"最新状态：{_display_status(latest_status)}")
 
     latest_run = _dict(data.get("latest_run"))
     if latest_run:
@@ -1041,19 +1038,19 @@ def _render_runtime_status(data: dict[str, Any], tool_result: dict[str, Any]) ->
             lines.append(
                 "最新运行："
                 f"{_value(run_id)} "
-                f"scan={_yes_no(tick_metrics.get('ran_scan'))} "
-                f"notify={_runtime_notify_text(tick_metrics)}"
+                f"扫描执行：{_display_bool(tick_metrics.get('ran_scan'))} "
+                f"通知确认/尝试：{_runtime_notify_text(tick_metrics)}"
             )
 
     shared_last_run = _json_file_payload(_dict(_dict(data.get("shared")).get("last_run")))
     if shared_last_run and not any(line.startswith("最新运行：") for line in lines):
         lines.append(
             "最新通知："
-            f"scan={_yes_no(_shared_last_run_ran_scan(shared_last_run))} "
-            f"notify={_runtime_notify_text(shared_last_run)}"
+            f"扫描执行：{_display_bool(_shared_last_run_ran_scan(shared_last_run))} "
+            f"通知确认/尝试：{_runtime_notify_text(shared_last_run)}"
         )
     elif latest_run and not any(line.startswith("最新运行：") for line in lines):
-        lines.append(f"最新运行：{_value(_run_id_from_path(latest_run.get('path')))} scan=- notify=-")
+        lines.append(f"最新运行：{_value(_run_id_from_path(latest_run.get('path')))} 扫描执行：- 通知确认/尝试：-")
 
     latest_scanned = _dict(data.get("latest_scanned_run"))
     if latest_scanned and latest_scanned is not latest_run:
@@ -1063,14 +1060,14 @@ def _render_runtime_status(data: dict[str, Any], tool_result: dict[str, Any]) ->
     if ledger_status is not None:
         lines.append(
             "账本："
-            f"{_value(ledger_status)} "
-            f"lots={_value(summary.get('ledger_position_lot_count'))} "
-            f"events={_value(summary.get('ledger_trade_event_count'))}"
+            f"{_display_status(ledger_status)} "
+            f"持仓批次：{_value(summary.get('ledger_position_lot_count'))} "
+            f"交易记录：{_value(summary.get('ledger_trade_event_count'))}"
         )
 
     projection_ok = summary.get("projection_verify_ok")
     if projection_ok is not None:
-        lines.append(f"Projection：{_yes_no(projection_ok)} mode={_value(summary.get('projection_verify_mode'))}")
+        lines.append(f"持仓核对：{'通过' if projection_ok is True else '未通过'}")
 
     if summary.get("service_upgrade_runtime_failed"):
         lines.extend(_runtime_service_upgrade_lines(data))
@@ -1078,15 +1075,15 @@ def _render_runtime_status(data: dict[str, Any], tool_result: dict[str, Any]) ->
     trade_intake = _dict(data.get("trade_intake"))
     intake_summary = _dict(trade_intake.get("summary"))
     if intake_summary:
-        lines.append(f"交易监听：{_value(intake_summary.get('listener_status'))}")
+        lines.append(f"交易监听：{_display_status(intake_summary.get('listener_status'))}")
 
     auto_close_lines = _runtime_auto_close_lines(data)
     lines.extend(auto_close_lines[:2])
 
     if isinstance(warnings, list) and warnings:
-        lines.append("异常：" + "；".join(str(item) for item in warnings[:3]))
+        lines.append(f"异常：{len(warnings)} 项，请查询健康检查了解详情。")
     elif summary.get("warning_count"):
-        lines.append(f"异常：{summary.get('warning_count')} 个 warning，详情用 健康检查 或 最近运行。")
+        lines.append(f"异常：{summary.get('warning_count')} 项，详情用 健康检查 或 最近运行。")
     else:
         lines.append("异常：无")
     return "\n".join(lines)
@@ -1159,21 +1156,19 @@ def _runtime_auto_close_lines(data: dict[str, Any]) -> list[str]:
         mode = str(maintenance.get("mode") or "").strip().lower()
         if mode in {"error", "failed"} or has_errors:
             applied = maintenance.get("applied_closed")
-            reason = maintenance.get("reason") or (errors[0] if has_errors else None)
-            parts = ["failed"]
+            parts = ["失败"]
             if receipt.get("status"):
-                parts.append(f"receipt={_value(receipt.get('status'))}")
+                parts.append(f"回执：{_display_status(receipt.get('status'))}")
             if applied is not None:
-                parts.append(f"closed={applied}")
-            if reason:
-                parts.append(f"reason={_value(reason)}")
-            out.append(f"auto-close {account}：" + "，".join(parts))
+                parts.append(f"已处理 {applied} 笔")
+            parts.append("请查询健康检查了解原因")
+            out.append(f"持仓维护 {account}：" + "，".join(parts))
             continue
         status = receipt.get("status") or maintenance.get("mode")
         if status:
             applied = maintenance.get("applied_closed")
-            suffix = f"，closed={applied}" if applied is not None else ""
-            out.append(f"auto-close {account}：{_value(status)}{suffix}")
+            suffix = f"，已处理 {applied} 笔" if applied is not None else ""
+            out.append(f"持仓维护 {account}：{_display_status(status)}{suffix}")
     return out
 
 
@@ -1238,6 +1233,24 @@ def _csv(value: Any) -> str:
     if isinstance(value, tuple):
         return ", ".join(str(item) for item in value) or "-"
     return _value(value)
+
+
+def _display_bool(value: Any) -> str:
+    return "是" if value is True else "否" if value is False else "待确认"
+
+
+def _display_status(value: Any) -> str:
+    return {
+        "ok": "正常", "ready": "可用", "healthy": "正常", "trusted": "已核实",
+        "degraded": "部分功能异常", "error": "异常", "failed": "失败",
+        "complete": "完整", "completed": "已完成", "partial": "不完整",
+        "confirmed": "已确认", "ledger_only": "仅账本记录，尚未核实",
+        "pending": "待确认", "unknown": "待确认", "unavailable": "不可用",
+        "running": "运行中", "listening": "监听中", "blocked": "已阻塞",
+        "stopped": "已停止", "disabled": "未启用",
+        "skipped": "未执行", "success": "已完成", "warn": "需核查",
+        "sent": "已发送", "applied": "已完成", "dry_run": "预览", "noop": "无变更",
+    }.get(str(value or ""), "待核实")
 
 
 def _yes_no(value: Any) -> str:

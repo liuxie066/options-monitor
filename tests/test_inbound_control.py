@@ -4177,7 +4177,7 @@ def test_inbound_renderer_summarizes_position_rows() -> None:
 
     assert "sy · open · 期权持仓：2 条" in text
     assert "0700.HK short call 510 exp 2026-05-28 open 2" in text
-    assert "数据源：OM 本地 SQLite position_lots" in text
+    assert "按 OM 账本计算。" in text
 
     all_accounts = render_inbound_text(
         intent=parse_bot_control_command("/positions"),
@@ -4273,11 +4273,11 @@ def test_inbound_renderer_summarizes_runtime_status() -> None:
         ),
     )
 
-    assert "OM 状态：degraded" in text
-    assert "最新运行：run-1 scan=yes notify=1/1" in text
-    assert "账本：ok lots=3 events=12" in text
-    assert "auto-close sy：sent，closed=1" in text
-    assert "异常：No symbols_notification.txt found." in text
+    assert "OM 状态：部分功能异常" in text
+    assert "最新运行：run-1 扫描执行：是 通知确认/尝试：1/1" in text
+    assert "账本：正常 持仓批次：3 交易记录：12" in text
+    assert "持仓维护 sy：已发送，已处理 1 笔" in text
+    assert "异常：1 项，请查询健康检查了解详情。" in text
 
 
 def test_inbound_renderer_runtime_status_uses_tool_ok_and_shared_last_run() -> None:
@@ -4311,8 +4311,8 @@ def test_inbound_renderer_runtime_status_uses_tool_ok_and_shared_last_run() -> N
         ),
     )
 
-    assert "OM 状态：ok" in text
-    assert "最新通知：scan=yes notify=2/2" in text
+    assert "OM 状态：正常" in text
+    assert "最新通知：扫描执行：是 通知确认/尝试：2/2" in text
     assert "unknown" not in text
     assert "异常：无" in text
 
@@ -4347,8 +4347,8 @@ def test_inbound_renderer_status_summary_prioritizes_auto_close_failure() -> Non
         ),
     )
 
-    assert "auto-close lx：failed，receipt=sent，closed=0，reason=missing_data_config" in text
-    assert "异常：Auto-close lx failed: missing_data_config." in text
+    assert "持仓维护 lx：失败，回执：已发送，已处理 0 笔，请查询健康检查了解原因" in text
+    assert "异常：1 项，请查询健康检查了解详情。" in text
 
 
 def test_inbound_renderer_shows_service_upgrade_failure_details() -> None:
@@ -4471,10 +4471,10 @@ def test_inbound_renderer_summarizes_runs_and_logs() -> None:
     )
 
     assert "最近运行：1/1 条" in runs_text
-    assert "run-1 success 2026-05-20T01:00:00+00:00 scan=yes sent=no accounts=sy reason=market_closed" in runs_text
+    assert "run-1 已完成 2026-05-20T01:00:00+00:00 扫描执行：是 通知发送：否 账户：sy" in runs_text
     assert "日志查询：1/1 个文件，kind=audit，lines=50" in logs_text
     assert "run：run-1" in logs_text
-    assert "audit exists=yes tail=2" in logs_text
+    assert "audit exists=是 tail=2" in logs_text
     assert '"phase"' not in logs_text
 
 
@@ -6333,3 +6333,19 @@ def test_failed_finalization_and_interrupt_keep_durable_claim(tmp_path, monkeypa
         assert not replay.ok and replay.error["code"] == "INBOUND_INCOMPLETE"
     assert effects == ["effect"]
     assert InboundAuditStore(request.audit_db).list_recent()[0]["execution_state"] == "processing"
+
+
+def test_inbound_renderer_keeps_schedule_intent_separate_from_delivery():
+    from src.application.bot.control.renderer import _render_runs
+    text = _render_runs({'selected_run': {'run_id': 'r1', 'sent': False,
+        'ran_scan': False, 'scheduler': {'should_run_scan': True, 'should_notify': True}}})
+    assert '通知：否' in text
+    assert '计划扫描：是' in text and '通知时段：是' in text
+    assert '通知确认/尝试' not in text
+
+
+@pytest.mark.parametrize('state,label', [('listening', '监听中'), ('blocked', '已阻塞')])
+def test_inbound_renderer_preserves_listener_states(state, label):
+    from src.application.bot.control.renderer import _render_runtime_status
+    text = _render_runtime_status({'trade_intake': {'summary': {'listener_status': state}}}, {'ok': True})
+    assert f'交易监听：{label}' in text

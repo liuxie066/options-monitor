@@ -79,7 +79,7 @@ def test_config_review_renders_boundaries_prices_and_distances(tmp_path: Path) -
     assert payload["strike_rejections"]["count"] is None
 
     markdown = result.markdown
-    assert markdown.index("**结论：观察**") < markdown.index("## 指标 A")
+    assert markdown.index("**结论：观察**") < markdown.index("## 行权价边界筛选")
     assert "该期无数据" in markdown
     assert "上一完整周的边界拒绝观测与数据覆盖" in markdown
     assert "距离定义：(现价 − 边界) ÷ 边界 × 100%" in markdown
@@ -165,7 +165,8 @@ def test_config_review_inherits_market_defaults_for_undeclared_fields(tmp_path: 
     assert "卖出看跌（启用，继承市场默认）" in result.markdown
     assert "DTE 7–60（继承）" in result.markdown
     assert "卖出看涨（停用，继承市场默认）" in result.markdown
-    assert "仅用于用户配置未声明字段的回退" in result.markdown
+    assert "仅用于用户配置未声明字段的回退" not in result.markdown
+    assert "继承市场默认" in result.markdown
 
 
 def test_config_review_marks_missing_market_file_as_data_gap(tmp_path: Path) -> None:
