@@ -3469,7 +3469,8 @@ def test_service_upgrade_coerces_release_entity_repo_root_to_current_symlink(mon
     assert out["repo_root_resolution"]["coerced"] is True
     assert current.resolve() == (releases / "1.0.1").resolve()
 
-def test_service_upgrade_cleanup_after_success_deletes_older_releases(tmp_path: Path) -> None:
+@pytest.mark.parametrize("restart_services", [False, True])
+def test_service_upgrade_cleanup_after_success_deletes_older_releases(tmp_path: Path, restart_services: bool) -> None:
     from src.application.service_upgrade import service_upgrade
 
     install = tmp_path / "opt" / "options-monitor"
@@ -3529,8 +3530,7 @@ def test_service_upgrade_cleanup_after_success_deletes_older_releases(tmp_path: 
         releases_root=releases,
         target_version="1.0.1",
         confirm=True,
-        restart_services=False,
-        cleanup_after_upgrade=True,
+        restart_services=restart_services,
         cleanup_keep_releases=2,
         run_cmd=_run_cmd,
     )
@@ -3539,6 +3539,11 @@ def test_service_upgrade_cleanup_after_success_deletes_older_releases(tmp_path: 
     assert out["symlink_switched"] is True
     assert current.resolve() == (releases / "1.0.1").resolve()
     cleanup = out["post_upgrade_cleanup"]
+    if not restart_services:
+        assert cleanup["status"] == "skipped"
+        assert cleanup["reason"] == "service_restart_required"
+        assert all(release.exists() for release in (v080, v090, v100, downloads))
+        return
     assert cleanup["status"] == "cleaned"
     assert {Path(item["path"]).name for item in cleanup["kept_releases"]} == {"1.0.1", "1.0.0"}
     assert (releases / "1.0.1").exists()
@@ -3548,6 +3553,66 @@ def test_service_upgrade_cleanup_after_success_deletes_older_releases(tmp_path: 
     assert not downloads.exists()
     status = json.loads((runtime / "upgrade_status.json").read_text(encoding="utf-8"))
     assert status["post_upgrade_cleanup"]["status"] == "cleaned"
+
+
+def test_update_default_cleanup_preserves_actual_rollback_and_runtime_data(transition_case):
+    case = transition_case()
+    legacy = case.releases / "0.9.0" / "output_shared"
+    legacy.mkdir()
+    (legacy / "state.json").write_text('{"keep": true}')
+    before = {p.name for p in case.releases.iterdir()}
+    preview = case.invoke(confirm=False)["data"]
+    assert preview["cleanup_after_upgrade"] is True
+    assert any("cleanup old releases" in op for op in preview["planned_operations"])
+    assert {p.name for p in case.releases.iterdir()} == before
+
+    result = case.invoke()["data"]
+    assert result["status"] == "upgraded"
+    cleanup = result["post_upgrade_cleanup"]
+    assert cleanup["ok"] is True
+    assert {Path(p).name for p in cleanup["deleted_paths"]} == {"1.0.0", "1.0.3"}
+    assert {p.name for p in case.releases.iterdir()} == {"0.9.0", "1.0.1", "1.0.2", "2.0.0"}
+    assert case.current.resolve() == case.releases / "1.0.2"
+    assert json.loads((legacy / "state.json").read_text()) == {"keep": True}
+    assert json.loads(case.status.read_text())["post_upgrade_cleanup"] == cleanup
+    rollback = case.invoke("rollback", "1.0.1")["data"]
+    assert rollback["ok"] is True
+    assert case.current.resolve() == case.releases / "1.0.1"
+
+
+def test_update_without_restart_preserves_older_running_release_across_upgrades(transition_case):
+    case = transition_case()
+    before = {p.name for p in case.releases.iterdir()}
+    preview = case.invoke(confirm=False, restart=False)["data"]
+    assert not any("cleanup old releases" in op for op in preview["planned_operations"])
+    for target in ("1.0.2", "1.0.3"):
+        result = case.invoke(target=target, restart=False)["data"]
+        assert result["status"] == "upgraded"
+        assert result["post_upgrade_cleanup"]["status"] == "skipped"
+        assert result["post_upgrade_cleanup"]["reason"] == "service_restart_required"
+        assert case.current.resolve() == case.releases / target
+        assert {p.name for p in case.releases.iterdir()} == before
+    assert not any(command[:2] == ["systemctl", "restart"] for command in case.commands)
+
+
+@pytest.mark.parametrize("failure", ["validate", "restart", "health"])
+def test_update_failed_transition_never_cleans_releases(monkeypatch, transition_case, failure):
+    from src.application import service_cleanup as cleanup
+
+    case = transition_case()
+    case.failure = failure
+    before = {p.name for p in case.releases.iterdir()}
+    calls = []
+
+    def forbidden(**kwargs):
+        calls.append(kwargs)
+        raise AssertionError("failed transition attempted cleanup")
+
+    monkeypatch.setattr(cleanup, "_service_cleanup_under_transition_lock", forbidden)
+    result = case.invoke()["data"]
+    assert result["ok"] is False
+    assert calls == []
+    assert {p.name for p in case.releases.iterdir()} == before
 
 @pytest.mark.parametrize("child_error", [False, True])
 def test_service_rollback_preserves_paused_timer_snapshot(
@@ -4979,7 +5044,8 @@ def test_update_handler_contends_with_real_application_owner(transition_case, ho
     case.status.write_text('{"status": "owner-sentinel"}\n')
     holder_target = "1.0.2" if holding_operation == "apply" else "1.0.0"
     contender_target = "1.0.3" if operation == "apply" else "0.9.0"
-    with _hold_transition(case, "build", holding_operation, holder_target) as future:
+    # Keep the separate contender fixtures available after the first transition.
+    with _hold_transition(case, "build", holding_operation, holder_target, keep_releases=6) as future:
         pid_identity = (case.pid.stat().st_dev, case.pid.stat().st_ino)
         pid_bytes = case.pid.read_bytes()
         _assert_busy_transition(case, operation, contender_target)
@@ -5116,15 +5182,15 @@ def test_update_cleanup_keeps_guard_without_new_compensation(monkeypatch, transi
                 "status": "fixture_cleanup", "changed": False, "kept_releases": ["1.0.1", "1.0.2"]}
 
     monkeypatch.setattr(cleanup, "_service_cleanup_under_transition_lock", clean)
+    data = case.invoke("apply", "1.0.2")["data"]
+    assert data["status"] == "upgraded" and data["changed"] is True
+    assert data["post_upgrade_cleanup"]["ok"] is False
     if failure.endswith("error"):
-        with pytest.raises(OSError) as raised:
-            case.invoke("apply", "1.0.2", cleanup=True)
-        assert raised.value is error
+        assert data["post_upgrade_cleanup"]["status"] == "cleanup_failed"
+        assert "fixture cleanup failure" in data["post_upgrade_cleanup"]["error"]
     else:
-        data = case.invoke("apply", "1.0.2", cleanup=True)["data"]
-        assert data["status"] == "upgraded" and data["changed"] is True
-        assert data["post_upgrade_cleanup"]["ok"] is False
         assert data["post_upgrade_cleanup"]["status"] == ("skipped" if failure == "failed_plan" else "fixture_cleanup")
+    assert json.loads(case.status.read_text())["post_upgrade_cleanup"] == data["post_upgrade_cleanup"]
     assert calls == ([False] if failure in {"plan_error", "failed_plan"} else [False, True])
     assert case.current.resolve() == case.releases / "1.0.2"
     assert case.child_requests == [] and not case.pid.exists()
@@ -5361,15 +5427,18 @@ def transition_case(monkeypatch, tmp_path):
         parser = argparse.ArgumentParser()
         add_service_update_commands(parser.add_subparsers(dest="command"))
 
-        def invoke(operation="apply", target="1.0.2", *, confirm=True, preserve=False, cleanup=False, repo_root=None):
+        def invoke(operation="apply", target="1.0.2", *, confirm=True, preserve=False, cleanup=False, repo_root=None, keep_releases=2, restart=True):
             argv = ["update", operation, "--repo-root", str(repo_root or current), "--runtime-root", str(runtime),
                     "--releases-root", str(releases)]
             if target is not None:
                 argv += ["--target-version" if operation == "apply" else "--to-version", target]
             if operation == "apply":
                 argv += ["--cache-root", str(root / "cache")]
+                argv += ["--cleanup-keep-releases", str(keep_releases)]
                 if cleanup:
                     argv += ["--cleanup-after-upgrade"]
+            if not restart:
+                argv.append("--no-restart-services")
             if confirm:
                 argv.append("--confirm")
             if preserve:
@@ -5513,7 +5582,7 @@ def test_update_transition_holds_guard_through_terminal_write(monkeypatch, trans
         writer(**kwargs)
 
     monkeypatch.setattr(upgrade, "write_upgrade_status", write)
-    with _hold_transition(case, "terminal", operation, "1.0.2" if operation == "apply" else "1.0.0") as future:
+    with _hold_transition(case, "terminal", operation, "1.0.2" if operation == "apply" else "1.0.0", keep_releases=6) as future:
         _assert_busy_transition(case, "apply", "1.0.3")
         _assert_busy_transition(case, "rollback", "0.9.0")
     result = future.result()["data"]
@@ -5550,7 +5619,7 @@ def test_update_transition_binds_baseline_after_acquiring_guard(
         try:
             assert arrived.wait(15)
             assert case.queries == [] and case.commands == []
-            assert case.invoke("apply", "1.0.2")["ok"] is True
+            assert case.invoke("apply", "1.0.2", keep_releases=6)["ok"] is True
             baseline = case.snapshot()
         finally:
             resume.set()

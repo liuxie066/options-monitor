@@ -332,6 +332,7 @@ def add_service_update_commands(subparsers: Any) -> None:
     update_apply.add_argument(
         "--cleanup-after-upgrade",
         action="store_true",
+        default=True,
         help="clean old releases after a fully successful confirmed upgrade",
     )
     update_apply.add_argument("--cleanup-keep-releases", type=int, default=2)

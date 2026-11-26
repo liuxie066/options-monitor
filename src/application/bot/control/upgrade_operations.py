@@ -245,10 +245,14 @@ def _receipt_target_from_operation(operation: dict[str, Any], payload: dict[str,
 
 def _freeze_preview_target(payload: dict[str, Any], preview: dict[str, Any]) -> None:
     args = payload.setdefault("arguments", {})
-    if not isinstance(args, dict) or str(args.get("target_version") or "").strip():
+    if not isinstance(args, dict):
         return
     upgrade = preview.get("upgrade") if isinstance(preview, dict) else {}
     if not isinstance(upgrade, dict):
+        return
+    args["cleanup_after_upgrade"] = bool(upgrade.get("cleanup_after_upgrade", False))
+    args["cleanup_keep_releases"] = int(upgrade.get("cleanup_keep_releases") or 2)
+    if str(args.get("target_version") or "").strip():
         return
     target = str(upgrade.get("target_version") or "").strip()
     if target:
@@ -283,7 +287,10 @@ def _preview_can_confirm(preview: dict[str, Any]) -> bool:
 
 
 def _apply_operation(payload: dict[str, Any]) -> dict[str, Any]:
-    args = _upgrade_defaults(dict(payload.get("arguments") or {}))
+    arguments = dict(payload.get("arguments") or {})
+    # Old pending operations did not freeze cleanup; preserve their opt-in contract.
+    arguments.setdefault("cleanup_after_upgrade", False)
+    args = _upgrade_defaults(arguments)
     return service_upgrade(confirm=True, **args)
 
 
@@ -845,7 +852,7 @@ def _upgrade_defaults(arguments: dict[str, Any]) -> dict[str, Any]:
         "preserve_activation_state": bool(
             arguments.get("preserve_activation_state", False)
         ),
-        "cleanup_after_upgrade": bool(arguments.get("cleanup_after_upgrade", False)),
+        "cleanup_after_upgrade": bool(arguments.get("cleanup_after_upgrade", True)),
         "cleanup_keep_releases": int(arguments.get("cleanup_keep_releases") or 2),
     }
 
@@ -910,7 +917,7 @@ def _preview_upgrade(args: dict[str, Any]) -> dict[str, Any]:
         "preserve_activation_state": bool(
             args.get("preserve_activation_state", False)
         ),
-        "cleanup_after_upgrade": bool(args.get("cleanup_after_upgrade", False)),
+        "cleanup_after_upgrade": bool(args.get("cleanup_after_upgrade", True)),
         "cleanup_keep_releases": int(args.get("cleanup_keep_releases") or 2),
         "version_check": check,
         "changed": False,
@@ -953,7 +960,7 @@ def _preview_upgrade(args: dict[str, Any]) -> dict[str, Any]:
         "restart long-running services" if bool(args.get("restart_services", True)) else "skip service restart",
         "after success, retain current shared venv plus runtime.upgrade_keep_venvs recent others (default 2), protecting retained release references",
     ]
-    if bool(args.get("cleanup_after_upgrade", False)):
+    if bool(args.get("cleanup_after_upgrade", True)) and bool(args.get("restart_services", True)):
         planned.append(f"cleanup old releases after successful upgrade, keep {int(args.get('cleanup_keep_releases') or 2)} releases")
     return {
         **base,
@@ -1009,9 +1016,7 @@ def render_upgrade_response(
         planned = data.get("planned_operations")
         if isinstance(planned, list) and planned:
             lines.append("将执行：")
-            lines.extend(f"- {item}" for item in planned[:6])
-            if len(planned) > 6:
-                lines.append(f"... 还有 {len(planned) - 6} 项")
+            lines.extend(f"- {item}" for item in planned)
         if data.get("warnings"):
             lines.append("警告：" + "；".join(str(item) for item in data.get("warnings")[:3]))
         lines.extend(

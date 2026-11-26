@@ -1374,6 +1374,7 @@ def test_top_level_update_commands_delegate_to_service_upgrade(monkeypatch, caps
     assert calls[2][1]["confirm"] is False
     assert calls[2][1]["restart_services"] is False
     assert calls[2][1]["preserve_activation_state"] is True
+    assert calls[2][1]["cleanup_after_upgrade"] is True
     assert calls[3][0] == "rollback"
     assert calls[3][1]["to_version"] == "1.2.69"
     assert calls[3][1]["confirm"] is False
