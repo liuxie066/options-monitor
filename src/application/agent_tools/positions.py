@@ -69,6 +69,8 @@ _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
     "fact_fields": [
         "schema_version",
         "metric_semantics",
+        "basis",
+        "terminated_option_net_income",
         "period_option_net_cashflow",
         "period.kind",
         "period.start_date",
@@ -96,6 +98,8 @@ _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
         "period_option_net_cashflow.missing",
         "period_option_net_cashflow.by_currency.*.*.missing",
         "period_option_net_cashflow.cny_total.missing",
+        "terminated_option_net_income.by_currency.*.missing",
+        "terminated_option_net_income.cny_total.missing",
         "quality.missing",
         "quality.diagnostics",
         "option_net_cashflow.by_currency.*.*.missing",
@@ -113,6 +117,8 @@ _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
     "model_preview_fields": [
         "schema_version",
         "metric_semantics",
+        "basis",
+        "terminated_option_net_income",
         "period_option_net_cashflow",
         "period",
         "scope",
@@ -126,6 +132,8 @@ _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
     "model_value_fields": [
         "schema_version",
         "metric_semantics",
+        "basis",
+        "terminated_option_net_income",
         "period_option_net_cashflow",
         "period",
         "scope",
@@ -141,6 +149,8 @@ _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
         "period_option_net_cashflow.missing",
         "period_option_net_cashflow.by_currency.*.*.missing",
         "period_option_net_cashflow.cny_total.missing",
+        "terminated_option_net_income.by_currency.*.missing",
+        "terminated_option_net_income.cny_total.missing",
         "quality.missing",
         "quality.diagnostics",
         "option_net_cashflow.cny_total.missing",
@@ -1030,30 +1040,37 @@ def _normalize_option_performance_bot_input(payload: Mapping[str, Any]) -> dict[
     return normalized
 
 
+_PERFORMANCE_BASIS_INPUT = {
+    "type": "string", "enum": ["terminated", "cashflow", "opening_cohort"],
+    "description": "Default terminated income; cashflow for reconciliation; opening_cohort for batch analysis.",
+}
+
+
 _PERFORMANCE_READ_INPUT = {
-    "view": {"type": "string", "enum": ["summary", "breakdowns", "rows"], "description": "summary preserves metrics; breakdowns/rows read existing details without recomputation"},
+    "basis": _PERFORMANCE_BASIS_INPUT,
+    "view": {"type": "string", "enum": ["summary", "breakdowns", "rows"], "description": "Summary or existing breakdown/detail pages"},
     "group_by": {"type": "string", "enum": ["opening_years", "opening_months", "accounts", "currencies", "leg_types", "attribution_strategies", "parent_universes", "symbols"], "description": "Existing breakdown dimension; default symbols"},
-    "symbol": {"type": "string", "minLength": 1, "maxLength": 128, "description": "Select one existing symbol breakdown or detail rows"},
+    "symbol": {"type": "string", "minLength": 1, "maxLength": 128, "description": "Symbol for breakdowns or rows"},
     "limit": {"type": "integer", "minimum": 1, "maximum": 40},
-    "cursor": {"type": "string", "minLength": 1, "maxLength": 8192, "description": "Continue with unchanged filters; ledger changes invalidate the cursor"},
+    "cursor": {"type": "string", "minLength": 1, "maxLength": 8192, "description": "Keep filters; ledger changes invalidate cursors"},
 }
 
 
 OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
     name="option_performance_report",
-    catalog_summary="读取期间期权现金流、开仓批次收益、实际日均占用与批次明细。",
+    catalog_summary="默认查询本月已终结期权净收益；对账现金流和开仓批次分析需明确选择。",
     description=(
-        "Read-only MTD, YTD, natural-month, or natural-year option performance from the canonical ledger. Reports native-currency "
-        "period option net cash flow and separate opening-cohort cash results, each with historical CNY evidence; "
-        "sell-option and buy-option win rates, hold-to-expiry returns, and independent actual daily unsettled "
-        "principal including carry-in positions. Returns, wins, rows and breakdowns keep opening-cohort semantics. "
-        "Never substitute cohort cash for unavailable period cash. Daily principal is not the return denominator. Stock trades, "
-        "assignment settlement cash, PnL, read-time FX conversion, and quote refresh are outside this report. "
-        "actual_fee_missing and fee_estimated mean actual fee evidence is unconfirmed in this ledger snapshot, "
-        "not a synchronization state; do not substitute estimated fees for actual amounts. Only independent current evidence "
-        "can establish pending synchronization; preserve failed or overdue evidence. A hash change alone cannot prove "
-        "rebuild loss, who rebuilt, or that rebuild/backfill is required. freshness.as_of is the statistical cutoff, "
-        "not fee synchronization time. Explain unavailable amounts only for the affected metric and currency."
+        "Read-only; default mtd/terminated: 本月已终结期权净收益. Select ended shares by actual close, expiry, "
+        "assignment or exercise time, including carry-in and partial closes. Include allocated opening cash "
+        "and actual option fees; exclude stock principal, fees and PnL. Rows, groups, wins and returns use "
+        "this basis. cashflow is reconciliation (summary only); opening_cohort is explicit batch analysis. "
+        "Never substitute either cash metric for income. Cohort open returns assume expiry; daily principal "
+        "includes carry-in and is not the return denominator. CNY uses persisted event FX, never live quotes/FX. "
+        "actual_fee_missing/fee_estimated mean unconfirmed actual fees, not sync status; never estimate net amounts. "
+        "Only independent current evidence proves pending sync; preserve failed or overdue evidence. A hash change "
+        "prove neither rebuild loss/actor nor a need to rebuild/backfill. freshness.as_of is statistical cutoff, "
+        "not sync time. Explain gaps only for affected metrics/currencies."
+
     ),
     requires=("runtime_config", "sqlite_data_config"),
     capabilities=("option_performance", "income_report", "option_positions", "read_only"),
@@ -1095,6 +1112,7 @@ OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
     examples=(
         {"input": {"period": "ytd", "as_of_date": "2026-07-17"}},
         {"input": {"period": "mtd", "include_rows": True}},
+        {"input": {"period": "mtd", "basis": "cashflow"}},
     ),
     output_contract=_OPTION_PERFORMANCE_OUTPUT_CONTRACT,
     output_contract_resolver=_option_performance_output_contract,
@@ -1105,7 +1123,7 @@ OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
         "period",
         "as_of_date",
         "month",
-        "year", "view", "group_by", "symbol", "limit", "cursor",
+        "year", "basis", "view", "group_by", "symbol", "limit", "cursor",
     ),
     bot_input_schema={
         "type": "object",

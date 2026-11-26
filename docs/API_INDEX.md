@@ -98,8 +98,10 @@
 | Short Put 向下移仓、roll-down、两腿现金估算 | `src/application/short_put_roll.py::short_put_roll_candidates`；纯政策 `plugins/position-advice/src/om_position_advice_plugin/short_put_roll.py`；费用 `domain/domain/fee_calc.py` | Tool `short_put_roll_candidates` 与 `om position-advice roll-down` 共享编排及现有 Position Advice 插件启用边界；单账户、单旧 lot、等张数、同标的降 strike 且新 put 严格价外。请求必填最大新到期日，无默认值；旧仓价外幅度 >5% 时不搜索。政策持有两腿扣费现金、收益率、准入与排序；CLI 只展示。结果区分未搜索、完整零候选和证据缺口；仅行情读取与独立请求报告，不下单、不写账本、不通知。 | [移仓合同](CLOSE_ADVICE_CONTRACT.md#short-put-向下移仓主动查询)；[Tool 入口](TOOL_REFERENCE.md#short-put-向下移仓)；`tests/test_short_put_roll_cli.py` |
 
 期间现金流由 `domain/domain/performance/period_cashflow.py::reduce_period_option_cashflow` 唯一归约，
-经上述 performance owner 发布 `period_option_net_cashflow`；`option_net_cashflow`、rows/breakdowns、
-收益率和胜率继续按开仓批次统计。报告 schema/口径由 `src/application/performance/service.py` 声明。
+经上述 performance owner 在 `basis=cashflow` 对账查询发布 `period_option_net_cashflow`。
+公共查询默认 `basis=terminated`，按终结时点选份额，发布 `terminated_option_net_income`；
+rows/breakdowns、收益率和胜率使用同一批份额。`basis=opening_cohort` 保留开仓批次分析。
+报告 v4 schema/口径由 `src/application/performance/service.py` 声明。
 离线入口 `domain/domain/performance/offline.py::calculate_option_performance` 复用同一归约器，
 `cashflow_input_digest` 绑定输入内容；独立费用类型由 `domain/domain/ledger/cash_facts.py::OptionFeeCashEvent`
 拥有。输入、费用更正及历史可见性边界见[离线合同](OPTION_CASHFLOW_OFFLINE_CONTRACT.md)。

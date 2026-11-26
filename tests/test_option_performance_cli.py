@@ -32,7 +32,7 @@ def test_report_cli_uses_same_request_payload(monkeypatch: pytest.MonkeyPatch) -
 
     assert result["daily_occupied_capital"]["by_currency"]["USD"]["amount"] == 5000
     assert result == _canonical_report()
-    assert result["schema_version"] == "option_performance.report.v3"
+    assert result["schema_version"] == "option_performance.report.v4"
     assert captured == {
         "config_key": "us",
         "config_path": None,
@@ -40,6 +40,7 @@ def test_report_cli_uses_same_request_payload(monkeypatch: pytest.MonkeyPatch) -
         "account": "LX",
         "broker": None,
         "period": "ytd",
+        "basis": "terminated",
         "as_of_date": "2026-09-02",
         "month": None,
         "year": None,

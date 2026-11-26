@@ -108,7 +108,8 @@ def _fixture(tmp_path: Path, *, additional_gap: bool = False, duplicate_source: 
 
 def _report(repo):
     period = normalize_performance_period({"period": "month", "month": "2025-09"}, report_now_ms=AT + 40 * 86400000)
-    return build_option_period_performance(repo, period=period, config_key="hk", configured_accounts=("qa", "qb"), account="qa", include_rows=True)
+    return {basis: build_option_period_performance(repo, period=period, config_key="hk", configured_accounts=("qa", "qb"), account="qa", include_rows=True, basis=basis)
+            for basis in ("cashflow", "opening_cohort")}
 
 
 def _apply(repo, request, root):
@@ -122,7 +123,7 @@ def test_qa_actual_expense_has_manual_source_and_repairs_real_metrics_without_ex
     before = _events(repo.db_path)
     other_lots = [row for row in _business(repo.db_path, "position_lots") if row[-1] == "qb"]
     old_report = _report(repo)
-    assert "actual_fee_missing" in old_report["period_option_net_cashflow"]["missing"]
+    assert "actual_fee_missing" in old_report["cashflow"]["period_option_net_cashflow"]["missing"]
     forbidden = {"provider": 0, "fx_cache": 0}
     def forbid(kind):
         def denied(*args, **kwargs):
@@ -154,10 +155,10 @@ def test_qa_actual_expense_has_manual_source_and_repairs_real_metrics_without_ex
         fee_amounts.extend(f.amount for f in facts if f.fact_kind == "option_fee_cash")
     assert sum(fee_amounts) == Decimal("-6.4")
     new_report = _report(repo)
-    assert new_report["period_option_net_cashflow"]["missing"] == []
-    assert new_report["period_option_net_cashflow"]["fact_count"] == old_report["period_option_net_cashflow"]["fact_count"]
-    assert new_report["period_option_net_cashflow"]["by_currency"]["HKD"]["total"]["amount"] == pytest.approx(350.4)
-    assert all("fee_estimated" not in row["missing"] for row in new_report["rows"])
+    assert new_report["cashflow"]["period_option_net_cashflow"]["missing"] == []
+    assert new_report["cashflow"]["period_option_net_cashflow"]["fact_count"] == old_report["cashflow"]["period_option_net_cashflow"]["fact_count"]
+    assert new_report["cashflow"]["period_option_net_cashflow"]["by_currency"]["HKD"]["total"]["amount"] == pytest.approx(350.4)
+    assert all("fee_estimated" not in row["missing"] for row in new_report["opening_cohort"]["rows"])
     assert forbidden == {"provider": 0, "fx_cache": 0}
 
 
@@ -165,8 +166,8 @@ def test_qa_other_fee_gap_is_not_hidden(tmp_path):
     repo, request = _fixture(tmp_path, additional_gap=True)
     _apply(repo, request, tmp_path)
     report = _report(repo)
-    assert "actual_fee_missing" in report["period_option_net_cashflow"]["missing"]
-    gaps = [row for row in report["rows"] if "fee_estimated" in row["missing"]]
+    assert "actual_fee_missing" in report["cashflow"]["period_option_net_cashflow"]["missing"]
+    gaps = [row for row in report["opening_cohort"]["rows"] if "fee_estimated" in row["missing"]]
     assert len(gaps) == 1 and gaps[0]["open_event_id"] == "qa-other-gap"
 
 

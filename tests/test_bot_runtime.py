@@ -120,7 +120,7 @@ def test_duplicate_freeform_message_reuses_audited_response(monkeypatch, tmp_pat
 
 @pytest.mark.parametrize("status,fee_mode", [("observed", "actual"), ("partial", "actual"), ("estimated", "simulated")])
 def test_option_performance_renderer_separates_period_cash_and_cohort(status, fee_mode) -> None:
-    from test_option_performance_agent_tool import _report
+    from test_option_performance_agent_tool import _legacy_report as _report
 
     data = _report()
     data["period_option_net_cashflow"].update(
@@ -294,7 +294,7 @@ def test_option_performance_daily_capital_never_falls_back_to_return_denominator
 @pytest.mark.parametrize("reason", ["actual_fee_missing", "fee_estimated", "fee_missing", "exercise_fee_missing"])
 def test_performance_fee_uncertainty_is_scoped_and_does_not_invent_sync_state(reason):
     from copy import deepcopy
-    from test_option_performance_agent_tool import _report
+    from test_option_performance_agent_tool import _legacy_report as _report
 
     data = _report()
     data["quality"].update(status="partial", missing=[reason, "terminal_evidence_missing", "cash_conversion_missing"])
@@ -325,7 +325,7 @@ def test_performance_fee_uncertainty_is_scoped_and_does_not_invent_sync_state(re
 
 @pytest.mark.parametrize("reason", [None, "cash_conversion_missing", "terminal_evidence_missing"])
 def test_performance_renderer_does_not_turn_other_or_absent_gaps_into_fee_pending(reason):
-    from test_option_performance_agent_tool import _report
+    from test_option_performance_agent_tool import _legacy_report as _report
 
     data = _report()
     status = "partial" if reason else "observed"
@@ -345,7 +345,7 @@ def test_performance_renderer_does_not_turn_other_or_absent_gaps_into_fee_pendin
 
 
 def test_performance_cny_fee_gap_does_not_claim_missing_conversion():
-    from test_option_performance_agent_tool import _report
+    from test_option_performance_agent_tool import _legacy_report as _report
     from test_performance_period_cashflow import _conversion, _event, _reduce
     from src.application.performance.service import _json_value
 

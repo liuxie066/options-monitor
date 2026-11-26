@@ -145,7 +145,7 @@ def test_authorized_account_wide_performance_keeps_real_two_market_reducer(monke
                         lambda *args, **kwargs: (tmp_path / "fixture-data.json", object()))
     monkeypatch.setattr(ledger_api, "trade_event_log", lambda repo: [event.to_dict() for event in (us, hk)])
     event = _observation(fixed, "option_performance_report", {
-        "config_key": "us", "account": "lx", "period": "month", "month": "2026-09"}, mode)
+        "config_key": "us", "account": "lx", "period": "month", "month": "2026-09", "basis": "cashflow"}, mode)
     assert event["ok"], event
     cash = event["data"]["period_option_net_cashflow"]["by_currency"]
     assert {currency: row["total"]["amount"] for currency, row in cash.items()} == {"HKD": 200.0, "USD": 200.0}

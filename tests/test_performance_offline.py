@@ -62,9 +62,11 @@ def test_offline_and_live_share_period_and_legacy_metrics(broker):
               event('sy', account='sy', at='2026-09-03')]
     offline = calculate_option_performance(events, period=period(), accounts=[' LX '], broker=broker)
     live = build_option_period_performance(Repo(events), period=period(), config_key='us',
-        configured_accounts=['lx', 'sy'], account='lx', broker=broker)
+        configured_accounts=['lx', 'sy'], account='lx', broker=broker, basis='opening_cohort')
     assert offline.bundle['period_option_net_cashflow']['by_currency']['USD']['total']['amount'] == -300
-    assert live['period_option_net_cashflow']['by_currency']['USD']['total']['amount'] == -300
+    cash = build_option_period_performance(Repo(events), period=period(), config_key='us',
+        configured_accounts=['lx', 'sy'], account='lx', broker=broker, basis='cashflow')
+    assert cash['period_option_net_cashflow']['by_currency']['USD']['total']['amount'] == -300
     for key in ('option_net_cashflow', 'option_return', 'sell_option_win_rate', 'buy_option_win_rate'):
         assert json.loads(json.dumps(offline.bundle[key], default=float)) == live[key]
     assert offline.bundle['cashflow_source']['visibility'] == 'corrected_snapshot'

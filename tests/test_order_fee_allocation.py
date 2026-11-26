@@ -82,8 +82,9 @@ def _apply(repo, request, tmp_path):
 def _report(repo):
     period = PeriodWindow("month", "UTC", "2026-05-01", "2026-05-31", AT - 86400000, AT + 86400000,
                           AT - 86400000, AT + 86400000 - 1, "complete")
-    return build_option_period_performance(repo, period=period, config_key="us",
-        configured_accounts=["demo", "other"], account="demo", include_rows=True)
+    return {basis: build_option_period_performance(repo, period=period, config_key="us",
+        configured_accounts=["demo", "other"], account="demo", include_rows=True, basis=basis)
+            for basis in ("cashflow", "opening_cohort")}
 
 
 def test_preview_apply_has_durable_provenance_conservation_backup_and_performance(fixture, tmp_path):
@@ -92,8 +93,8 @@ def test_preview_apply_has_durable_provenance_conservation_backup_and_performanc
     with sqlite3.connect(repo.db_path) as conn:
         other_lot = conn.execute("SELECT * FROM position_lots WHERE lot_id='lot-other'").fetchone()
     report_before = _report(repo)
-    assert report_before["period_option_net_cashflow"]["by_currency"]["USD"]["total"]["missing"] == ["actual_fee_missing"]
-    assert "fee_estimated" in report_before["option_net_cashflow"]["by_currency"]["USD"]["total"]["missing"]
+    assert report_before["cashflow"]["period_option_net_cashflow"]["by_currency"]["USD"]["total"]["missing"] == ["actual_fee_missing"]
+    assert "fee_estimated" in report_before["opening_cohort"]["option_net_cashflow"]["by_currency"]["USD"]["total"]["missing"]
     preview = allocation.prepare_confirmed_order_fee_allocation(repo, request=request)
     assert preview["broker_leg_fees_observed"] is False
     assert preview["allocations"] == [{"event_id": "close", "amount": "4"}, {"event_id": "new", "amount": "4"}]
@@ -128,11 +129,11 @@ def test_preview_apply_has_durable_provenance_conservation_backup_and_performanc
     with sqlite3.connect(repo.db_path) as conn:
         assert conn.execute("SELECT count(*) FROM broker_fee_enrichment_audit").fetchone()[0] == 2
     report_after = _report(repo)
-    assert report_after["period_option_net_cashflow"]["by_currency"]["USD"]["total"]["amount"] == 591
-    assert report_after["option_net_cashflow"]["by_currency"]["USD"]["total"]["missing"] == []
-    assert "actual_fee_missing" not in report_after["period_option_net_cashflow"]["missing"]
+    assert report_after["cashflow"]["period_option_net_cashflow"]["by_currency"]["USD"]["total"]["amount"] == 591
+    assert report_after["opening_cohort"]["option_net_cashflow"]["by_currency"]["USD"]["total"]["missing"] == []
+    assert "actual_fee_missing" not in report_after["cashflow"]["period_option_net_cashflow"]["missing"]
     # Only the native fee gap is repaired; lack of historical FX remains visible.
-    assert report_after["period_option_net_cashflow"]["cny_total"]["status"] == "partial"
+    assert report_after["cashflow"]["period_option_net_cashflow"]["cny_total"]["status"] == "partial"
     repeated = allocation.apply_confirmed_order_fee_allocation(repo, request=request,
         expected_input_hash=preview["input_hash"], backup_dir=tmp_path / "backup")
     assert repeated["mode"] == "no_op" and repeated["write_applied"] is False
@@ -378,8 +379,8 @@ def test_unrelated_missing_fee_stays_missing(fixture, tmp_path):
     run_position_projection_forced_full(repo)
     assert _apply(repo, request, tmp_path)["mode"] == "committed"
     report = _report(repo)
-    assert "actual_fee_missing" in report["period_option_net_cashflow"]["missing"]
-    assert any(row["open_event_id"] == "missing" and row["status"] == "partial" for row in report["rows"])
+    assert "actual_fee_missing" in report["cashflow"]["period_option_net_cashflow"]["missing"]
+    assert any(row["open_event_id"] == "missing" and row["status"] == "partial" for row in report["opening_cohort"]["rows"])
 
 
 def test_backup_failure_and_cancellation_never_change_events(fixture, tmp_path, monkeypatch):

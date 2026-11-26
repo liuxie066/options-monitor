@@ -20,7 +20,7 @@ from domain.domain.performance.weighted_reducer import (
 from src.application.ledger import api as ledger_api
 
 
-REPORT_SCHEMA_VERSION = "option_performance.report.v3"
+REPORT_SCHEMA_VERSION = "option_performance.report.v4"
 METRIC_SEMANTICS = {
     "period_option_net_cashflow": "cash_event_effective_time",
     "option_net_cashflow": "opening_cohort",
@@ -58,6 +58,7 @@ def build_option_period_performance(
     account: str | None = None,
     broker: str | None = None,
     include_rows: bool = False,
+    basis: str = "terminated",
 ) -> dict[str, Any]:
     authority_accounts = tuple(
         sorted(
@@ -105,6 +106,7 @@ def build_option_period_performance(
             period=period,
             accounts=selected_accounts,
             broker=broker_scope,
+            basis=basis,
         )
     except (PerformanceScopeError, TypeError, ValueError) as exc:
         raise OptionPerformanceReadError("ledger_tuple_invalid") from exc
@@ -124,6 +126,7 @@ def build_option_period_performance(
         brokers=tuple(sorted(observed_brokers)),
         ledger_input_hash=ledger_input_hash,
         include_rows=include_rows,
+        basis=basis,
     )
 
 
@@ -174,6 +177,7 @@ def _serialize_report(
     brokers: tuple[str, ...],
     ledger_input_hash: str,
     include_rows: bool,
+    basis: str,
 ) -> dict[str, Any]:
     period = reduction.period
     bundle = reduction.bundle
@@ -183,7 +187,8 @@ def _serialize_report(
     ).isoformat(timespec="milliseconds")
     result: dict[str, Any] = {
         "schema_version": REPORT_SCHEMA_VERSION,
-        "metric_semantics": _json_value(METRIC_SEMANTICS),
+        "basis": basis,
+        "metric_semantics": _metric_semantics(basis),
         "period": {
             "kind": period.kind,
             "start_date": period.requested_start_date,
@@ -210,13 +215,7 @@ def _serialize_report(
             "status": "current" if period.is_current else "historical",
             "as_of": freshness_as_of,
         },
-        "period_option_net_cashflow": _json_value(bundle["period_option_net_cashflow"]),
-        "option_net_cashflow": _json_value(bundle["option_net_cashflow"]),
-        "sell_option_win_rate": _json_value(bundle["sell_option_win_rate"]),
-        "buy_option_win_rate": _json_value(bundle["buy_option_win_rate"]),
-        "option_return": _json_value(bundle["option_return"]),
-        "daily_occupied_capital": _json_value(bundle["daily_occupied_capital"]),
-        "breakdowns": {
+        "breakdowns": {} if basis == "cashflow" else {
             name: _json_value(reduction.breakdowns.get(name, ()))
             for name in (
                 "opening_years",
@@ -238,13 +237,46 @@ def _serialize_report(
             "ledger_input_hash": ledger_input_hash,
         },
     }
+    if basis == "cashflow":
+        result["period_option_net_cashflow"] = _json_value(bundle["period_option_net_cashflow"])
+    else:
+        for name in ("option_net_cashflow", "sell_option_win_rate", "buy_option_win_rate",
+                     "option_return", "daily_occupied_capital"):
+            result[name] = _json_value(bundle[name])
     if include_rows:
         result["rows"] = [
             _fact_payload(item)
             for item in reduction.facts
             if item.state != "failed"
         ]
+    if basis == "terminated":
+        result["terminated_option_net_income"] = _income_payload(result.pop("option_net_cashflow"))
+        for rows in result["breakdowns"].values():
+            for row in rows:
+                row["terminated_option_net_income"] = _income_payload(row.pop("option_net_cashflow"))
+        for row in result.get("rows", []):
+            row["terminated_option_net_income"] = row.pop("option_net_cashflow")
     return result
+
+
+def _income_payload(cashflow: dict[str, Any]) -> dict[str, Any]:
+    # Closed-share income has no open/terminated split.
+    return {**cashflow, "by_currency": {currency: parts["total"]
+                                       for currency, parts in cashflow["by_currency"].items()}}
+
+
+def _metric_semantics(basis: str) -> dict[str, Any]:
+    if basis == "cashflow":
+        return {"period_option_net_cashflow": "cash_event_effective_time"}
+    if basis == "opening_cohort":
+        return _json_value({key: value for key, value in METRIC_SEMANTICS.items() if key != "period_option_net_cashflow"})
+    return {
+        "terminated_option_net_income": "terminal_event_time",
+        "rows": "terminal_event_time", "breakdowns": "terminal_event_time",
+        "option_return": {"selection": "terminal_event_time", "numerator": "terminated_option_net_income"},
+        "sell_option_win_rate": "terminal_event_time", "buy_option_win_rate": "terminal_event_time",
+        "daily_occupied_capital": "period_overlap_including_carry_in",
+    }
 
 
 def _fact_payload(fact: WeightedOptionFact) -> dict[str, Any]:
