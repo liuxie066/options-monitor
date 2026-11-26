@@ -112,7 +112,8 @@ def test_system_alert_is_deduped_and_recovers_once(monkeypatch, tmp_path: Path) 
     assert system_alerts.report_system_failure(**{**failure, "run_id": "run-2"}) == "suppressed"
     assert len(sends) == 1
     assert sends[0]["target"] == "fixture-target"
-    assert "run-1" in sends[0]["message"]
+    assert "run-1" not in sends[0]["message"]
+    assert "账户｜lx" in sends[0]["message"]
     path = tmp_path / "output_shared" / "state" / "system_alerts.json"
     state = json.loads(path.read_text(encoding="utf-8"))
     incident = next(iter(state.values()))
@@ -428,7 +429,7 @@ def test_tick_failure_records_run_and_alerts_once(monkeypatch, tmp_path: Path) -
             preflight_config_fn=None, environ={},
         ) == 78
     assert len(sends) == 1
-    assert "TICK_EXEC_FAILED" in sends[0]["message"]
+    assert "本轮扫描失败，暂无最新结果" in sends[0]["message"]
     events = list((tmp_path / "output_runs").glob("*/state/audit_events.jsonl"))
     assert len(events) == 2
     event = json.loads(events[0].read_text(encoding="utf-8").splitlines()[0])
@@ -494,7 +495,8 @@ def test_auth_terminal_service_failure_alerts_once_with_reason_code(
             config_path=str(config_path), runtime_root=tmp_path,
         ) == 0
     assert len(sends) == 1
-    assert reason_code in sends[0]["message"]
+    assert reason_code not in sends[0]["message"]
+    assert {"OPEND_NEEDS_PHONE_VERIFY": "手机验证", "OPEND_NEEDS_PIC_VERIFY": "图片验证", "OPEND_LOGIN_INVALID": "重新登录"}[reason_code] in sends[0]["message"]
 
 
 def test_trade_intake_heartbeat_stale_and_terminal_incidents_recover_once(monkeypatch, tmp_path: Path) -> None:
@@ -516,7 +518,7 @@ def test_trade_intake_heartbeat_stale_and_terminal_incidents_recover_once(monkey
     assert service_failure_alert.check_trade_intake_heartbeat(**args, unit_active_fn=lambda _unit: True) == 0
     assert service_failure_alert.check_trade_intake_heartbeat(**args, unit_active_fn=lambda _unit: True) == 0
     assert len(sends) == 1
-    assert "TRADE_INTAKE_HEARTBEAT_STALE" in sends[0]["message"]
+    assert "成交监听长时间未更新" in sends[0]["message"]
     terminal = dict(base=tmp_path, config=_config(), unit=args["unit"], market="us", account="lx",
                     failure_code="SERVICE_TERMINAL_FAILURE", stage="unit_failed")
     assert system_alerts.report_system_failure(**terminal, run_id="run-1", rc=78,
@@ -608,7 +610,7 @@ def test_trade_intake_heartbeat_reads_the_status_vocabulary(monkeypatch, tmp_pat
     assert service_failure_alert.check_trade_intake_heartbeat(**args, unit_active_fn=lambda _unit: True) == 0
     assert len(sends) == expected_sends, status_label
     if expected_sends:
-        assert "TRADE_INTAKE_HEARTBEAT_STALE" in sends[0]["message"]
+        assert "成交监听长时间未更新" in sends[0]["message"]
 
 
 def test_trade_intake_heartbeat_rejects_a_future_heartbeat(monkeypatch, tmp_path: Path) -> None:
@@ -639,7 +641,7 @@ def test_trade_intake_heartbeat_rejects_a_future_heartbeat(monkeypatch, tmp_path
                 config_path=str(config_path), runtime_root=tmp_path, now=now)
     assert service_failure_alert.check_trade_intake_heartbeat(**args, unit_active_fn=lambda _unit: True) == 0
     assert len(sends) == 1
-    assert "TRADE_INTAKE_HEARTBEAT_STALE" in sends[0]["message"]
+    assert "成交监听长时间未更新" in sends[0]["message"]
 
 
 def test_trade_intake_heartbeat_window_clears_measured_worst_case_yet_still_alerts(monkeypatch, tmp_path: Path) -> None:
@@ -675,7 +677,7 @@ def test_trade_intake_heartbeat_window_clears_measured_worst_case_yet_still_aler
         }), encoding="utf-8")
         assert service_failure_alert.check_trade_intake_heartbeat(**args, unit_active_fn=lambda _unit: True) == 0
         assert len(sends) == expected_sends, f"age={age_seconds}s"
-    assert "TRADE_INTAKE_HEARTBEAT_STALE" in sends[0]["message"]
+    assert "成交监听长时间未更新" in sends[0]["message"]
 
 
 def test_trade_intake_heartbeat_distinguishes_process_down_and_infra_failure(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -694,7 +696,7 @@ def test_trade_intake_heartbeat_distinguishes_process_down_and_infra_failure(mon
     args = dict(unit="options-monitor-trade-intake.service", market="us",
                 config_path=str(config_path), runtime_root=tmp_path, now=now)
     assert service_failure_alert.check_trade_intake_heartbeat(**args, unit_active_fn=lambda _unit: False) == 0
-    assert "TRADE_INTAKE_PROCESS_DOWN" in sends[0]["message"]
+    assert "成交监听已停止" in sends[0]["message"]
     assert service_failure_alert.check_trade_intake_heartbeat(**args, unit_active_fn=lambda _unit: True) == 0
     assert "已恢复" in sends[1]["message"]
     monkeypatch.setattr(service_failure_alert, "report_system_failure", lambda **_kwargs: (_ for _ in ()).throw(OSError("state")))

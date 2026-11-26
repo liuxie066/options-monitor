@@ -551,8 +551,8 @@ def test_wheel_quote_gap_survives_settlement_reason_and_card_budget():
             {"outcome": "unavailable", "reason_code": "option_ask_missing_or_invalid",
              "expiration": "2026-12-30", "contract_count": 1}]}]
     rendered = render_fixed_report(brief, limits={"max_total_items": 1}, context=_scheduled_context())
-    assert "卖价缺失或无效" in rendered
-    assert "2026-12-30" in rendered
+    assert "部分合约无法评估" in rendered
+    assert "2026-12-30" not in rendered
 
 
 @pytest.mark.parametrize("render", [render_fixed_report, render_fixed_report_card_markdown, render_fixed_report_text])
@@ -570,7 +570,9 @@ def test_hidden_wheel_card_retains_missing_record_and_overflow_notices(render, o
                                       context=_scheduled_context())
     assert not view["wheel_batches"]
     message = render(brief, limits=limits, context=_scheduled_context())
-    assert ("另有 1 项诊断" if overflow else "本次记录未提供具体缺项") in message
+    assert "部分合约无法评估" in message
+    assert "项诊断" not in message
+    assert "详见扫描快照" not in message
 
 
 def test_wheel_recommendation_alert_groups_only_selected_branches() -> None:
@@ -802,8 +804,8 @@ def test_success_empty_warning_is_embedded_without_failure_wording(reason: str, 
         f"NVDA CSP：{detail}，"
         "已按零候选完成（非操作建议）"
     )
-    assert reminder in view["reminders"]
-    assert reminder.replace("：", "｜") in message
+    assert reminder not in view["reminders"]
+    assert reminder.replace("：", "｜") not in message
     assert "数据异常" not in message
     assert "获取失败" not in message
     assert "扫描失败" not in message
@@ -831,7 +833,7 @@ def test_status_projection_mismatch_renders_only_a_local_reminder() -> None:
     assert (
         "NVDA CSP｜局部告警证据不一致，"
         "已忽略该提示（不影响其他可靠结果）"
-    ) in message
+    ) not in message
     assert "数据异常" not in message
 
 
@@ -1846,7 +1848,7 @@ def test_funds_render_unavailable_symbol_reasons(reason: str, detail: str) -> No
     message = render_fixed_report(brief, context=_scheduled_context())
 
     assert "可用于期权开仓（折CNY）｜暂不可用" in message
-    assert f"PDD {detail}" in message
+    assert "PDD" in message and detail in message
     assert reason not in message
     assert "现金总额（折CNY）｜¥350,000.00" in message
 
@@ -2181,11 +2183,10 @@ def test_partial_expiration_coverage_is_visible_with_healthy_candidates(render) 
         },
     })
     message = render(brief)
-    assert "覆盖不完整到期日 2026-11-20" in message
-    assert "完整到期日 2026-11-13" in message
-    assert "已保留已观测窗口内合约" in message
-    assert "未观测行权价可能改变排序" in message
-    assert "Put 缺行权价上界" in message
+    assert "NVDA" in message and "期权数据不完整" in message
+    assert "仅对已观测合约排序" in message
+    assert "覆盖不完整到期日" not in message
+    assert brief["data_gaps"][-1]["required_data_coverage"]["incomplete_expirations"] == ["2026-11-20"]
     assert "已跳过到期日" not in message
     assert "仅评估完整到期日" not in message
     assert "MSFT" in message
@@ -2249,7 +2250,7 @@ def test_fixed_report_card_keeps_specific_hard_evidence_gap() -> None:
 
     assert message.count("提醒｜") == 1
     assert (
-        "提醒｜GOOGL CSP：期限匹配的已实现波动率（RV）证据不可用，候选结果不完整"
+        "提醒｜GOOGL CSP：历史波动率数据不足，候选结果不完整"
         in message
     )
     assert "提醒｜NVDA" not in message
@@ -2483,8 +2484,8 @@ def test_evidence_hold_stays_in_candidate_summary_not_error_reminder() -> None:
 
     rendered = render_fixed_report(brief, context=_scheduled_context())
 
-    assert "原候选仅保留待恢复身份，不是当前推荐" in rendered
-    assert "提醒｜" not in rendered
+    assert "旧候选暂不可作为操作参考" in rendered
+    assert "NVDA" in rendered
 
 
 @pytest.mark.parametrize("direction", ["call", "put"])
@@ -2655,7 +2656,7 @@ def test_settlement_pending_names_capacity_without_quote_failure(render):
     brief = _settlement_pending_brief()
     before = deepcopy(brief)
     message = render(brief)
-    assert '本轮有期权平仓待结算，相关开仓容量暂不可用。' in message
+    assert '本轮暂无可推荐合约。' in message
     assert 'FUTU' in message
     assert message.count('期权平仓待结算确认，相关开仓容量暂不可用') == 1
     assert '行情证据不可用' not in message
@@ -2683,7 +2684,7 @@ def test_direct_settlement_gap_is_sufficient_and_does_not_hide_candidates():
     brief = _settlement_pending_brief()
     brief['data_gaps'] = brief['data_gaps'][-1:]
     view = build_daily_brief_user_view(brief)
-    assert '平仓待结算' in view['candidate_empty_summary']
+    assert any('平仓待结算' in line for line in view['funds'])
     brief['candidates'] = _brief()['candidates']
     message = render_fixed_report(brief)
     assert '期权平仓待结算确认' in message
@@ -2701,11 +2702,11 @@ def test_scoped_call_block_does_not_mark_whole_call_strategy_unavailable(render,
     message = render(brief)
     assert "## CC\n暂无可推荐合约" in message
     assert "候选数据不完整，暂无法评估" not in message
-    assert "FUTU CC" in message.replace("｜", " ")
+    assert "FUTU" in message and ("待结算" in message if reason == "option_close_settlement_pending" else "历史波动率" in message)
     brief["candidates"] = {"covered_call": _brief()["candidates"]["covered_call"]}
     populated = render(brief)
     assert "策略排序 1" in populated
-    assert "FUTU CC" in populated.replace("｜", " ")
+    assert "FUTU" in populated and ("待结算" in populated if reason == "option_close_settlement_pending" else "历史波动率" in populated)
     assert "候选数据不完整，暂无法评估" not in populated
 
 
@@ -2995,10 +2996,10 @@ def test_event_block_identifies_symbols_and_preserves_candidate_ranks() -> None:
         assert element["margin"] == "0px 0px 0px 0px"
     text = render_fixed_report_text(brief, diff=diff)
     text_events = text.split("【事件】\n\n", 1)[1].split("【持仓】", 1)[0]
-    assert text_events.startswith("CC\n组合增强\n已确认到期前无近期重要事件；\n下单前复核报价。")
+    assert text_events.startswith("CC\n组合增强\n已确认到期前无近期重要事件。")
     assert "NVDA｜CSP｜08-21 $100 Put（策略排序 3）\n事件数据不完整" in text_events
     assert "MSFT｜CSP｜08-21 $400 Put（策略排序 7）\n预计 8 月 5 日发布财报" in text_events
-    assert "执行前需要重新确认事件窗口和报价。" in text_events
+    assert text_events.count("下单前复核事件和报价。") == 1
     assert text_events.index("NVDA｜CSP") < text_events.index("MSFT｜CSP")
     assert "#1" not in event
     assert "AAPL" not in event and "TSLA" not in event
@@ -3168,14 +3169,79 @@ def test_wechat_event_groups_separate_contracts_and_explanation_clauses() -> Non
         for n, identity in enumerate(identities)
     ]
     groups = _render_candidate_event_card(rows, compact=True, markdown=markdown)
-    assert len(groups) == 3
+    assert len(groups) == 4
+    assert groups[-1] == "下单前复核事件和报价。"
+    assert "\n".join(groups).count("复核") == 1
     for n, identity in enumerate(identities[:2]):
         assert groups[0].splitlines()[n] == (f"**{identity}**" if markdown else identity)
     for group, expected, labels in zip(groups, (normal, csp, combo), (2, 1, 1)):
         body = group.splitlines()[labels:]
-        assert "".join(body) == expected
-        assert len(body) >= 2
-    assert "硬窗口之外，\n不触发财报过滤；\n执行前" in groups[1]
+        assert "".join(body) == expected.rpartition("；")[0] + "。"
+    assert "硬窗口之外，\n不触发财报过滤。" in groups[1]
     assert "早于当前 Call 到期日" in groups[2]
     if not markdown:
         assert "**" not in "\n".join(groups)
+
+
+@pytest.mark.parametrize("render", [render_fixed_report, render_fixed_report_card_markdown, render_fixed_report_text])
+def test_many_symbol_gaps_are_grouped_without_evicting_candidates(render):
+    brief = _brief()
+    brief['data_gaps'] = [
+        {**_strategy_partial_data_gap(f'SYM{i}', strategy_family='sell_put',
+                                    reason_code='term_matched_rv_unavailable'),
+         'expiration': f'2026-12-{day:02d}'}
+        for i in range(80) for day in range(1, 20)
+    ]
+    before = deepcopy(brief)
+    message = render(brief)
+    assert '等 80 个标的' in message
+    assert message.count('历史波动率数据不足') == 1
+    assert 'SYM79' not in message
+    assert '正文大小限制' not in message
+    assert 'NVDA' in message
+    assert len(message) < 12000
+    assert brief == before
+
+
+def test_non_actionable_internal_notices_do_not_expand_query():
+    brief = _brief()
+    brief['data_gaps'] = [
+        {'symbol': f'SYM{i}', 'strategy_family': 'sell_put', 'scope': 'strategy',
+         'severity': 'warning', 'actionable': False, 'reason': reason,
+         'outcome': 'success_empty'}
+        for i in range(80) for reason in (
+            'earnings_soft_coverage_partial', 'strategy_status_projection_mismatch', 'no_contract_rows')
+    ]
+    view = build_daily_brief_user_view(brief)
+    assert not any('SYM' in line for line in view['reminders'])
+    assert len(view['reminders']) < 5
+
+
+def test_scoped_failure_is_grouped_but_not_reported_as_clean_zero():
+    from src.application.daily_decision_brief_renderer import _strategy_failure_reminders
+    rows = [{'symbol': f'SYM{i}', 'family': family}
+            for i in range(20) for family in ('sell_put', 'covered_call')]
+    notices = _strategy_failure_reminders(rows)
+    assert len(notices) == 2
+    assert all('等 20 个标的' in notice and '扫描失败' in notice for notice in notices)
+    assert 'CSP' in notices[0] and 'CC' in notices[1]
+
+
+def test_settlement_is_only_in_funds_and_preserves_available_candidates():
+    brief = _settlement_pending_brief()
+    brief['candidates'] = _brief()['candidates']
+    message = render_fixed_report_card_markdown(brief)
+    assert message.count('期权平仓待结算确认') == 1
+    assert message.index('期权平仓待结算确认') > message.index('## 资金')
+    assert 'NVDA' in message
+
+
+def test_settlement_combines_gap_and_fund_scopes_without_losing_currency():
+    brief = _settlement_pending_brief()
+    brief.setdefault('funds', {})['cash_secured_unavailable_by_symbol'] = {
+        'OTHER': 'option_close_settlement_pending', 'FUTU': 'option_close_settlement_pending'}
+    brief['funds']['cash_secured_unavailable_by_ccy'] = {'USD': ['OTHER'], 'HKD': ['FUTU']}
+    message = render_fixed_report_card_markdown(brief)
+    assert 'OTHER 期权平仓待结算确认（USD）' in message
+    assert 'FUTU 期权平仓待结算确认（HKD）' in message
+    assert message.count('期权平仓待结算确认') == 2

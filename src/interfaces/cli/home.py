@@ -69,13 +69,11 @@ def _print_home_status(state: dict[str, Any]) -> None:
     print("\nOM")
     for scope in state["scopes"]:
         attempt = scope["attempt"]
-        label = {"sealed": "已有封存结果", "attempted": "已尝试，终态未知",
+        label = {"sealed": "已有结果", "attempted": "结果尚未确认",
                  "completed": "完成" if attempt.get("result_status") == "ready" else "完成，部分数据不可用",
                  "failed": "失败", "not_found": "尚未扫描", "unknown": "未知"}[attempt["status"]]
         print(f"  {scope['account']} · {scope['market']} · 最近扫描：{label}"
               + (f" · {attempt['as_of']}" if attempt.get("as_of") else ""))
-        if attempt.get("reason"):
-            print(f"    扫描证据：{attempt['reason']}")
         if scope["brief_available"]:
             old = "（较早结果，非最近尝试）" if attempt.get("run_id") != scope["brief_run_id"] else ""
             print(f"    可读简报数据时间：{scope['brief_time'] or '未知'}{old}")
@@ -86,7 +84,7 @@ def _print_home_status(state: dict[str, Any]) -> None:
                 print("    可读简报：暂无可读结果（历史来源不存在）"
                       + ("；已有扫描证据，请在其他管理中排查。" if attempt["status"] != "not_found" else ""))
             else:
-                print(f"    可读简报：来源不可用（{scope['brief_reason']}）；可在其他管理中排查。")
+                print("    简报暂不可用，请在其他管理中排查。")
     print("  自动运行：未知；可在其他管理中查看服务实际状态。")
     print("  1  查看决策简报\n  2  重新扫描\n  3  修改关注标的与策略边界\n  4  其他管理与可选功能\n  0  退出")
 
@@ -100,8 +98,8 @@ def interactive_home(run: Callable[[list[str]], int], *, input_fn: Callable[[str
         try:
             try:
                 source, state = _home_state()
-            except (AgentToolError, OSError, ValueError) as exc:
-                print(f"实例配置或运行证据读取失败：{exc}；不会重建已有配置。")
+            except (AgentToolError, OSError, ValueError):
+                print("无法读取配置或扫描结果，请运行 om doctor 排查。")
                 print("修复入口：om doctor --help；om config --help；om help all。")
                 return 2
             if state is None:

@@ -950,6 +950,7 @@ def build_trade_intake_receipt_message(
         (kind == "verification_pending", "⚠️ 记录状态待核对"),
         (kind == "pending_retry", "⚠️ 暂未记录"),
         (kind == "recorded", "✅ 已记录"),
+        (status == "skipped" and reason == "duplicate_deal_id", "✅ 已处理"),
         (status == "failed" and reason == "projection_verification_failed", "❌ 写入异常"),
         (needs_lot_confirmation, "⚠️ 待确认"),
         (applied, "✅ 已完成"),
@@ -966,8 +967,6 @@ def build_trade_intake_receipt_message(
     price = _value("price", deal, result, payload)
     trade_time = format_trade_time_beijing(_trade_time_ms(deal, result, payload))
     deal_id = _deal_id(deal, result, payload) or "-"
-    ledger_store_raw = result.get("ledger_store")
-    ledger_store = cast(dict[str, Any], ledger_store_raw) if isinstance(ledger_store_raw, dict) else {}
     verification_raw = diagnostics.get("post_write_projection_verification")
     verification = cast(dict[str, Any], verification_raw) if isinstance(verification_raw, dict) else {}
     checks_raw = verification.get("checks")
@@ -992,16 +991,14 @@ def build_trade_intake_receipt_message(
         fields.append(("资金", funds))
     if trade_time:
         fields.append(("时间", trade_time))
-    if first_check:
+    if first_check and first_check.get("actual_contracts_open_after") == first_check.get("expected_contracts_open_after"):
         fields.append(
             (
                 "目标持仓",
                 f"{first_check.get('contracts_open_before')} → {first_check.get('actual_contracts_open_after')}"
-                f" · 预期 {first_check.get('expected_contracts_open_after')}",
+,
             )
         )
-    if ledger_store and not kind:
-        fields.append(("账本", ledger_store.get("sqlite_path") or "-"))
     quality = result.get("position_quality_check") or {}
     if quality and quality.get("status") not in {"trusted"}:
         checks = quality.get("checks") or []
@@ -1048,32 +1045,34 @@ def build_trade_intake_receipt_message(
             "processing_error": "成交处理异常，需要检查记录服务",
         }.get(diagnostics.get("failure_category"), {
             "interrupted_before_recording": "处理进程中断；已核对本次尚未记录",
-        }.get(reason, reason))
+        }.get(reason, "成交处理未完成，需要核查"))
         policy = result.get("retry_policy") or {}
         if kind == "recorded":
             cause = ("自动恢复后已确认记录成功"
                      if diagnostics.get("recovered_from_ledger") or int(policy.get("attempt_count", 0)) > 1 else "")
         elif kind == "verification_pending":
             cause = "暂时无法确认账本记录状态"
-            fields.append(("重试", "每 60 秒自动核对；核对前不会重复录入"))
-            fields.append(("处理", "无需重复提交；持续未恢复时请检查记录服务"))
+            fields.append(("处理", "成交是否已记录仍在核对，请勿重复提交"))
         elif kind == "pending_retry" and policy.get("retryable"):
-            fields.append(("重试", f"最早 60 秒后自动重试，剩余 {policy['remaining']} 次；恢复后发送成功回执"))
-            fields.append(("处理", "无需重复提交"))
+            fields.append(("重试", "成交暂未记录，将自动重试，无需重复提交"))
         else:
-            exhausted = int(policy.get("attempt_count", 0)) >= int(policy.get("max_attempts", 20))
-            fields.append(("重试", f"记录尝试已达 {policy['max_attempts']} 次，不会自动重试" if exhausted else "不会自动重试"))
+            fields.append(("重试", "成交未记录，不会自动重试，需要人工处理"))
             fields.append(("处理", "请检查上述原因，修复后由操作员恢复处理"))
         if cause:
             fields.append(("诊断", cause))
     else:
         if not applied:
-            fields.append(("诊断", reason))
+            fields.append(("原因", {
+                "projection_verification_failed": "成交记录与持仓核对不一致，需要核查",
+                "waiting_settlement_evidence": "结算信息尚未确认",
+                "ambiguous_assigned_stock_sale": "卖出对应的接货批次待确认",
+                "duplicate_deal_id": "该成交已处理，无需重复提交",
+            }.get(reason, "成交暂未记录，需要核查")))
     sections: list[tuple[str, list[str]]] = []
     if needs_lot_confirmation:
         candidate_lines = _assigned_stock_candidate_lines(diagnostics)
         if candidate_lines:
-            fields.append(("说明", "需要确认卖出对应的 assigned-stock lot；确认前不会自动写入。"))
+            fields.append(("说明", "请选择这笔卖出对应的接货批次，确认后才能记录。"))
             rows = [line.replace("：", "｜", 1) for line in candidate_lines]
             rows.append("下一步｜回复“选择 A”")
             rows.append(f"编号｜`{deal_id}`")

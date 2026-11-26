@@ -486,7 +486,12 @@ def test_opend_alert_family_dedupe_and_burst_limit(tmp_path: Path) -> None:
     assert should_send_opend_alert(base, 'OPEND_NEEDS_PHONE_VERIFY', cooldown_sec=1, burst_window_sec=600, burst_max=2) is False
 
 
-def test_opend_alert_routes_wechat_clawbot_through_delivery_adapter(monkeypatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("error_code,handling", [
+    ("OPEND_RATE_LIMIT", "数据请求受限，请稍后重试"),
+    ("OPEND_QOT_NOT_LOGINED", "OpenD 行情未登录，请登录后重试"),
+    ("OPEND_TRD_NOT_LOGINED", "OpenD 交易未登录，请登录后重试"),
+])
+def test_opend_alert_routes_wechat_clawbot_through_delivery_adapter(monkeypatch, tmp_path: Path, error_code, handling) -> None:
     from src.application.multi_tick import opend_guard
 
     captured: dict[str, object] = {}
@@ -507,7 +512,7 @@ def test_opend_alert_routes_wechat_clawbot_through_delivery_adapter(monkeypatch,
     ok = opend_guard.send_opend_alert(
         base,
         cfg,
-        error_code="OPEND_RATE_LIMIT",
+        error_code=error_code,
         message_text="rate limited\n  - retry exhausted",
         detail="first line\n    - nested detail",
     )
@@ -521,9 +526,9 @@ def test_opend_alert_routes_wechat_clawbot_through_delivery_adapter(monkeypatch,
     assert "状态｜❌ 不可用" in message
     assert "时间｜2026-07-21 16:30:00 北京时间" in message
     assert "影响｜本轮行情与交易数据可能不完整" in message
-    assert "原因｜rate limited · - retry exhausted" in message
-    assert "诊断｜`OPEND_RATE_LIMIT`" in message
-    assert "详情｜first line · - nested detail" in message
+    assert f"处理｜{handling}" in message
+    assert "诊断｜" not in message
+    assert "详情｜" not in message
     assert_mobile_flat_markdown(message)
 
 
@@ -949,7 +954,7 @@ def test_send_opend_recovery_notice_after_threshold_failures(tmp_path: Path) -> 
         assert sent_msg.startswith("# OM · 系统通知 · OpenD")
         assert "状态｜✅ 已恢复" in sent_msg
         assert "时间｜2026-07-21 16:30:00 北京时间" in sent_msg
-        assert "结果｜数据连接已恢复，后续批次将自动重新评估" in sent_msg
+        assert "结果｜数据连接已恢复，将在下次扫描时更新结果" in sent_msg
         assert_mobile_flat_markdown(sent_msg)
 
         # Counter reset: second recovery sends nothing.

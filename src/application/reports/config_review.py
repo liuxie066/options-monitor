@@ -494,11 +494,11 @@ def _render_review_sections(payload: dict[str, Any]) -> str:
     lines = ["# 周度配置清单报告", "", f"**结论：{conclusion['state']}**", ""]
     lines.extend(f"- {reason}" for reason in conclusion["reasons"])
     lines.extend(["", f"统计周期：{payload['period']['label']}（Asia/Shanghai）。现价为本次生成时最近可用观察。", "",
-                  "## 指标 A：strike 边界拒绝", "",
+                  "## 行权价边界筛选", "",
                   f"数据覆盖：**{coverage_text[metric['coverage']]}**；快照 {metric['snapshot_count']} 份，"
                   f"决策 {metric['decision_count']} 次，日期 {len(metric['dates'])} 个。",
-                  f"已验证观测中的旧 hard_strike：{metric['legacy_hard_strike_count']} 次；未验证历史不计入，方向不可恢复，缺失不能当作0。",
-                  f"快照读取/验证缺口：{len(metric['errors'])}；封存范围：{metric['sealed_at_min'] or '无'} ～ {metric['sealed_at_max'] or '无'}。", "",
+
+                  f"数据读取或核对缺口：{len(metric['errors'])} 项。", "",
                   "计数是账户扫描观测；同一合约会重复出现，不等于独立交易机会。完整性仅指已取得的留存快照。", "",
                   "| 市场 | 快照 | 方向拒绝观测 | 覆盖 |", "| --- | ---: | ---: | --- |"])
     for market in metric["markets"]:
@@ -507,7 +507,7 @@ def _render_review_sections(payload: dict[str, Any]) -> str:
     if not metric["markets"]:
         lines.append("| — | 0 | 该期无数据 | 无可用快照 |")
     if metric["groups"]:
-        lines.extend(["", "| 市场 | 标的 | 方向 | 已观测拒绝 | 不同合约 | 仅因 strike |",
+        lines.extend(["", "| 市场 | 标的 | 方向 | 已观测拒绝 | 不同合约 | 仅因行权价边界 |",
                       "| --- | --- | --- | ---: | ---: | ---: |"])
         for group in metric["groups"]:
             lines.append(f"| {group['market']} | {group['symbol']} | {DIRECTIONS[group['reason']]} | {group['observed_count']} | {group['unique_contracts']} | {group['strike_only_count']} |")
@@ -522,7 +522,7 @@ def _render_review_sections(payload: dict[str, Any]) -> str:
         lines.append(f"| {row['market']} {row['symbol']} | {row['path']} | {_fmt_number(row['value'])} | "
                      f"{_fmt_number(price['value']) if price else '无数据'} | {distance} | {pressure} | "
                      f"{row['R']}/{row['N']} | {row['conclusion']}：{row['reason']} |")
-    lines.extend(["", "价格来源与采集时点："])
+    lines.extend(["", "## 附录：数据与判定方法", "", "价格来源与采集时点："])
     seen = set()
     for row in payload["boundary_assessments"]:
         if (row["market"], row["symbol"]) in seen:
@@ -532,7 +532,7 @@ def _render_review_sections(payload: dict[str, Any]) -> str:
         lines.append(f"- {row['market']} {row['symbol']}：{price.get('source', '无数据')}；{price.get('observed_at_utc') or '时点未知'}")
     lines.extend(["", "判定门槛：至少30次可比决策、3个日期且证据完整、价格不超过96小时。建议人工复核须压力≥15%、"
                   "仅因strike拒绝≥20次且占比≥30%、至少5个合约和3个拒绝日期；无需调整须压力≤5%、拒绝率<10%；其余观察。",
-                  "同值边界仅表示封存 policy/threshold 与当前配置相等，不证明配置是唯一原因，也不保证调整后候选通过。", "",
+                  "仅比较与当前边界相同的历史记录；调整边界不保证候选通过。", "",
                   "## 配置清单与系统总览", ""])
     return "\n".join(lines)
 
@@ -607,7 +607,6 @@ def _render_markdown(
         "# 周度配置清单报告",
         "",
         f"- 生成时间：{_iso(generated_at)}",
-        f"- 配置目录：`{config_root}`",
         "- 清单范围：用户配置中的行权价边界与本次现价；上方指标A列出上一完整周的边界拒绝观测与数据覆盖。",
         "- 距离定义：(现价 − 边界) ÷ 边界 × 100%；正数表示现价高于边界，负数表示现价低于边界。",
         "",
@@ -616,14 +615,7 @@ def _render_markdown(
     ]
     for item in config_files:
         status = "已读取" if item["exists"] else "不存在"
-        lines.append(f"- {item['market']}：`{item['path']}`（{status}，{item['symbol_count']} 个标的）")
-    if system_config.get("source") == "resolved_runtime":
-        lines.append("- 配置源：config.yaml 构建的 runtime JSON；默认值已在构建时解析，不再叠加本机 user/system 配置。")
-    else:
-        status = "已读取" if system_config.get("exists") else "不存在"
-        lines.append(
-            f"- system.json：`{system_config.get('path')}`（{status}；仅用于用户配置未声明字段的回退）"
-        )
+        lines.append(f"- {item['market']} 配置：{status}，{item['symbol_count']} 个标的")
     price_source = _price_source_text(snapshot)
     lines.append(f"- 现价：{price_source}")
     if data_gaps:

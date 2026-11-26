@@ -87,13 +87,13 @@ def _is_missing_value(value: str | None) -> bool:
 
 def _present_or_missing(value: str | None, *, reason: str) -> str:
     if _is_missing_value(value):
-        return f"缺失({reason})"
+        return "暂不可用"
     return str(value).strip()
 
 
 def _present_money_or_zero(value: str | None, *, reason: str) -> str:
     if _is_missing_value(value):
-        return f"缺失({reason})"
+        return "暂不可用"
     v = str(value).strip()
     if v in {"0", "0.0", "0.00"}:
         return "0"

@@ -1371,7 +1371,7 @@ def test_known_pending_collateral_is_deducted_and_explained(tmp_path: Path) -> N
     assert funds["option_opening_available_by_currency"] == {"HKD": 225_000.0, "USD": 5_000.0}
     assert funds["option_opening_reliable"] is True
     assert funds["cash_secured_pending_by_symbol_by_ccy"] == {"PDD": {"USD": 10_000.0}}
-    assert "PDD 归属未定，已保守扣留担保｜$10,000.00（未计入可用资金）" in message
+    assert "PDD｜归属未定，相关担保金未计入可用资金" in message
     assert "可用于期权开仓｜HK$225,000.00" in message
     assert "可用于期权开仓｜$5,000.00" in message
 
@@ -1407,7 +1407,7 @@ def test_partial_collateral_keeps_unaffected_currency_available(
 
         message = render_fixed_report(brief)
         assert "可用于期权开仓｜HK$225,000.00" in message
-        assert "可开仓资金待核实｜PDD（USD） 期权担保计算依据缺失" in message
+        assert "PDD 可开仓资金待核实（USD）｜期权担保计算依据缺失" in message
 
     assert funds["option_opening_available_by_currency"] == expected_opening
     assert funds["option_opening_available_cny"] is None
@@ -1535,7 +1535,7 @@ def test_funds_preserve_cross_market_unavailable_reasons(tmp_path: Path, monkeyp
     assert brief["funds"]["option_opening_available_by_currency"] == {}
     message = render_fixed_report(brief)
     assert "PDD 期权平仓待结算确认" in message
-    assert "AAPL 期权担保计算依据缺失" in message
+    assert "AAPL 可开仓资金待核实｜期权担保计算依据缺失" in message
     assert "可用于期权开仓（折CNY）｜暂不可用" in message
     assert "option_close_settlement_pending" not in message
 
@@ -2880,7 +2880,7 @@ def test_partial_frozen_scope_warns_without_erasing_valid_candidate(
         and item.get("reason_code") == "term_matched_rv_unavailable"
         for item in brief["data_gaps"]
     )
-    assert "AAPL CC｜2026-08-21 到期，期限匹配的已实现波动率（RV）证据不可用（原因未提供），候选结果不完整" in (
+    assert "AAPL CC｜历史波动率数据不足，候选结果不完整" in (
         render_full_brief(brief)
     )
 
@@ -3396,7 +3396,8 @@ def test_strategy_step_failure_preserves_other_candidates_and_warns_user(tmp_pat
     assert not any(item.get("contract_symbol") == "STALE_PUT" for item in brief["actions"])
     assert brief["candidates"]["sell_put"] == []
     assert "NVDA CSP 扫描失败，本轮无结果" in message
-    assert "补充｜NVDA CSP 扫描失败，未纳入本轮候选" in message
+    assert "补充｜NVDA CSP 扫描失败，未纳入本轮候选" not in message
+    assert message.count("NVDA CSP 扫描失败") == 1
     assert "本轮结果不完整" not in message
     assert "NVDA_CALL_VALID" not in message
     assert "CC" in message
@@ -3434,9 +3435,8 @@ def test_strategy_step_failure_reminders_list_each_failed_symbol(tmp_path: Path)
     brief = _assemble(tmp_path)
     message = render_fixed_report(brief)
 
-    assert message.count("SPCX CSP 扫描失败，本轮无结果") == 1
-    assert "XYZ CSP 扫描失败，本轮无结果" in message
-    assert "补充｜SPCX、XYZ CSP 扫描失败，未纳入本轮候选" in message
+    assert message.count("SPCX、XYZ CSP 扫描失败，本轮无结果") == 1
+    assert "补充｜SPCX、XYZ CSP 扫描失败，未纳入本轮候选" not in message
     assert "本轮结果不完整" not in message
 
 
@@ -3466,10 +3466,9 @@ def test_strategy_step_failure_empty_summary_points_to_reminders(tmp_path: Path)
 
     assert (
         view["candidate_empty_summary"]
-        == "本轮部分数据不可用；SPCX、XYZ CSP 扫描失败。"
+        == "本轮扫描未全部完成，候选结果不完整。"
     )
-    assert "SPCX CSP 扫描失败，本轮无结果" in view["reminders"]
-    assert "XYZ CSP 扫描失败，本轮无结果" in view["reminders"]
+    assert "SPCX、XYZ CSP 扫描失败，本轮无结果" in view["reminders"]
     assert not any("本轮结果不完整" in item for item in view["reminders"])
 
 

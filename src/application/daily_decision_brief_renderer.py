@@ -212,13 +212,10 @@ def build_daily_brief_user_view(
     reminders.extend(_wheel_gap_reminders(brief))
     fixed_report_reminders = list(reminders)
     funds = _fund_views(brief)
+    funds.extend(_settlement_pending_reminders(brief))
     strategy_failure_items = _strategy_failure_items(brief)
     reminders.extend(_strategy_failure_reminders(strategy_failure_items))
     reminders.extend(_strategy_data_gap_reminders(brief))
-    if strategy_failure_items and candidate_views:
-        candidate_omissions.append(
-            _strategy_failure_omission(strategy_failure_items)
-        )
     evidence_holds = [
         item
         for item in brief.get("actions") or []
@@ -237,15 +234,13 @@ def build_daily_brief_user_view(
         _lower(item.get("reason_code")) != "option_close_settlement_pending"
         for item in partial_data_gaps
     )
-    for item in evidence_holds:
-        symbol = _upper(item.get("symbol")) or "相关标的"
-        strategy = _STRATEGY_LABELS.get(
-            _lower(item.get("strategy_family")),
-            "候选",
-        )
-        reminders.append(
-            f"{symbol} {strategy} 行情证据不可用，待恢复（不是当前推荐）"
-        )
+    hold_reminders = _group_symbol_notices([
+        (_upper(item.get("symbol")) or "相关标的",
+         f"{_STRATEGY_LABELS.get(_lower(item.get('strategy_family')), '候选')} 行情不可用，相关旧候选暂不可作为操作参考")
+        for item in evidence_holds
+    ])
+    reminders.extend(hold_reminders)
+    fixed_report_reminders.extend(hold_reminders)
     fixed_report_reminders.extend(
         _fixed_report_error_reminders(
             brief,
@@ -323,10 +318,10 @@ def build_daily_brief_user_view(
             )
             if strategy_failure_items
             else (
-                "本轮行情证据不可用，原候选仅保留待恢复身份，不是当前推荐。"
+                "本轮行情不可用，旧候选暂不可作为操作参考。"
                 if evidence_holds
                 else (
-                    "本轮有期权平仓待结算，相关开仓容量暂不可用。"
+                    "本轮暂无可推荐合约。"
                     if settlement_reminders and not other_partial_data
                     else (
                         "本轮部分数据不可用，候选结果不完整。"
@@ -1284,12 +1279,17 @@ def _render_candidate_event_card(
         ]
     grouped: dict[str, list[str]] = {}
     mixed_families = {item.get("family") for item in candidates if not item.get("event_normal")}
+    needs_quote_review = False
     for item in candidates:
         event_line = str(item.get("event_line") or "").strip()
         if compact:
             event_line = _compact_fixed_report_event(event_line)
         if not event_line:
             continue
+        body, separator, note = event_line.rpartition("；")
+        if separator and ("复核" in note or "再次检查" in note or "重新确认" in note):
+            event_line = body + "。"
+            needs_quote_review = True
         # Only confirmed normal conclusions can omit individual contract identities.
         label = (
             _STRATEGY_LABELS.get(str(item.get("family")), "候选")
@@ -1299,13 +1299,17 @@ def _render_candidate_event_card(
         labels = grouped.setdefault(event_line, [])
         if label not in labels:
             labels.append(label)
-    return [
+    result = [
         "\n".join([
             *[f"**{label}**" if markdown else label for label in labels],
             event_line.replace("，", "，\n").replace("；", "；\n"),
         ])
         for event_line, labels in grouped.items()
     ]
+
+    if needs_quote_review:
+        result.append("下单前复核事件和报价。")
+    return result
 
 
 def _compact_fixed_report_event(value: str) -> str:
@@ -2076,57 +2080,14 @@ def _wheel_diagnostic_signature(row: Mapping[str, Any]) -> tuple[Any, ...] | Non
 
 
 def _wheel_candidate_diagnostic_details(row: Mapping[str, Any]) -> list[str]:
-    diagnostics = row.get("candidate_diagnostics")
-    if not isinstance(diagnostics, list) or not diagnostics:
-        if {row.get("reason_code"), row.get("candidate_evidence_reason")} & {
-            "partial_data", "data_unavailable", "wheel_candidate_data_unavailable"
-        } and not row.get("required_data_coverage"):
-            return ["数据说明：本次记录未提供具体缺项"]
-        return []
-    labels = {
-        "option_ask_missing_or_invalid": "卖价缺失或无效",
-        "option_bid_missing_or_invalid": "买价缺失或无效",
-        "bid_missing_or_invalid": "买价缺失或无效",
-        "ask_missing_or_invalid": "卖价缺失或无效",
-        "option_snapshot_stale": "期权报价过期",
-        "option_snapshot_receipt_missing": "期权报价接收时间缺失或无效",
-        "option_snapshot_receipt_in_future": "期权报价接收时间晚于决策时间",
-        "underlier_update_time_missing_or_invalid": "正股行情时间缺失或无效",
-        "underlier_update_time_in_future": "正股行情时间晚于决策时间",
-        "underlier_quote_stale": "正股行情过期",
-        "underlier_observation_unavailable": "正股行情不可用",
-        "option_snapshot_identity_mismatch": "期权行情身份不符",
-        "option_multiplier_conflict": "合约乘数冲突",
-        "term_matched_rv_unavailable": "期限匹配历史波动率不可用",
-        "term_matched_rv_missing_or_invalid": "期限匹配历史波动率缺失或无效",
-        "implied_volatility_missing_or_invalid": "隐含波动率缺失或无效",
-        "risk_delta_unavailable": "Delta 数据不可用",
-        "risk_earnings_unavailable": "财报事件数据不可用",
-        "stock_exit_fee_unavailable": "卖股费用不可用",
-        "stock_assignment_fee_unavailable": "指派买股费用不可用",
-        "remaining_stock_cost_basis_unavailable": "剩余股票成本不可用",
-        "realized_sell_put_net_pnl_unavailable": "历史 Put 净收益不可用",
-        "realized_prior_call_net_pnl_unavailable": "历史 Call 净收益不可用",
-        "realized_prior_stock_sale_net_pnl_unavailable": "历史卖股净收益不可用",
-        "currency_unavailable": "币种缺失",
-        "currency_mismatch": "币种不一致",
-    }
-    details = []
-    side = str(row.get("direction") or "call").title()
-    for item in sorted(diagnostics, key=lambda item: 0 if isinstance(item, Mapping) and item.get("outcome") == "unavailable" else 1):
-        if not isinstance(item, Mapping) or item.get("outcome") != "unavailable":
-            continue
-        count = item.get("contract_count")
-        if type(count) is not int or count <= 0:
-            continue
-        reason = str(item.get("reason_code") or "")
-        label = labels.get(reason, reason or "原因未记录")
-        expiration = str(item.get("expiration") or "到期日未记录")
-        details.append(f"缺项：{expiration} · {count} 份 {side} · {label}")
-    details = list(dict.fromkeys(details))
-    if len(details) > 4:
-        return [*details[:4], f"数据说明：另有 {len(details) - 4} 项诊断，详见扫描快照；各原因数量不相加"]
-    return details
+    diagnostics = row.get("candidate_diagnostics") or []
+    if any(isinstance(item, Mapping) and item.get("outcome") == "unavailable" for item in diagnostics):
+        return ["部分合约数据不可用，相关候选评估不完整"]
+    if {row.get("reason_code"), row.get("candidate_evidence_reason")} & {
+        "partial_data", "data_unavailable", "wheel_candidate_data_unavailable"
+    } and not row.get("required_data_coverage"):
+        return ["候选数据不完整，暂无法评估"]
+    return []
 
 
 def _wheel_gap_reminders(brief: Mapping[str, Any]) -> list[str]:
@@ -2150,12 +2111,12 @@ def _wheel_gap_reminders(brief: Mapping[str, Any]) -> list[str]:
         subject = f"{_upper(row.get('symbol')) or '未知标的'} Wheel {str(row.get('direction') or 'call').title()}"
         if row.get("candidate_evidence_reason") in gap_reasons:
             reasons.append(row["candidate_evidence_reason"])
+        if any(isinstance(item, Mapping) and item.get("outcome") == "unavailable"
+               for item in row.get("candidate_diagnostics") or []):
+            reasons.append("partial_data")
         for reason in reasons:
             if isinstance(reason, str) and reason in gap_reasons:
                 grouped.setdefault(reason, set()).add(subject)
-        for detail in _wheel_candidate_diagnostic_details(row):
-            if detail.startswith("数据说明："):
-                grouped.setdefault(detail, set()).add(subject)
     reminders = []
     for reason, subjects in sorted(grouped.items()):
         shown = "、".join(sorted(subjects)[:3])
@@ -2163,14 +2124,6 @@ def _wheel_gap_reminders(brief: Mapping[str, Any]) -> list[str]:
             shown += f"（另有 {len(subjects) - 3} 个标的/方向，共 {len(subjects)} 个）"
         description = reason if reason.startswith("数据说明：") else _wheel_reason_text(reason)
         reminders.append("缺口摘要：" + shown + " · " + description)
-    # Branch cards share the account display quota; real scan gaps must remain
-    # visible even when allocation/settlement replaces their primary reason.
-    for row in brief.get("wheel_batches") or []:
-        if not isinstance(row, Mapping):
-            continue
-        for detail in _wheel_candidate_diagnostic_details(row):
-            if detail.startswith("缺项："):
-                reminders.append(f"{_upper(row.get('symbol'))} Wheel {str(row.get('direction') or 'call').title()} · {detail}")
     return list(dict.fromkeys(reminders))
 
 
@@ -2802,30 +2755,47 @@ def _strategy_failure_items(brief: Mapping[str, Any]) -> list[dict[str, str]]:
     return items
 
 
+def _symbol_scope(symbols: Iterable[str]) -> str:
+    names = list(dict.fromkeys(symbols))
+    shown = "、".join(names[:3])
+    return f"{shown} 等 {len(names)} 个标的" if len(names) > 3 else shown
+
+
+def _group_symbol_notices(items: Iterable[tuple[str, str]]) -> list[str]:
+    grouped: dict[str, list[str]] = {}
+    for symbol, message in items:
+        grouped.setdefault(message, []).append(symbol)
+    return [f"{_symbol_scope(symbols)} {message}" for message, symbols in grouped.items()]
+
+
 def _strategy_failure_reminders(items: list[dict[str, str]]) -> list[str]:
-    reminders: list[str] = []
-    for item in items:
-        strategy = _STRATEGY_LABELS.get(item["family"], "候选")
-        symbol = item["symbol"] or "相关标的"
-        reminders.append(
-            f"{symbol} {strategy} 扫描失败，本轮无结果"
-        )
-    return reminders
+    return _group_symbol_notices([
+        (item["symbol"] or "相关标的",
+         f"{_STRATEGY_LABELS.get(item['family'], '候选')} 扫描失败，本轮无结果")
+        for item in items
+    ])
 
 
 def _settlement_pending_reminders(brief: Mapping[str, Any]) -> list[str]:
-    reminders: list[str] = []
-    for item in brief.get("data_gaps") or []:
-        if not isinstance(item, Mapping):
-            continue
-        if "option_close_settlement_pending" not in {
+    symbols = {
+        _upper(item.get("symbol")) or "相关标的"
+        for item in brief.get("data_gaps") or []
+        if isinstance(item, Mapping) and "option_close_settlement_pending" in {
             _lower(item.get("reason")), _lower(item.get("reason_code")),
-        }:
-            continue
-        symbol = _upper(item.get("symbol")) or "相关标的"
-        family = _STRATEGY_LABELS.get(_lower(item.get("strategy_family")), "策略")
-        reminders.append(f"{symbol} {family}：期权平仓待结算确认，相关开仓容量暂不可用")
-    return list(dict.fromkeys(reminders))
+        }
+    }
+    funds = brief.get("funds") or {}
+    unavailable = funds.get("cash_secured_unavailable_by_symbol") or {}
+    symbols.update(symbol for symbol, reason in unavailable.items()
+                   if reason == "option_close_settlement_pending")
+    by_ccy = funds.get("cash_secured_unavailable_by_ccy") or {}
+    notices = []
+    for symbol in sorted(symbols):
+        currencies = sorted(ccy for ccy, names in by_ccy.items()
+                            if isinstance(names, list) and symbol in names)
+        scope = f"（{'/'.join(currencies)}）" if currencies else ""
+        notices.append((symbol, f"期权平仓待结算确认{scope}，相关开仓容量暂不可用"))
+    return _group_symbol_notices(notices)
 
 
 def _fixed_report_error_reminders(
@@ -2836,7 +2806,7 @@ def _fixed_report_error_reminders(
     """Keep the fixed-report reminder surface for confirmed operational errors."""
 
     reminders = _strategy_failure_reminders(strategy_failure_items)
-    reminders.extend(_settlement_pending_reminders(brief))
+    partial_notices: list[tuple[str, str]] = []
     fetch_symbols: list[str] = []
     prefetch_error_count = 0
     snapshot_failures: dict[str, list[str]] = {}
@@ -2874,26 +2844,10 @@ def _fixed_report_error_reminders(
             )
             continue
         if reason == "opening_candidate_strategy_partial_data":
-            if _lower(item.get("reason_code")) == "required_data_partial_coverage":
-                reminders.append(_required_data_coverage_reminder(item))
-                continue
-            if _lower(item.get("reason_code")) == "option_close_settlement_pending":
-                continue
-            if _lower(item.get("reason_code")) == "term_matched_rv_unavailable":
-                reminders.append(_rv_gap_reminder(item))
-                continue
-            detail = _PARTIAL_DATA_REASON_TEXT.get(
-                _lower(item.get("reason_code"))
-            )
-            if detail:
-                symbol = _upper(item.get("symbol")) or "相关标的"
-                family = _STRATEGY_LABELS.get(
-                    _lower(item.get("strategy_family")),
-                    "策略",
-                )
-                reminders.append(
-                    f"{symbol} {family}：{detail}，候选结果不完整"
-                )
+            notice = _partial_data_notice(item)
+            if notice and (_lower(item.get("reason_code")) in _PARTIAL_DATA_REASON_TEXT
+                           or _lower(item.get("reason_code")) == "required_data_partial_coverage"):
+                partial_notices.append(notice)
             continue
         if reason not in snapshot_error_labels:
             continue
@@ -2905,9 +2859,10 @@ def _fixed_report_error_reminders(
         if family not in snapshot_failures[snapshot_error_labels[reason]]:
             snapshot_failures[snapshot_error_labels[reason]].append(family)
 
+    reminders.extend(_group_symbol_notices(partial_notices))
     if fetch_symbols:
         reminders.append(
-            f"{'、'.join(fetch_symbols)}：行情获取失败，本轮候选结果不完整"
+            f"{_symbol_scope(fetch_symbols)}：行情获取失败，本轮候选结果不完整"
         )
     elif prefetch_error_count > 0:
         reminders.append(
@@ -2920,34 +2875,13 @@ def _fixed_report_error_reminders(
     return list(dict.fromkeys(reminders))
 
 
-def _strategy_failure_subject(items: list[dict[str, str]]) -> str:
-    """Group failed symbols per strategy family, preserving first-seen order."""
-    grouped: dict[str, list[str]] = {}
-    for item in items:
-        symbol = item["symbol"] or "相关标的"
-        grouped.setdefault(item["family"], [])
-        if symbol not in grouped[item["family"]]:
-            grouped[item["family"]].append(symbol)
-    return "、".join(
-        f"{'、'.join(symbols)} {_STRATEGY_LABELS.get(family, '候选')}"
-        for family, symbols in grouped.items()
-    )
-
-
-def _strategy_failure_omission(items: list[dict[str, str]]) -> str:
-    return f"{_strategy_failure_subject(items)} 扫描失败，未纳入本轮候选"
-
-
 def _candidate_empty_summary_for_failures(
     items: list[dict[str, str]],
     *,
     partial_data: bool = False,
     evidence_holds: bool = False,
 ) -> str:
-    subject = _strategy_failure_subject(items)
-    if partial_data or evidence_holds:
-        return f"本轮部分数据不可用；{subject} 扫描失败。"
-    return f"本轮暂无符合条件的候选；{subject} 扫描失败。"
+    return "本轮扫描未全部完成，候选结果不完整。"
 
 
 def _required_data_ranges_text(ranges: Any, inclusive: Any = None) -> str:
@@ -3006,129 +2940,34 @@ def _candidate_required_data_details(candidate: Mapping[str, Any]) -> list[str]:
     return details
 
 
-def _required_data_coverage_reminder(item: Mapping[str, Any]) -> str:
-    symbol = _upper(item.get("symbol")) or "相关标的"
-    family = _STRATEGY_LABELS.get(_lower(item.get("strategy_family")), "候选")
-    coverage = item.get("required_data_coverage") or {}
-    incomplete = "、".join(str(value) for value in coverage.get("incomplete_expirations") or [])
-    covered = "、".join(str(value) for value in coverage.get("covered_expirations") or [])
-    labels = {"lower_bound": "行权价下界", "upper_bound": "行权价上界",
-              "strike_window": "行权价窗口", "exact_strike": "指定行权价", "rows": "合约行"}
-    details = ["已保留已观测窗口内合约"]
-    if incomplete:
-        details.append(f"覆盖不完整到期日 {incomplete}")
-    if covered:
-        details.append(f"完整到期日 {covered}")
-    details.extend(_required_data_range_details(coverage))
-    for expiration in coverage.get("per_expiration") or []:
-        for requirement in expiration.get("missing_requirements") or []:
-            side = _OPTION_LABELS.get(requirement.get("option_type"), "期权")
-            missing = "、".join(labels.get(value, str(value)) for value in requirement.get("missing") or [])
-            strikes = requirement.get("missing_exact_strikes") or []
-            if strikes:
-                missing += "（" + "、".join(f"{value:g}" for value in strikes) + "）"
-            details.append(f"{expiration.get('expiration')} {side} 缺{missing}")
-    details.append("仅对已观测合约排序，未观测行权价可能改变排序")
-    return f"{symbol} {family}：期权数据不完整；" + "；".join(details)
+def _partial_data_notice(item: Mapping[str, Any]) -> tuple[str, str] | None:
+    reason = _lower(item.get("reason_code"))
+    if reason == "option_close_settlement_pending":
+        return None
+    detail = {
+        "required_data_partial_coverage": "期权数据不完整，仅对已观测合约排序",
+        "term_matched_rv_unavailable": "历史波动率数据不足",
+    }.get(reason) or _PARTIAL_DATA_REASON_TEXT.get(reason) or "本轮部分数据不可用"
+    family = _STRATEGY_LABELS.get(_lower(item.get("strategy_family")), "策略")
+    return (_upper(item.get("symbol")) or "相关标的", f"{family}：{detail}，候选结果不完整")
 
 
-def _strategy_data_gap_reminders(
-    brief: Mapping[str, Any],
-) -> list[str]:
-    reminders = _settlement_pending_reminders(brief)
-    seen: set[tuple[str, ...]] = set()
+def _strategy_data_gap_reminders(brief: Mapping[str, Any]) -> list[str]:
+    notices = []
     for item in brief.get("data_gaps") or []:
         if not isinstance(item, Mapping):
             continue
-        reason = _lower(item.get("reason"))
-        symbol = _upper(item.get("symbol")) or "相关标的"
-        family = _STRATEGY_LABELS.get(
-            _lower(item.get("strategy_family")),
-            "策略",
-        )
-        identity = (symbol, family, reason)
-        if reason == "earnings_soft_coverage_partial":
-            if identity not in seen:
-                reminders.append(
-                    f"{symbol} {family}：较远财报日历上下文部分不可用；6 个自然日硬窗口证据完整，候选资格不受此缺口影响"
-                )
-                seen.add(identity)
+        if (_lower(item.get("scope")) not in {"strategy", "contract"}
+                or _lower(item.get("severity")) != "warning"
+                or item.get("actionable") is not False):
             continue
-        if (
-            _lower(item.get("scope")) not in {"strategy", "contract"}
-            or _lower(item.get("severity")) != "warning"
-            or item.get("actionable") is not False
-        ):
-            continue
-        if reason == "opening_candidate_strategy_partial_data" and _lower(item.get("reason_code")) == "term_matched_rv_unavailable":
-            identity = (symbol, family, reason, _lower(item.get("expiration")), _lower(item.get("rv_reason")))
-            if identity not in seen:
-                reminders.append(_rv_gap_reminder(item))
-                seen.add(identity)
-            continue
-        if identity in seen:
-            continue
-        if (
-            _lower(item.get("outcome")) == "success_empty"
-            and reason in {"no_expirations", "no_contract_rows", "no_feasible_strikes"}
-        ):
-            detail = {
-                "no_expirations": "本轮未发现可用到期日",
-                "no_contract_rows": "本轮未找到可扫描合约",
-                "no_feasible_strikes": "本轮无可行开仓行权价",
-            }[reason]
-            reminders.append(
-                f"{symbol} {family}：{detail}，已按零候选完成（非操作建议）"
-            )
-        elif reason == "strategy_status_projection_mismatch":
-            reminders.append(
-                f"{symbol} {family}：局部告警证据不一致，已忽略该提示（不影响其他可靠结果）"
-            )
-        elif reason == "opening_candidate_strategy_partial_data":
-            if _lower(item.get("reason_code")) == "required_data_partial_coverage":
-                reminders.append(_required_data_coverage_reminder(item))
-                seen.add(identity)
-                continue
-            if _lower(item.get("reason_code")) == "option_close_settlement_pending":
-                continue
-            detail = _PARTIAL_DATA_REASON_TEXT.get(
-                _lower(item.get("reason_code"))
-            )
-            reminders.append(
-                f"{symbol} {family}：{detail}，候选结果不完整"
-                if detail
-                else f"{symbol} {family}：本轮部分数据不可用，候选结果不完整"
-            )
-        seen.add(identity)
-    return reminders
-
-
-def _rv_gap_reminder(item: Mapping[str, Any]) -> str:
-    symbol = _upper(item.get("symbol")) or "相关标的"
-    family = _STRATEGY_LABELS.get(_lower(item.get("strategy_family")), "策略")
-    expiry = str(item.get("expiration") or "").strip()
-    reason = _lower(item.get("rv_reason"))
-    labels = {
-        "calendar_coverage_incomplete": "交易日历覆盖不足",
-        "calendar_source_conflict": "交易日历来源冲突",
-        "calendar_source_integrity_error": "交易日历来源校验失败",
-        "trading_calendar_empty": "交易日历为空",
-        "future_trading_sessions_missing": "剩余交易日证据缺失",
-        "historical_calendar_horizon_insufficient": "历史交易日覆盖不足",
-        "qfq_history_session_gap": "前复权收盘价缺少交易日",
-        "term_matched_returns_insufficient": "期限匹配的收益率样本不足",
-    }
-    cause = labels.get(reason)
-    if reason.startswith("trading_calendar_error:"):
-        cause = "交易日历查询失败"
-    elif reason.startswith("qfq_history_error:"):
-        cause = "前复权历史行情查询失败"
-    if not cause:
-        cause = "原因未识别" if reason else "原因未提供"
-    detail = _PARTIAL_DATA_REASON_TEXT["term_matched_rv_unavailable"]
-    if expiry:
-        return f"{symbol} {family}：{expiry} 到期，{detail}（{cause}），候选结果不完整"
-    return f"{symbol} {family}：{detail}，候选结果不完整（到期日未标明；{cause}）"
+        # Valid empty results are covered by the strategy summary. Internal
+        # reconciliation and non-impacting calendar gaps are diagnostic only.
+        if _lower(item.get("reason")) == "opening_candidate_strategy_partial_data":
+            notice = _partial_data_notice(item)
+            if notice:
+                notices.append(notice)
+    return _group_symbol_notices(notices)
 
 
 def _capacity_views(
@@ -3213,17 +3052,16 @@ def _fund_views(brief: Mapping[str, Any]) -> list[str]:
                     out.append(f"提醒：在途资金 {money} 未纳入开仓额度；指派、欠款或取数证据未匹配。")
     pending = funds.get("cash_secured_pending_by_symbol_by_ccy")
     if isinstance(pending, Mapping):
-        for symbol, amounts in sorted(pending.items()):
-            reserved = "、".join(
-                _currency_money(currency, amount)
-                for currency, amount in _currency_amounts(amounts).items()
-            )
-            if reserved:
-                out.append(f"{symbol} 归属未定，已保守扣留担保：{reserved}（未计入可用资金）")
+        symbols = [symbol for symbol, amounts in sorted(pending.items()) if _currency_amounts(amounts)]
+        if symbols:
+            out.append(f"{_symbol_scope(symbols)}：归属未定，相关担保金未计入可用资金")
+    fund_notices = []
     unavailable = funds.get("cash_secured_unavailable_by_symbol")
     if opening_cny is None and isinstance(unavailable, Mapping):
         for symbol, reason in sorted(unavailable.items()):
             reason_code = _lower(reason)
+            if reason_code == "option_close_settlement_pending":
+                continue
             detail = {
                 "option_close_settlement_pending": "期权平仓待结算确认",
                 "short_put_cash_secured_basis_missing": "期权担保计算依据缺失",
@@ -3237,7 +3075,8 @@ def _fund_views(brief: Mapping[str, Any]) -> list[str]:
                 if currency in {"CNY", "HKD", "USD"} and isinstance(symbols, list) and symbol in symbols
             ) if isinstance(unavailable_by_ccy, Mapping) else []
             scope = f"（{'/'.join(currencies)}）" if currencies else ""
-            out.append(f"可开仓资金待核实：{symbol}{scope} {detail}")
+            fund_notices.append((symbol, f"可开仓资金待核实{scope}：{detail}"))
+    out.extend(_group_symbol_notices(fund_notices))
     return out
 
 
