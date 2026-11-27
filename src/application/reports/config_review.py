@@ -832,6 +832,8 @@ def _resolve_field(
     *,
     kind: str,
 ) -> tuple[Any, str]:
+    if key in {"min_strike", "max_strike"} and key in section and section[key] is None:
+        return None, "explicit"
     if key in section and section.get(key) is not None:
         value: Any = section.get(key)
         source = "explicit"

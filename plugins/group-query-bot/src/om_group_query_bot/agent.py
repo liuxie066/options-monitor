@@ -857,13 +857,19 @@ class GroupQueryAgent:
             messages.append({"role": "assistant", "content": explanation,
                              "tool_calls": calls})
             names = [str((call.get("function") or {}).get("name") or "") for call in calls]
-            if QUESTION_TOOL["name"] in names and len(calls) != 1:
+            if len(calls) != 1 and (
+                    QUESTION_TOOL["name"] in names or GENERAL_ANSWER_TOOL["name"] in names):
                 # Preflight the complete batch before any dispatch, regardless of order.
+                batch_message = (
+                    "提问必须单独调用；本批未执行任何业务查询。"
+                    if QUESTION_TOOL["name"] in names
+                    else "通用回答必须单独调用；本批未执行任何业务查询。")
                 for call in calls:
                     messages.append({"role": "tool", "tool_call_id": str(call.get("id") or ""),
                                      "content": _canonical({"ok": False, "error": "tool_batch_conflict",
-                                                            "message": "提问必须单独调用；本批未执行任何业务查询。"})})
-                input_error_fields = ()
+                                                            "message": batch_message})})
+                if QUESTION_TOOL["name"] in names:
+                    input_error_fields = ()
                 continue
             try:
                 if not fresh_task:
@@ -935,6 +941,22 @@ class GroupQueryAgent:
                         break
                     if isinstance(result, GeneralAnswer):
                         explanation = result.answer
+                        if last_result is not None:
+                            verdict = check_result_reply(
+                                explanation, method=last_result[0], data=last_result[1],
+                                fact_card_text=last_card or "", user_text=text, now=now)
+                            if not verdict.ok:
+                                if (not guard_retry_used
+                                        and budget.model_calls < budget.max_model_calls):
+                                    guard_retry_used = True
+                                    messages.append({
+                                        "role": "tool", "tool_call_id": str(call.get("id") or ""),
+                                        "content": _canonical(payload)})
+                                    messages.append({"role": "user",
+                                                     "content": correction_message(verdict)})
+                                    break
+                                fallback_used = True
+                                reasons.append("reply_guard_fallback")
                         general_answer = True
                         reasons.append("general_answer")
                         stop = True

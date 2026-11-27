@@ -631,8 +631,9 @@ def test_second_guard_failure_falls_back_to_host_wording(tmp_path):
     assert "999.9" not in reply.text
 
 
+@pytest.mark.parametrize("reply_route", ["text", "general"])
 @pytest.mark.parametrize("rewrite_is_valid", [True, False], ids=["rewrite", "fallback"])
-def test_conditional_roll_nonadvice_requires_unverified_coverage(tmp_path, rewrite_is_valid):
+def test_conditional_roll_nonadvice_requires_unverified_coverage(tmp_path, rewrite_is_valid, reply_route):
     arguments = _roll_arguments()
     arguments["position"]["contract"]["option_type"] = "call"
     data = {
@@ -661,7 +662,8 @@ def test_conditional_roll_nonadvice_requires_unverified_coverage(tmp_path, rewri
                  "费用按模型估算，不是账户实际扣费。")
     model = _ScriptedModel([
         _tool_response("evaluate_roll_up", arguments),
-        _text_response(misleading),
+        (_text_response(misleading) if reply_route == "text" else
+         _tool_response("answer_general", {"answer": misleading}, "call_general")),
         _text_response(corrected if rewrite_is_valid else misleading),
     ])
     api = _FakeAPI(data={"evaluate_roll_up": data})
@@ -1076,3 +1078,127 @@ def test_clarifications_fallbacks_and_explanations_have_no_fixed_note(tmp_path, 
                                         max_turns=10, max_tokens=10000, estimate=_estimate)
     assert all("未执行实时查询" not in item["content"]
                for turn in turns for item in turn["messages"] if item["role"] == "assistant")
+
+
+@pytest.mark.parametrize("valid", [True, False])
+def test_general_after_quote_uses_business_guard(tmp_path, valid):
+    good = "NVDA 最新价 185.0。"
+    answer = good if valid else "NVDA 最新价 999.99，可以买入。"
+    model = _ScriptedModel([
+        _tool_response("query_quotes", QUOTE_ARGUMENTS, "call_quote"),
+        _tool_response("answer_general", {"answer": answer}, "call_general"),
+        _text_response(good),
+    ])
+    api = _FakeAPI()
+    agent, conversations = _agent(tmp_path, model=model, api=api)
+
+    reply = agent.handle_event(_event(), "NVDA 现价")
+
+    assert reply.text == good
+    assert reply.status == "ok"
+    assert len(api.calls) == 1
+    assert len(model.calls) == (2 if valid else 3)
+    if not valid:
+        assert "reply_guard_retry" in reply.reason_codes
+        messages = model.calls[-1]["messages"]
+        assert sum(m.get("tool_call_id") == "call_general" for m in messages) == 1
+        assert messages[-1]["role"] == "user"
+        assert "999.99" in messages[-1]["content"]
+    turns = conversations.context_turns(
+        _event().scope_sha256("gq"), NOW, max_turns=10, max_tokens=10000, estimate=_estimate)
+    assert all("999.99" not in m["content"] for turn in turns
+               for m in turn["messages"] if m["role"] == "assistant")
+
+
+@pytest.mark.parametrize("routes", [("general", "text"), ("text", "general"), ("general", "general")])
+def test_text_and_general_share_one_guard_retry(tmp_path, routes):
+    bad = "NVDA 最新价 999.99。"
+    responses = [_tool_response("query_quotes", QUOTE_ARGUMENTS, "call_quote")]
+    for index, route in enumerate(routes):
+        responses.append(_text_response(bad) if route == "text" else
+                         _tool_response("answer_general", {"answer": bad}, f"call_general_{index}"))
+    model = _ScriptedModel(responses)
+    agent, _ = _agent(tmp_path, model=model)
+
+    reply = agent.handle_event(_event(), "NVDA 现价")
+
+    assert "999.99" not in reply.text
+    assert "185.0000" in reply.text
+    assert "reply_guard_fallback" in reply.reason_codes
+    assert len(model.calls) == 3
+    assert len(agent.api_client.calls) == 1
+
+
+def test_general_guard_without_retry_budget_uses_facts(tmp_path):
+    model = _ScriptedModel([
+        _tool_response("query_quotes", QUOTE_ARGUMENTS),
+        _tool_response("answer_general", {"answer": "NVDA 最新价 999.99。"}),
+    ])
+    agent, _ = _agent(tmp_path, model=model, model_calls=2)
+    reply = agent.handle_event(_event(), "NVDA 现价")
+    assert "999.99" not in reply.text
+    assert "185.0000" in reply.text
+    assert "reply_guard_fallback" in reply.reason_codes
+    assert len(model.calls) == 2
+    assert len(agent.api_client.calls) == 1
+
+
+@pytest.mark.parametrize("general_first", [False, True])
+@pytest.mark.parametrize("recovery", ["business", "general", "exhausted"])
+def test_general_mixed_batch_has_no_partial_dispatch_and_can_recover(tmp_path, general_first, recovery):
+    quote = _tool_response("query_quotes", QUOTE_ARGUMENTS, "batch_quote")
+    general = _tool_response("answer_general", {"answer": "NVDA 最新价 999.99。"}, "batch_general")
+    calls = quote["message"]["tool_calls"] + general["message"]["tool_calls"]
+    batch = {"message": {"content": "NVDA 最新价 999.99。",
+                         "tool_calls": list(reversed(calls)) if general_first else calls},
+             "usage": {"completion_tokens": 10}}
+    if recovery == "business":
+        following = [_tool_response("query_quotes", QUOTE_ARGUMENTS, "retry_quote"),
+                     _tool_response("answer_general", {"answer": "NVDA 最新价 185.0。"}, "retry_general")]
+    elif recovery == "general":
+        following = [_tool_response("answer_general", {"answer": "可以先解释概念。"}, "retry_general")]
+    else:
+        following = [batch]
+    model = _ScriptedModel([batch, *following])
+    api = _FakeAPI()
+    agent, _ = _agent(tmp_path, model=model, api=api, model_calls=2 if recovery == "exhausted" else 4)
+
+    reply = agent.handle_event(_event(), "NVDA 现价")
+
+    assert "999.99" not in reply.text
+    assert len(api.calls) == (1 if recovery == "business" else 0)
+    assert len(model.calls) == (3 if recovery == "business" else 2)
+    errors = [m for m in model.calls[1]["messages"]
+              if m.get("tool_call_id") in {"batch_quote", "batch_general"}]
+    assert {m["tool_call_id"] for m in errors} == {"batch_quote", "batch_general"}
+    assert all(json.loads(m["content"])["error"] == "tool_batch_conflict" for m in errors)
+    if recovery == "exhausted":
+        assert reply.status == "limited"
+    else:
+        assert reply.status == "ok"
+        assert reply.text == ("NVDA 最新价 185.0。" if recovery == "business" else "可以先解释概念。")
+
+
+def test_guarded_general_is_the_only_persisted_and_delivered_reply(tmp_path):
+    model = _ScriptedModel([
+        _tool_response("query_quotes", QUOTE_ARGUMENTS, "call_quote"),
+        _tool_response("answer_general", {"answer": "NVDA 最新价 999.99。"}, "call_general"),
+        _text_response("NVDA 最新价 185.0。"),
+    ])
+    replies = _Replies()
+    service = _service(tmp_path, model, replies)
+    service.agent.api_client = _FakeAPI()
+    payload = _payload()
+    payload["event"]["message"]["content"] = json.dumps({"text": "@_user_1 NVDA 现价"})
+
+    first = service.handle_payload(payload, "ou_bot")
+    duplicate = service.handle_payload(payload, "ou_bot")
+
+    assert first["status"] == "acknowledged"
+    assert duplicate["status"] == "duplicate"
+    assert len(replies.calls) == 1
+    assert len(service.agent.api_client.calls) == 1
+    assert replies.calls[0]["text"] == "NVDA 最新价 185.0。"
+    with service.conversations.connect() as db:
+        outbox = [row["body"] for row in db.execute("select body from outbox_payloads")]
+    assert outbox == [replies.calls[0]["text"]]
