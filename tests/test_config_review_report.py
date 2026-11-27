@@ -274,3 +274,115 @@ def test_prices_file_rejects_missing_and_invalid_entries(tmp_path: Path) -> None
         load_prices_file(invalid)
     assert invalid_exc.value.code == "REPORT_PRICES_INVALID"
     assert "NVDA" in invalid_exc.value.details["errors"][0]
+
+
+@pytest.mark.parametrize("side,field", [
+    ("sell_put", "min_strike"), ("sell_put", "max_strike"),
+    ("sell_call", "min_strike"), ("sell_call", "max_strike"),
+])
+@pytest.mark.parametrize("mode", ["omitted", "number", "null", "zero"])
+def test_strike_override_matches_builder_and_report_cli(tmp_path, side, field, mode):
+    import contextlib
+    import io
+    from src.application.agent_tool_contracts import AgentToolError
+    from src.application.config_defaults import default_config
+    from src.application.layered_config import build_layered_runtime_config_from_user_config
+    from src.application.reports.config_review import build_config_review
+    from src.interfaces.cli.main import main
+
+    system = default_config()
+    for name in ("sell_put", "sell_call"):
+        system["markets"]["us"]["symbol_defaults"][name] = {
+            "enabled": True, "strategy": "insurance_underwriting", "min_dte": 7,
+            "max_dte": 30, "min_strike": 100, "max_strike": 200,
+        }
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "system.json").write_text(json.dumps(system))
+    prices = tmp_path / "prices.json"
+    prices.write_text(json.dumps({"prices": {"NVDA": 150}}))
+    values = {"number": 175, "null": None, "zero": 0}
+    section = {} if mode == "omitted" else {field: values[mode]}
+    user = {"accounts": ["demo"],
+            "account_settings": {"demo": {"type": "futu", "futu": {"account_id": "REAL_00000000"}}},
+            "symbols": [{"symbol": "NVDA", side: section}]}
+    (configs / "user.us.json").write_text(json.dumps(user))
+    builder_args = dict(repo_root=tmp_path, market="us", user_config=user, system_config=system)
+    if mode == "zero":
+        # Existing difference: canonical config rejects zero; this report preserves it.
+        with pytest.raises(AgentToolError) as caught:
+            build_layered_runtime_config_from_user_config(**builder_args)
+        assert caught.value.code == "CONFIG_ERROR"
+        expected = 0
+    else:
+        canonical, _ = build_layered_runtime_config_from_user_config(**builder_args)
+        expected = canonical["symbols"][0][side][field]
+    report = build_config_review(configs_root=configs, runtime_root=tmp_path, prices_file=prices)
+    row = report.payload["markets"][0]["symbols"][0]
+    assert row["strategies"][side][field] == expected
+    if mode in {"null", "zero"}:
+        path = f"{side}.{field}"
+        assert all(entry["path"] != path for entry in row["distances"])
+        assert all(entry["path"] != path for entry in report.payload["boundary_assessments"])
+    if mode == "null":
+        assert expected is None
+        label = "上限" if field == "max_strike" else "下限"
+        side_label = "卖出看跌" if side == "sell_put" else "卖出看涨"
+        detail = next(line for line in report.markdown.splitlines() if line.startswith(f"- {side_label}（"))
+        assert f"{label}未设置" in detail
+        if (side, field) == ("sell_put", "max_strike"):
+            assert report.summary["put_cap_configured"] == 0
+        elif (side, field) == ("sell_call", "min_strike"):
+            assert report.summary["call_floor_configured"] == 0
+    captured = io.StringIO()
+    with contextlib.redirect_stdout(captured):
+        rc = main(["report", "run", "config_review", "--dry-run", "--json",
+                   "--runtime-root", str(tmp_path), "--configs-root", str(configs),
+                   "--prices-file", str(prices)])
+    assert rc == 0
+    envelope = json.loads(captured.getvalue())
+    payload = json.loads(next(a["content"] for a in envelope["artifacts"] if a["name"] == "report.json"))
+    assert payload["markets"][0]["symbols"][0]["strategies"][side][field] == expected
+    assert not (tmp_path / "reports").exists()
+
+
+@pytest.mark.parametrize("field", ["min_strike", "max_strike"])
+@pytest.mark.parametrize("mode", ["omitted", "null"])
+def test_combo_strike_null_does_not_inherit_nonempty_default(tmp_path, field, mode):
+    from src.application.reports.config_review import build_config_review
+
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    defaults = {"combo_yield": {"enabled": True, "min_dte": 7, "max_dte": 30,
+                                "call": {"min_strike": 100, "max_strike": 200}}}
+    (configs / "system.json").write_text(json.dumps({"markets": {"us": {"symbol_defaults": defaults}}}))
+    call = {} if mode == "omitted" else {field: None}
+    (configs / "user.us.json").write_text(json.dumps({"symbols": [
+        {"symbol": "NVDA", "combo_yield": {"enabled": False, "call": call}}]}))
+    prices = tmp_path / "prices.json"
+    prices.write_text(json.dumps({"prices": {"NVDA": 150}}))
+    report = build_config_review(configs_root=configs, runtime_root=tmp_path, prices_file=prices)
+    row = report.payload["markets"][0]["symbols"][0]
+    assert row["strategies"]["combo_yield"]["enabled"] is False
+    expected = None if mode == "null" else defaults["combo_yield"]["call"][field]
+    assert row["strategies"]["combo_yield"][f"call_{field}"] == expected
+    if mode == "null":
+        path = f"combo_yield.call.{field}"
+        assert all(entry["path"] != path for entry in row["distances"])
+        assert all(entry["path"] != path for entry in report.payload["boundary_assessments"])
+
+
+@pytest.mark.parametrize("invalid", [False, "invalid", float("inf")])
+def test_null_support_does_not_turn_invalid_strike_into_default(tmp_path, invalid):
+    from src.application.agent_tool_contracts import AgentToolError
+    from src.application.reports.config_review import build_config_review
+
+    (tmp_path / "system.json").write_text(json.dumps({"markets": {"us": {"symbol_defaults": {
+        "sell_put": {"max_strike": 200}}}}}))
+    (tmp_path / "user.us.json").write_text(json.dumps({"symbols": [
+        {"symbol": "NVDA", "sell_put": {"max_strike": invalid}}]}))
+    prices = tmp_path / "prices.json"
+    prices.write_text(json.dumps({"prices": {"NVDA": 150}}))
+    with pytest.raises(AgentToolError) as caught:
+        build_config_review(configs_root=tmp_path, runtime_root=tmp_path, prices_file=prices)
+    assert caught.value.code == "REPORT_CONFIG_INVALID"

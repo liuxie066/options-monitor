@@ -123,6 +123,8 @@ om report schedule [--format text|json]
 
 显式 `--configs-root PATH` 仍可审阅该目录的 `user.hk.json` / `user.us.json` 和本地 system defaults，供开发或测试；runtime 缺失/损坏不会自动切回此模式。
 
+本地配置中的行权价字段须区分缺键与显式 `null`：缺键继承已有默认值，显式 `null` 保留取消边界的含义，不重新回填默认值；此规则同样适用于 Combo 的 Call 行权价字段。报告不会为已取消的边界生成距离或边界评估，也不会写回配置。
+
 默认价格来自 `output_runs/<run_id>/state/required_data_snapshot_manifest.json`：每市场按有效 `sealed_at_utc` 从新到旧选一个完整扫描；tick metrics 必须包含该市场，且至少一个 `accounts` 项 `ran_scan=true` 与同账户的 `scan_outcomes=true` 正向匹配。失败、缺少成功证据、不完整或未来清单不算成功扫描。
 
 通过 `src/application/required_data_snapshot.py::resolve_frozen_required_data_csv_bytes_batch` 读取校验后的冻结 CSV/共享 blob，不依赖可能已退役的 raw/CSV 副本。行情值取 `spot`，时点取 `spot_observed_at_utc`，不使用目录 mtime、报告时间或封存时间冒充行情时间。历史解码关闭日内 receipt TTL，但仍按既有 **96 小时**报告政策判断过期；长假期间可能全部进入“观察”。缺价、无时区、未来时间和过期都不会当作 0 或新鲜价格。所选市场运行中缺失的标的不再从更老运行拼补。

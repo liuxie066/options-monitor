@@ -21,7 +21,7 @@ NOW = datetime(2026, 11, 15, 12, tzinfo=timezone.utc)
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _runtime_config(root: Path, market: str, symbol: str, minimum: int = 100, *, as_list: bool = False) -> Path:
+def _runtime_config(root: Path, market: str, symbol: str, minimum: int | None = 100, *, as_list: bool = False) -> Path:
     payload = _inline_runtime_config(market=market.lower())
     settings = {"sell_call": {"enabled": True, "min_strike": minimum, "min_dte": 7, "max_dte": 60}}
     payload["symbols"] = [{"symbol": symbol, **settings}] if as_list else {symbol: settings}
@@ -68,8 +68,9 @@ def _scan(root: Path, monkeypatch: pytest.MonkeyPatch, *, run_id: str, symbol: s
 
 
 @pytest.mark.parametrize("as_list", [False, True])
-def test_report_defaults_to_generated_runtime_config_and_preserves_explicit_local_source(tmp_path: Path, as_list: bool) -> None:
-    _runtime_config(tmp_path, "US", "PDD", 100, as_list=as_list)
+@pytest.mark.parametrize("minimum", [100, None])
+def test_report_defaults_to_generated_runtime_config_and_preserves_explicit_local_source(tmp_path: Path, as_list: bool, minimum: int | None) -> None:
+    _runtime_config(tmp_path, "US", "PDD", minimum, as_list=as_list)
     _runtime_config(tmp_path, "HK", "0700.HK", as_list=as_list)
     local = tmp_path / "configs"
     local.mkdir()
@@ -78,7 +79,7 @@ def test_report_defaults_to_generated_runtime_config_and_preserves_explicit_loca
     prices.write_text(json.dumps({"generated_at_utc": NOW.isoformat(), "prices": {"PDD": 80}}))
     runtime = build_config_review(runtime_root=tmp_path, prices_file=prices, now=NOW)
     pdd = next(m for m in runtime.payload["markets"] if m["market"] == "US")["symbols"][0]
-    assert pdd["strategies"]["sell_call"]["min_strike"] == 100
+    assert pdd["strategies"]["sell_call"]["min_strike"] == minimum
     assert runtime.payload["config_source"] == "runtime"
     assert "config.us.json" not in runtime.markdown
     assert "user.us.json" not in runtime.markdown
