@@ -1,0 +1,42 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.74",
+  "base": {
+    "tag": "v4.6.73",
+    "commit": "01110b7301d2d705b3016bad81564a562d4c3248"
+  },
+  "reviewed_head": "eed382c35379546d1bb8d45d8024220fa5cf4fd4",
+  "commits": [
+    {
+      "sha": "eed382c35379546d1bb8d45d8024220fa5cf4fd4",
+      "subject": "fix(validation): guard business replies and preserve null strike bounds"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "已有业务结果时，群聊普通回答与 general 回答共用事实校验和一次纠正机会；general 与其他工具混合回复时，在调用前整批拒绝，避免绕过校验或执行部分查询。",
+      "commits": [
+        "eed382c35379546d1bb8d45d8024220fa5cf4fd4"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "配置检查报告保留显式 null 行权价边界的清空含义，不再错误继承默认边界；缺键继承、零值及 DTE/启用状态的既有规则保持不变。",
+      "commits": [
+        "eed382c35379546d1bb8d45d8024220fa5cf4fd4"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "eed382c35379546d1bb8d45d8024220fa5cf4fd4",
+      "references": [
+        "docs/GROUP_QUERY_BOT_DESIGN.md",
+        "docs/REPORT_CENTER.md",
+        "https://github.com/liuxie066/options-monitor/pull/1306"
+      ]
+    }
+  ]
+}
