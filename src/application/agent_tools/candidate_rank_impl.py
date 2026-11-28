@@ -15,7 +15,7 @@ from src.application.candidate_evidence_history import (
 from src.application.opening_candidate_snapshot import ranked_opening_candidates
 from src.application.runtime_paths import resolve_runtime_root
 from src.application.agent_tools.candidate_filter_impl import _candidate_page
-from src.application.agent_tools.project_reader import ProjectReaderError, decode_cursor, digest
+from src.application.query_cursor import CursorError as ProjectReaderError, decode_cursor, digest
 
 
 def _as_int(value: Any, *, default: int, low: int, high: int) -> int:

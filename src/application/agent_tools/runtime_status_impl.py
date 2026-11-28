@@ -3564,7 +3564,7 @@ __all__ = [
 
 def read_onboarding_status(*, base: Path, document: dict[str, Any]) -> dict[str, Any]:
     """Small local-evidence projection; opening the menu never runs diagnostics."""
-    from src.application.agent_tools.project_reader import ProjectReaderError
+    from src.application.query_cursor import CursorError as ProjectReaderError
     from src.application.agent_tools.project_runs import discover_runs
     from src.application.daily_decision_brief_repository import read_latest_daily_decision_brief, read_run_daily_decision_brief
     from src.application.runtime_paths import RuntimeRootResolution

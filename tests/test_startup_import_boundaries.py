@@ -64,6 +64,22 @@ print(json.dumps([name for name in sys.modules
     assert loaded == []
 
 
+@pytest.mark.parametrize("module", [
+    "src.application.read_content",
+    "src.application.agent_tools.performance_presentation",
+])
+def test_memory_content_presentation_does_not_load_filesystem_reader(module: str) -> None:
+    loaded = json.loads(_run_python(f"""
+import importlib
+import json
+import sys
+importlib.import_module({module!r})
+print(json.dumps([name for name in sys.modules
+                  if name == 'src.application.agent_tools.project_reader']))
+"""))
+    assert loaded == []
+
+
 def test_ordinary_cli_parser_loads_no_forbidden_side_lanes() -> None:
     loaded = _loaded_side_lane_modules(
         "from contextlib import redirect_stdout\n"

@@ -66,7 +66,7 @@ def _notification_perception_read_tool(
         runtime_root=payload.get("runtime_root"),
     )
     from src.application.agent_tools.project import _QUERY_CONTEXT
-    from src.application.agent_tools.project_reader import ProjectReaderError
+    from src.application.query_cursor import CursorError as ProjectReaderError
 
     deadline, cancelled = _QUERY_CONTEXT.get()
     try:

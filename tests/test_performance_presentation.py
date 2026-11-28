@@ -13,7 +13,7 @@ import pytest
 from src.application import query_cursor
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.agent_tools import positions, materialization_impl
-from src.application.agent_tools.project_reader import redacted_text
+from src.application.read_content import redacted_text
 from src.application.bot import tools as bot_tools
 from src.application.performance import query, query_http
 from src.application.performance.query_contracts import PerformanceQueryError
@@ -366,7 +366,7 @@ def test_empty_page_is_complete_without_cursor(monkeypatch):
 
 @pytest.mark.parametrize("max_chars", [0, True, "10", -1])
 def test_page_text_rejects_invalid_internal_fragment_cap(max_chars):
-    from src.application.agent_tools.project_reader import page_text
+    from src.application.read_content import page_text
     with pytest.raises(query_cursor.CursorError, match="INPUT_ERROR"):
         page_text(b"text", relative_name="row", resource="option_performance_report", scope={}, max_chars=max_chars)
 

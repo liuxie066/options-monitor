@@ -5,7 +5,7 @@ import json
 from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.agent_tools.project_reader import page_text
+from src.application.read_content import page_text
 from src.application.query_cursor import CursorError, decode_cursor, digest, encode_cursor
 
 _KIND = "performance_tool_page.v1"

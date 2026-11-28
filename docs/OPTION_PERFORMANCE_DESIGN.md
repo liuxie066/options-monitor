@@ -864,7 +864,7 @@ match; a cursor bound to a local custom path cannot be reused remotely.
 `agent_tools/performance_presentation.py` owns Tool/Bot display budgets: 6000 UTF-8 JSON bytes
 for summary data, 5000 for row/breakdown data, including metadata, duplicated breakdown rows and
 both returned cursor copies. Summary display retains whole groups when they fit and offers a
-`detail_query`. Large rows use the existing redacted `page_text` reader; text fragments are display
+`detail_query`. Large rows use the shared redacted `read_content.page_text` presenter; text fragments are display
 evidence, not a replacement structured financial API. Necessary quality metadata is never
 truncated; an irreducible response or unsupported body size returns an explicit read failure.
 The display cursor wraps a canonical page cursor and a within-page position; replay revalidates
@@ -877,7 +877,7 @@ cursors require a fresh query. Tool calls with no pagination/view selectors reta
 full structured contract; public Bot input normalization selects summary by default.
 
 Signing uses the existing `inbound.operation_hmac_key` secret owner and shared `query_cursor`
-primitives over the ledger cursor codec; its namespace and 30-minute expiry remain unchanged.
+primitives over the `infrastructure.signed_cursor` codec; its namespace and 30-minute expiry remain unchanged.
 Absent signing credentials keep a complete finite page complete; a response needing continuation
 has explicit partial coverage / `continuation_unavailable`, never a manufactured cursor.
 Performance query/transport failures use `PerformanceQueryError`; CLI and Tool boundaries translate

@@ -10,7 +10,8 @@ from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any, Callable
 
-from src.application.agent_tools.project_reader import ProjectReaderError, list_names, read_bytes
+from src.application.query_cursor import CursorError as ProjectReaderError
+from src.application.agent_tools.project_reader import list_names, read_bytes
 from src.application.candidate_snapshot_manifest import (
     CANDIDATE_SNAPSHOT_MANIFEST_V4_FILE,
     CANDIDATE_SNAPSHOT_MANIFEST_V1_FILE,
@@ -303,9 +304,9 @@ def load_run_diagnostics(
     deadline_monotonic: float | None = None, cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Project fixed, authenticated failure fields; never expose raw audit text."""
-    from src.application.agent_tools.project_reader import (
-        _directory, reader_query_context, digest, decode_cursor, set_continuation,
-    )
+    from src.application.agent_tools.project_reader import _directory, reader_query_context
+    from src.application.query_cursor import digest, decode_cursor
+    from src.application.read_content import set_continuation
 
     market = str(scope.get("market") or "")
     accounts = scope.get("accounts") or []
@@ -568,10 +569,9 @@ def _project_run_files(
     _reader_root: int,
 ) -> dict[str, Any]:
     """Canonical-tool adapter; cursor scope is rechecked before every underlying read."""
-    from src.application.agent_tools.project_reader import (
-        MAX_OUTPUT_BYTES, set_continuation, decode_cursor, digest, redacted_text, page_text,
-        _directory,
-    )
+    from src.application.read_content import MAX_OUTPUT_BYTES, set_continuation, redacted_text, page_text
+    from src.application.query_cursor import decode_cursor, digest
+    from src.application.agent_tools.project_reader import _directory
 
     if action not in {"list", "read", "search"} or not isinstance(query, str) or len(query) > 512:
         raise ProjectReaderError("INPUT_ERROR")
