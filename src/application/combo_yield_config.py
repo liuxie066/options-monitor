@@ -4,7 +4,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
-from domain.domain.engine.combo_yield import COMBO_LONG_MAX_DELTA, COMBO_LONG_MIN_DELTA
+from src.application.config_defaults import DEFAULT_CONFIG
 
 from src.application.strategy_policy import (
     INSURANCE_UNDERWRITING_PROFILE,
@@ -41,33 +41,9 @@ COMBO_YIELD_LEGACY_SCENARIO_FIELDS: tuple[str, ...] = (
     "min_upside_lift_to_call_cost",
     "min_upside_lift_to_put_credit",
 )
-COMBO_YIELD_DEFAULTS: dict[str, Any] = {
-    "enabled": False,
-    "structure_mode": "same_expiry_pair",
-    "objective": "premium_funded_long_call",
-    "variant": "sp_lc",
-    "min_combo_net_credit": None,
-    "min_net_credit_annualized": 0.08,
-    "min_net_credit_retention": 0.60,
-    "min_open_interest": 100,
-    "min_volume": 5,
-    "max_spread_ratio": 0.35,
-    "max_combo_spread_ratio": 0.50,
-    "call": {
-        "min_delta": COMBO_LONG_MIN_DELTA,
-        "max_delta": COMBO_LONG_MAX_DELTA,
-    },
-    "put": {
-        "min_delta": COMBO_LONG_MIN_DELTA,
-        "max_delta": COMBO_LONG_MAX_DELTA,
-    },
-}
-COMBO_YIELD_MARKET_DEFAULT_OVERRIDES: dict[str, dict[str, Any]] = {
-    "hk": {
-        "min_open_interest": 50,
-        "min_volume": 0,
-    },
-}
+COMBO_YIELD_DEFAULTS: dict[str, Any] = deepcopy(
+    DEFAULT_CONFIG["markets"]["us"]["symbol_defaults"]["combo_yield"]
+)
 COMBO_YIELD_CONFIG_KEY = "combo_yield"
 
 
@@ -137,11 +113,9 @@ def _explicit_overrides(cfg: dict[str, Any], explicit_fields: tuple[str, ...]) -
 
 def combo_yield_defaults_for_market(market: str | None = None) -> dict[str, Any]:
     market_key = str(market or "").strip().lower()
-    defaults = deepcopy(COMBO_YIELD_DEFAULTS)
-    override = COMBO_YIELD_MARKET_DEFAULT_OVERRIDES.get(market_key)
-    if override:
-        defaults = _deep_merge_dict(defaults, override)
-    return defaults
+    markets = DEFAULT_CONFIG["markets"]
+    market_config = markets.get(market_key, markets["us"])
+    return deepcopy(market_config["symbol_defaults"]["combo_yield"])
 
 
 def apply_combo_yield_defaults(cfg: dict[str, Any] | None, *, market: str | None = None) -> dict[str, Any]:
