@@ -41,7 +41,7 @@ def _running(server):
 
 
 @pytest.fixture
-def service(tmp_path, monkeypatch):
+def service(tmp_path, monkeypatch, request):
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
     monkeypatch.delenv("OM_PERFORMANCE_SERVICE_URL", raising=False)
     path = tmp_path / "output_shared/state/option_positions.sqlite3"
@@ -52,6 +52,10 @@ def service(tmp_path, monkeypatch):
             replace(event, lot_id=f"lot-{n}", contract_key=replace(event.contract_key, underlying_symbol=f"TEST{n}"))
         )
         close = _event(f"close-{n}", "close", "2026-09-02T10:00:00", target_lot_id=f"lot-{n}")
+        if getattr(request, "param", False):
+            from test_performance_weighted_reducer import _event as economic_event
+            close = economic_event(f"close-{n}", "close", "2026-09-02T10:00:00",
+                                   target_lot_id=f"lot-{n}", price=0, close_type="cause_pending")
         writer.upsert_trade_event(replace(close, contract_key=replace(close.contract_key, underlying_symbol=f"TEST{n}")))
     cfg = {"accounts": ["lx", "sy"], "portfolio": {}}
     monkeypatch.setattr(query_http, "load_runtime_config", lambda **kw: (tmp_path / "config.us.json", cfg))
@@ -89,7 +93,9 @@ def _forbid(*args, **kwargs):
     raise AssertionError("service consumer entered a local dependency")
 
 
-def test_real_client_cli_tool_and_bot_use_the_canonical_result(service, monkeypatch):
+@pytest.mark.parametrize("service", [False, True], indirect=True)
+def test_real_client_cli_tool_and_bot_use_the_canonical_result(service, monkeypatch, request):
+    pending = request.node.callspec.params["service"]
     url, writer, path, cfg = service
     data, warnings, meta = _remote(url, {**QUERY, "include_rows": True})
     with writer._connect() as conn:
@@ -106,7 +112,21 @@ def test_real_client_cli_tool_and_bot_use_the_canonical_result(service, monkeypa
     )
     assert data == expected and warnings == []
     assert data["schema_version"] == "option_performance.report.v4"
-    assert data["terminated_option_net_income"]["by_currency"]["USD"]["amount"] == 300
+    amount = 600 if pending else 300
+    assert data["terminated_option_net_income"]["by_currency"]["USD"]["amount"] == amount
+    if pending:
+        assert data["quality"]["status"] == "partial"
+        assert "close_reason_pending" in data["quality"]["missing"]
+        assert data["sell_option_win_rate"]["rate"] is None
+        assert data["option_return"]["by_currency"]["USD"]["rate"] is not None
+        assert data["terminated_option_net_income"]["by_currency"]["USD"]["status"] == "observed"
+        assert data["terminated_option_net_income"]["cny_total"]["amount"] == 4200
+        assert all(row["terminated_option_net_income"] == 200 and row["status"] == "partial"
+                   for row in data["rows"])
+        for dimension in ("accounts", "symbols"):
+            rows = data["breakdowns"][dimension]
+            assert sum(row["terminated_option_net_income"]["by_currency"]["USD"]["amount"] for row in rows) == amount
+            assert all(row["option_return"]["by_currency"]["USD"]["rate"] is not None for row in rows)
     status, envelope = _request(url, QUERY)
     assert status == 200
     assert envelope["schema_version"] == "option_performance.api.v1"
@@ -146,6 +166,13 @@ def test_real_client_cli_tool_and_bot_use_the_canonical_result(service, monkeypa
         "option_performance_report", payload, allowed_tools=("option_performance_report",), now_ms=1
     )
     assert response["ok"] and response["data"]["terminated_option_net_income"] == expected["terminated_option_net_income"]
+    from src.application.bot.control.renderer import render_canonical_tool_result
+
+    rendered = render_canonical_tool_result(renderer_key="option_performance", tool_result=response,
+                                             data=response["data"])
+    assert f"USD 合计 {amount:.2f}" in rendered
+    if pending:
+        assert "close_reason_pending" in rendered
     for key in ("schema_version", "metric_semantics", "basis"):
         assert response["data"][key] == expected[key]
     rejected, error = bot_tools.build_tool_payload("option_performance_report", {"config_path": "/bad"})

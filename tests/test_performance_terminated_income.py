@@ -81,7 +81,8 @@ def test_cny_partial_close_allocations_conserve_persisted_rounding_across_period
     assert months == calc(PeriodRequest(period="ytd"))
 
 
-def test_missing_cny_does_not_hide_proven_native_income_and_pending_close_is_not_earned():
+@pytest.mark.parametrize("price", [1, 0.000000000001])
+def test_missing_cny_preserves_native_income_but_nonzero_pending_cash_is_not_earned(price):
     opened = _event("open", "open", "2026-08-20T10:00:00", lot_id="lot", price=3)
     raw = dict(opened.raw_payload)
     raw.pop("cash_conversions")
@@ -90,7 +91,7 @@ def test_missing_cny_does_not_hide_proven_native_income_and_pending_close_is_not
     result = reduce_option_performance(project_trade_events([opened, closed]), period=_period(), basis="terminated")
     assert _cash(result)["amount"] == 200
     assert result.bundle["option_net_cashflow"]["cny_total"]["amount"] is None
-    pending = replace(closed, raw_payload={**closed.raw_payload, "close_type": "cause_pending"})
+    pending = replace(closed, price=price, raw_payload={**closed.raw_payload, "close_type": "cause_pending"})
     result = reduce_option_performance(project_trade_events([opened, pending]), period=_period(), basis="terminated")
     assert _cash(result)["amount"] is None
     assert "close_reason_pending" in _cash(result)["missing"]
@@ -173,3 +174,153 @@ def test_reconciliation_rejects_unimplemented_pages_before_ledger_read(bad):
 
     with pytest.raises(PerformanceQueryError, match="summary only"):
         normalize_option_performance_request({"basis": "cashflow", **bad}, normalize_broker=normalize_broker)
+
+
+@pytest.mark.parametrize("symbol,currency,multiplier,fx", [
+    ("TEST", "USD", 100, 7), ("1234.HK", "HKD", 500, .9),
+])
+@pytest.mark.parametrize("option_type", ["call", "put"])
+@pytest.mark.parametrize("side", ["short", "long"])
+def test_pending_reason_preserves_proven_economics_across_markets(symbol, currency, multiplier, fx, option_type, side):
+    key = _key(symbol=symbol, option_type=option_type, side=side)
+    opened = _event("open", "open", "2026-08-20T10:00:00", key=key, lot_id="lot",
+                    price=3, fee=2, currency=currency, multiplier=multiplier, fx_rate=fx)
+    results = {}
+    for kind, event_type in (("cause_pending", "close"), ("expired", "expire_close"),
+                             ("physical", "assignment" if side == "short" else "exercise")):
+        terminal = _event("end", event_type, "2026-09-02T10:00:00", key=key, target_lot_id="lot",
+                          price=0, fee=1, close_type=kind if event_type == "close" else None,
+                          currency=currency, multiplier=multiplier, fx_rate=fx)
+        results[kind] = reduce_option_performance(project_trade_events([opened, terminal]),
+                                                 period=_period(), basis="terminated")
+    pending = results["cause_pending"]
+    assert _cash(pending, currency) == {"amount": Decimal((3 if side == "short" else -3) * multiplier - 3), "status": "observed", "missing": ()}
+    for result in results.values():
+        assert _cash(result, currency) == _cash(pending, currency)
+        assert result.bundle["option_return"] == pending.bundle["option_return"]
+        assert result.bundle["option_net_cashflow"]["cny_total"] == pending.bundle["option_net_cashflow"]["cny_total"]
+    assert pending.bundle["option_return"]["by_currency"][currency]["rate"] is not None
+    assert pending.bundle["option_return"]["by_currency"][currency]["annualized_rate"] is not None
+    assert pending.bundle["status"] == pending.facts[0].status == "partial"
+    assert pending.facts[0].missing == pending.facts[0].win_missing == ("close_reason_pending",)
+    win_key = "sell_option_win_rate" if side == "short" else "buy_option_win_rate"
+    assert pending.bundle[win_key]["rate"] is None
+    assert results["expired"].bundle[win_key]["rate"] == (1 if side == "short" else 0)
+    assert results["physical"].bundle[win_key]["rate"] == (0 if side == "short" else None)
+
+
+@pytest.mark.parametrize("fee_basis", [None, "estimated"])
+@pytest.mark.parametrize("event_index", [0, 1])
+def test_pending_reason_does_not_bypass_actual_fees(fee_basis, event_index):
+    events = [
+        _event("open", "open", "2026-08-20T10:00:00", lot_id="lot", price=3),
+        _event("end", "close", "2026-09-02T10:00:00", target_lot_id="lot", price=0, close_type="cause_pending"),
+    ]
+    raw = dict(events[event_index].raw_payload)
+    raw.pop("fee_provenance")
+    if fee_basis:
+        raw["fee_provenance"] = {"basis": fee_basis, "amount": 0, "source": "test"}
+    events[event_index] = replace(events[event_index], raw_payload=raw)
+    result = reduce_option_performance(project_trade_events(events), period=_period(), basis="terminated")
+    assert _cash(result)["amount"] is None
+    assert any("fee" in reason for reason in _cash(result)["missing"])
+    assert result.bundle["option_return"]["by_currency"]["USD"]["rate"] is None
+
+
+def test_pending_partial_allocation_retains_only_ended_shares_and_independent_currency_gaps():
+    key = _key(symbol="1234.HK", expiration="2026-08-31")
+    events = [
+        _event("hk-open", "open", "2026-08-20T10:00:00", key=key, lot_id="hk", contracts=2,
+               price=3, fee=4, currency="HKD", multiplier=500, fx_rate=.9),
+        _event("hk-end", "close", "2026-09-01T10:00:00", key=key, target_lot_id="hk", contracts=1,
+               price=0, fee=1, close_type="cause_pending", currency="HKD", multiplier=500, fx_rate=.9),
+    ]
+    result = reduce_option_performance(project_trade_events(events), period=_period(), basis="terminated")
+    assert {fact.state for fact in result.facts} == {"terminated", "unresolved_after_expiry"}
+    ended = next(fact for fact in result.facts if fact.state == "terminated")
+    assert ended.contracts == 1 and ended.option_net_cashflow == 1497
+    assert _cash(result, "HKD")["amount"] is None
+    assert "terminal_evidence_missing" in _cash(result, "HKD")["missing"]
+    # Fully closed HK income remains visible beside an independently unresolved USD lot.
+    events[0] = _event("hk-open", "open", "2026-08-20T10:00:00", key=key, lot_id="hk",
+                        price=3, fee=2, currency="HKD", multiplier=500, fx_rate=.9)
+    events.append(_event("us-open", "open", "2026-08-20T10:00:00", lot_id="us",
+                         key=_key(symbol="TEST", expiration="2026-08-31")))
+    result = reduce_option_performance(project_trade_events(events), period=_period(), basis="terminated")
+    assert _cash(result, "HKD")["amount"] == 1497
+    assert _cash(result)["amount"] is None
+    assert result.bundle["option_net_cashflow"]["cny_total"]["amount"] is None
+    assert result.bundle["option_return"]["by_currency"]["HKD"]["rate"] is not None
+    assert result.bundle["option_return"]["by_currency"]["USD"]["rate"] is None
+
+
+def test_pending_native_income_does_not_require_fx_but_cny_does():
+    opened = _event("open", "open", "2026-08-20T10:00:00", lot_id="lot", price=3)
+    raw = dict(opened.raw_payload)
+    raw.pop("cash_conversions")
+    opened = replace(opened, raw_payload=raw)
+    terminal = _event("end", "close", "2026-09-02T10:00:00", target_lot_id="lot", price=0,
+                      close_type="cause_pending")
+    result = reduce_option_performance(project_trade_events([opened, terminal]), period=_period(), basis="terminated")
+    assert _cash(result)["amount"] == 300
+    assert result.bundle["option_return"]["by_currency"]["USD"]["rate"] is not None
+    assert result.bundle["option_net_cashflow"]["cny_total"]["amount"] is None
+    assert "cash_conversion_missing" in result.bundle["option_net_cashflow"]["cny_total"]["missing"]
+
+
+@pytest.mark.parametrize("event_type", ["expire_close", "assignment"])
+@pytest.mark.parametrize("fee", [1, 3])
+def test_late_reason_and_fee_correction_preserve_terminal_month_and_capital(event_type, fee):
+    key = _key(symbol="TEST", expiration="2026-09-30")
+    opened = _event("open", "open", "2026-09-20T10:00:00", key=key, lot_id="lot", price=3, fee=2)
+    pending = _event("pending", "close", "2026-09-30T16:00:00", key=key, target_lot_id="lot",
+                     price=0, fee=1, close_type="cause_pending")
+    void = replace(_event("void", "void", "2026-10-02T10:00:00", key=key, contracts=0),
+                   target_event_id="pending")
+    confirmed = _event("confirmed", event_type, "2026-09-30T16:00:00", key=key,
+                       target_lot_id="lot", price=0, fee=fee)
+    def calc(events, month):
+        period = normalize_performance_period(PeriodRequest(period="month", month=month),
+                                               report_now_ms=_ms("2026-10-03T12:00:00"))
+        return reduce_option_performance(project_trade_events(events), period=period, basis="terminated")
+    before = calc([opened, pending], "2026-09")
+    after = calc([opened, pending, void, confirmed], "2026-09")
+    assert len(before.facts) == len(after.facts) == 1
+    assert _cash(before)["amount"] == 297
+    assert _cash(after)["amount"] == 298 - fee
+    assert before.facts[0].terminal_at_ms == after.facts[0].terminal_at_ms == pending.event_time_ms
+    for field in ("capital_days", "average_occupied_capital"):
+        assert before.bundle["option_return"]["by_currency"]["USD"][field] == after.bundle["option_return"]["by_currency"]["USD"][field]
+    assert after.bundle["option_net_cashflow"]["cny_total"]["amount"] == Decimal(298 - fee) * 7
+    assert not calc([opened, pending, void, confirmed], "2026-10").facts
+
+
+def test_pending_exception_requires_valid_capital_while_confirmed_cash_stays_independent():
+    key = _key(symbol="TEST", side="long")
+    opened = _event("open", "open", "2026-08-20T10:00:00", key=key, lot_id="lot", price=0, fee=1)
+    pending = _event("end", "close", "2026-09-02T10:00:00", key=key, target_lot_id="lot",
+                     price=0, close_type="cause_pending")
+    before = reduce_option_performance(project_trade_events([opened, pending]), period=_period(), basis="terminated")
+    assert _cash(before)["amount"] is None
+    assert "capital_non_positive" in before.facts[0].capital_missing
+    expired = _event("end", "expire_close", "2026-09-02T10:00:00", key=key, target_lot_id="lot", price=0)
+    after = reduce_option_performance(project_trade_events([opened, expired]), period=_period(), basis="terminated")
+    assert _cash(after)["amount"] == -1
+    assert after.bundle["option_return"]["by_currency"]["USD"]["rate"] is None
+
+
+@pytest.mark.parametrize("conflict", ["account", "quantity", "currency"])
+def test_pending_exception_does_not_admit_conflicting_terminal_identity(conflict):
+    from domain.domain.performance.weighted_reducer import PerformanceScopeError
+
+    opened = _event("open", "open", "2026-08-20T10:00:00", lot_id="lot", price=3)
+    terminal = _event("end", "close", "2026-09-02T10:00:00", target_lot_id="lot", price=0,
+                      close_type="cause_pending", contracts=2 if conflict == "quantity" else 1,
+                      key=_key(account="sy" if conflict == "account" else "lx"),
+                      currency="HKD" if conflict == "currency" else "USD")
+    try:
+        result = reduce_option_performance(project_trade_events([opened, terminal]), period=_period(), basis="terminated")
+    except PerformanceScopeError:
+        return
+    assert _cash(result)["amount"] is None
+    assert result.bundle["option_return"]["by_currency"]["USD"]["rate"] is None
