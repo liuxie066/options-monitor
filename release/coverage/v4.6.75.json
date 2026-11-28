@@ -1,0 +1,46 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.75",
+  "base": {
+    "tag": "v4.6.74",
+    "commit": "b0a1f242c0e6c737799c1d26ea41bd876b36aac8"
+  },
+  "reviewed_head": "c0e20ec3f0602d9b734aa9e350c082d6ed41c5e9",
+  "commits": [
+    {
+      "sha": "9232e1878009d7f640954ab11a350b1c37967c67",
+      "subject": "fix(performance): preserve income while close reason is pending"
+    },
+    {
+      "sha": "c0e20ec3f0602d9b734aa9e350c082d6ed41c5e9",
+      "subject": "Merge pull request #1308 from liuxie066/cindy/vigilant-liskov"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "已证实零价经济关闭且现金、实际费用、数量身份、关闭时间和资本完整的期权，不再仅因终结原因待确认而清空净收益、收益率及年化；原因、胜率与整体待确认状态保留，真实终结、费用、资本及汇率缺口继续按原规则处理。",
+      "commits": [
+        "9232e1878009d7f640954ab11a350b1c37967c67",
+        "c0e20ec3f0602d9b734aa9e350c082d6ed41c5e9"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "9232e1878009d7f640954ab11a350b1c37967c67",
+      "references": [
+        "docs/OPTION_PERFORMANCE_DESIGN.md#default-terminal-period-option-net-income",
+        "https://github.com/liuxie066/options-monitor/pull/1308"
+      ]
+    },
+    {
+      "commit": "c0e20ec3f0602d9b734aa9e350c082d6ed41c5e9",
+      "references": [
+        "docs/OPTION_PERFORMANCE_DESIGN.md#default-terminal-period-option-net-income",
+        "https://github.com/liuxie066/options-monitor/pull/1308"
+      ]
+    }
+  ]
+}
