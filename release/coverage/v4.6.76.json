@@ -1,0 +1,99 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.76",
+  "base": {
+    "tag": "v4.6.75",
+    "commit": "8539aac6dae58f0296f56be3bb0015fc4eeee107"
+  },
+  "reviewed_head": "c7312b0cd35a163504f9ff8700a30a0504c4ddee",
+  "commits": [
+    {
+      "sha": "fc3515b2fc73234b531f815f462f3d4085e3c962",
+      "subject": "refactor: decouple signed continuation protocol from ledger workflows"
+    },
+    {
+      "sha": "045140d0a1ca29a103bcc3003e1fdfb39334a5e0",
+      "subject": "refactor: separate bounded content presentation from filesystem reads"
+    },
+    {
+      "sha": "bf603e1c7eeaaebc0a46f8b4d0a9f4ca111d7c41",
+      "subject": "docs: align tool invocation and expiry maintenance ownership"
+    },
+    {
+      "sha": "6f1425658a3778c4265ff97010496ef350461185",
+      "subject": "refactor: unify configuration section normalization ownership"
+    },
+    {
+      "sha": "8056bf798838b40c96412602a3033da4f1ed8295",
+      "subject": "refactor: derive combo policy defaults from canonical system configuration"
+    },
+    {
+      "sha": "3fbdc657883766c8d62da014559bdd571120a202",
+      "subject": "docs(api): record retired shared configuration and content names"
+    },
+    {
+      "sha": "c7312b0cd35a163504f9ff8700a30a0504c4ddee",
+      "subject": "Merge pull request #1310 from liuxie066/cindy/refactor"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "统一共享查询与配置默认的实现归属，移除已迁移的旧常量出口；保持现有签名、分页、脱敏及 US/HK 策略默认行为。",
+      "commits": [
+        "fc3515b2fc73234b531f815f462f3d4085e3c962",
+        "045140d0a1ca29a103bcc3003e1fdfb39334a5e0",
+        "bf603e1c7eeaaebc0a46f8b4d0a9f4ca111d7c41",
+        "6f1425658a3778c4265ff97010496ef350461185",
+        "8056bf798838b40c96412602a3033da4f1ed8295",
+        "3fbdc657883766c8d62da014559bdd571120a202",
+        "c7312b0cd35a163504f9ff8700a30a0504c4ddee"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "fc3515b2fc73234b531f815f462f3d4085e3c962",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1310"
+      ]
+    },
+    {
+      "commit": "045140d0a1ca29a103bcc3003e1fdfb39334a5e0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1310"
+      ]
+    },
+    {
+      "commit": "bf603e1c7eeaaebc0a46f8b4d0a9f4ca111d7c41",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1310"
+      ]
+    },
+    {
+      "commit": "6f1425658a3778c4265ff97010496ef350461185",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1310"
+      ]
+    },
+    {
+      "commit": "8056bf798838b40c96412602a3033da4f1ed8295",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1310"
+      ]
+    },
+    {
+      "commit": "3fbdc657883766c8d62da014559bdd571120a202",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1310"
+      ]
+    },
+    {
+      "commit": "c7312b0cd35a163504f9ff8700a30a0504c4ddee",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1310"
+      ]
+    }
+  ]
+}
