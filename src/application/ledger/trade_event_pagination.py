@@ -1,21 +1,21 @@
-"""Stateless cursor primitives for the canonical trade-event stream."""
+"""Query and stream-state rules for the canonical trade-event stream."""
 
 from __future__ import annotations
 
-import base64
-import hashlib
-import hmac
-import json
 import math
-import time
 import uuid
 from typing import Any, Mapping
 
 from domain.domain.symbol_identity import resolve_symbol_identity
+from src.infrastructure.signed_cursor import (
+    CURSOR_TTL_SECONDS as CURSOR_TTL_SECONDS,
+    SignedCursorError as TradeEventPaginationError,
+    decode_cursor as decode_cursor,
+    encode_cursor as encode_cursor,
+)
 
 
 CURSOR_VERSION = 2
-CURSOR_TTL_SECONDS = 30 * 60
 DEFAULT_LIMIT = 10
 MAX_LIMIT = 20
 TRADE_EVENT_ORDER = "trade_time_ms_desc,event_id_desc"
@@ -32,14 +32,6 @@ _QUERY_FIELDS = (
     "market",
     "position_effect",
 )
-
-
-class TradeEventPaginationError(ValueError):
-    """A safe, explicit validation failure for event pagination."""
-
-    def __init__(self, message: str, *, code: str = "invalid_cursor"):
-        self.code = code
-        super().__init__(message)
 
 
 def normalize_event_limit(value: Any) -> int:
@@ -130,93 +122,6 @@ def normalize_event_query(
         "market": normalized_market,
         "position_effect": position_effect,
     }
-
-
-def _b64(value: bytes) -> str:
-    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
-
-
-def _unb64(value: str) -> bytes:
-    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
-
-
-def encode_cursor(
-    state: Mapping[str, Any],
-    key: str,
-    *,
-    now: int | None = None,
-) -> str:
-    secret = str(key or "").strip()
-    if not secret:
-        raise TradeEventPaginationError(
-            "cursor signing key is unavailable",
-            code="cursor_key_unavailable",
-        )
-    issued = int(time.time() if now is None else now)
-    body = dict(state)
-    body["iat"] = issued
-    body["exp"] = issued + CURSOR_TTL_SECONDS
-    raw = json.dumps(
-        body,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-    signature = hmac.new(secret.encode("utf-8"), raw, hashlib.sha256).digest()
-    return f"{_b64(raw)}.{_b64(signature)}"
-
-
-def decode_cursor(
-    cursor: str,
-    key: str,
-    *,
-    now: int | None = None,
-) -> dict[str, Any]:
-    secret = str(key or "").strip()
-    if not secret:
-        raise TradeEventPaginationError(
-            "cursor signing key is unavailable",
-            code="cursor_key_unavailable",
-        )
-    try:
-        encoded, encoded_signature = str(cursor).split(".", 1)
-        raw = _unb64(encoded)
-        supplied_signature = _unb64(encoded_signature)
-        expected_signature = hmac.new(secret.encode("utf-8"), raw, hashlib.sha256).digest()
-        if not hmac.compare_digest(expected_signature, supplied_signature):
-            raise TradeEventPaginationError(
-                "invalid cursor signature",
-                code="invalid_cursor_signature",
-            )
-        state = json.loads(raw)
-    except TradeEventPaginationError:
-        raise
-    except Exception as exc:
-        raise TradeEventPaginationError(
-            "invalid cursor",
-            code="invalid_cursor",
-        ) from exc
-    if not isinstance(state, dict):
-        raise TradeEventPaginationError(
-            "invalid cursor state",
-            code="invalid_cursor",
-        )
-
-    current = int(time.time() if now is None else now)
-    issued = _required_int(state, "iat")
-    expires = _required_int(state, "exp")
-    if issued > current:
-        raise TradeEventPaginationError(
-            "cursor issued-at time is in the future",
-            code="invalid_cursor",
-        )
-    if current >= expires:
-        raise TradeEventPaginationError(
-            "cursor expired; start a new query (new results may overlap)",
-            code="cursor_expired",
-        )
-    return state
 
 
 def new_stream_state(

@@ -6,7 +6,10 @@ import hmac
 import json
 from typing import Any
 
-from src.application.ledger.api import decode_evidence_cursor, encode_evidence_cursor
+from src.infrastructure.signed_cursor import (
+    decode_cursor as decode_evidence_cursor,
+    encode_cursor as encode_evidence_cursor,
+)
 from src.application.secret_store import INBOUND_OPERATION_HMAC_KEY, SecretError, resolve_secret
 
 
