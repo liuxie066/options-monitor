@@ -167,8 +167,8 @@ src.interfaces.agent.cli
 
 `src.application.agent_tool_registry` is a collector/manifest adapter. New Tool
 Gateway tools should live in `src/application/agent_tools/` domain modules and
-export `TOOLS`. All Tool Gateway tools execute through `AgentTool.call(ctx,
-payload)`. Root-level `src/application/agent_tool_*.py` modules are reserved
+export `TOOLS`. All Tool Gateway tools execute through `AgentTool.call(payload)`.
+Root-level `src/application/agent_tool_*.py` modules are reserved
 for compatibility re-exports and shared helpers such as config/contracts; they
 must not own tool implementations. The legacy
 `src.application.agent_tool_handlers` switchboard has been removed.

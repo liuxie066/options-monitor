@@ -164,7 +164,6 @@ trade_events
 tick
   -> config freshness / schedule guard / OpenD guard
   -> per-account account_run
-      -> expired position maintenance
       -> required_data prefetch
       -> event prefetch
       -> scan pipeline
@@ -176,6 +175,7 @@ tick
 边界：
 
 - 运行域负责编排，不拥有策略判断。
+- 过期持仓维护由独立的 `option-positions auto-close-expired` 服务/定时任务承担，不属于 tick 的账户执行阶段。
 - 通知是结果消费方，不反向影响扫描和 Close Advice 的决策。
 - 有副作用的外部通知、服务变更和持仓写入必须走显式权限边界。
 
