@@ -306,8 +306,12 @@ minus allocated actual opening fees and actual terminal option fees. Stock settl
 stock fees and subsequent stock returns never enter this metric.
 
 Reuse ledger economic allocations and the existing fee, lifecycle, capital and strategy owners.
-Missing actual fees produce partial/null for the affected currency. Unresolved expiry or terminal
-cause remains a visible evidence gap, not inferred income or a complete zero. Physical settlement
+Missing actual fees produce partial/null for the affected currency. A zero-price economic close
+with `cause_pending` contributes income when its allocated cash, actual fees, identity, quantity,
+closing time and capital are complete and no other evidence conflict exists. Its reason and win
+classification remain unknown: row/report quality and win rate stay partial, while native income
+and return metrics are observed. A missing terminal event or conflicting terminal evidence still
+blocks the affected income and return metrics; no expiry income or zero is inferred. Physical settlement
 and expiry cannot carry nonzero option principal; the period-cash owner's validation also guards
 terminal income. Native income can remain observed when only CNY conversion is missing.
 
@@ -321,6 +325,11 @@ in place of the cohort cash key; there is no open/terminated cash split in this 
 classification and principal formulas below remain unchanged, but their samples are the selected
 terminal shares. Return duration is opening to actual termination, with the existing one-day floor.
 Actual daily occupied principal remains independently based on period overlap including carry-in.
+Late reason confirmation preserves the economic closing time, period and capital duration; actual
+fee corrections still change income through the existing fee owner. Consumers must honor each
+metric's status rather than hiding observed money whenever overall quality is partial. This is an
+intentional null-to-number behavior correction within `option_performance.report.v4`; fields, types,
+selection rules and formulas are unchanged, as are independent fee, capital and historical FX gates.
 
 ### Period Option Net Cash Flow
 

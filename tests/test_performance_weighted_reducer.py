@@ -227,6 +227,7 @@ def _event(
     raw: dict | None = None,
     fx_rate: float = 7,
     currency: str = "USD",
+    multiplier: int = 100,
 ) -> TradeEvent:
     leg = key or _key()
     payload = dict(raw or {})
@@ -248,7 +249,7 @@ def _event(
         price=price,
         currency=currency,
         source="test",
-        multiplier=100,
+        multiplier=multiplier,
         fees=0 if fee_basis == "estimated" else fee,
         lot_id=lot_id,
         target_lot_id=target_lot_id,

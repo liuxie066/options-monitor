@@ -285,9 +285,22 @@ def reduce_option_performance(
             cash["source_event_id"]: set(cash["missing"])
             for cash in cashflow_facts if cash["fact_kind"] == "option_trade_cash_gross"
         }
+        zero_price_terminal_ids = {
+            event.event_id for event in projection.effective_cash_events if event.price == 0
+        }
         checked = []
         for fact in facts:
-            missing = {*fact.win_missing, *terminal_cash_missing.get(fact.terminal_event_id, ())}
+            income_missing = set(fact.win_missing)
+            # A proved zero-price economic close can earn income before its reason
+            # is classified. Keep the reason gap on win/row quality, not cash.
+            if (fact.state == "terminated" and fact.terminal_kind == "cause_pending"
+                    and fact.terminal_event_id in zero_price_terminal_ids
+                    and fact.terminal_option_cash == 0 and fact.option_net_cashflow is not None
+                    and fact.terminal_at_ms is not None and fact.terminal_at_ms >= fact.opened_at_ms
+                    and not fact.cash_missing and not fact.capital_missing
+                    and set(fact.missing) <= {"close_reason_pending"}):
+                income_missing.discard("close_reason_pending")
+            missing = {*income_missing, *terminal_cash_missing.get(fact.terminal_event_id, ())}
             checked.append(replace(
                 fact, option_net_cashflow=None, status=MetricStatus.PARTIAL,
                 cash_missing=tuple(sorted({*fact.cash_missing, *missing})),
