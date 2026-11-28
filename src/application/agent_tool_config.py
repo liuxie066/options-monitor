@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from src.application.account_config import account_settings_from_config, build_account_portfolio_source_plan
-from src.application.config_loader import normalize_portfolio_broker_config
+from src.application.config_sections import normalize_portfolio_broker_config
 from src.application.portfolio_management import (
     normalize_portfolio_management_config,
 )

@@ -8,6 +8,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_config_section_normalization_is_not_borrowed_from_runtime_loader() -> None:
+    for path in (
+        "src/application/layered_config.py",
+        "src/application/agent_tool_config.py",
+        "src/application/cash_headroom_query.py",
+    ):
+        assert "src.application.config_loader.normalize_portfolio_broker_config" not in (
+            _imported_modules_with_from_names(ROOT / path)
+        )
+    assert "src.application.config_loader" not in _imported_modules(
+        ROOT / "src/application/config_sections.py"
+    )
+
+
 def _imported_modules(path: Path) -> list[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"))
     modules: list[str] = []
