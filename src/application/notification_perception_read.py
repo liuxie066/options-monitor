@@ -35,7 +35,8 @@ def read_notification_perception_events(
     start_utc: str | None = None,
     end_utc: str | None = None,
 ) -> dict[str, Any]:
-    from src.application.agent_tools.project_reader import ProjectReaderError, decode_cursor, digest, set_continuation
+    from src.application.query_cursor import CursorError as ProjectReaderError, decode_cursor, digest
+    from src.application.read_content import set_continuation
     from src.application.agent_tool_contracts import AgentToolError
 
     base = repo_root.resolve()
@@ -250,7 +251,9 @@ def _scan_audit_sources(
     prior_sources: list[dict[str, Any]] | None = None, require_stable_files: bool = False,
 ) -> dict[str, Any]:
     from src.application.agent_tool_contracts import AgentToolError
-    from src.application.agent_tools.project_reader import ProjectReaderError, _check, _directory, _identity
+    from src.application.query_cursor import CursorError as ProjectReaderError
+    from src.application.read_content import check_read_budget as _check
+    from src.application.agent_tools.project_reader import _directory, _identity
 
     # Share bounded raw I/O, not the consumers' clocks, parsing or pagination.
     budget = 64 * 1024 * 1024
@@ -368,9 +371,8 @@ def _read_window(
     deadline_monotonic: float | None, cancelled: Callable[[], bool] | None,
 ) -> dict[str, Any]:
     from src.application.agent_tool_contracts import AgentToolError
-    from src.application.agent_tools.project_reader import (
-        ProjectReaderError, decode_cursor, digest, set_continuation,
-    )
+    from src.application.query_cursor import CursorError as ProjectReaderError, decode_cursor, digest
+    from src.application.read_content import set_continuation
 
     try:
         if not start_utc or not end_utc:
@@ -538,7 +540,9 @@ def _read_jsonl(
     source_hash = None
     out: list[dict[str, Any]] = []
     try:
-        from src.application.agent_tools.project_reader import ProjectReaderError, _check, read_tail_bytes
+        from src.application.query_cursor import CursorError as ProjectReaderError
+        from src.application.read_content import check_read_budget as _check
+        from src.application.agent_tools.project_reader import read_tail_bytes
         try:
             raw, tail_truncated, source_size = read_tail_bytes(base, str(path.relative_to(base)),
                 deadline_monotonic=deadline_monotonic, cancelled=cancelled)

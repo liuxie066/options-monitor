@@ -705,6 +705,26 @@
       "module": "src/application/trades/owner_diagnostic.py",
       "name": "*",
       "reason": "Retire the one-shot process object diagnostic after the bounded memory investigation. Remove its heartbeat probe and receiver; preserve business heartbeat, error/timeout and delivery timing evidence. No production endpoints or configuration are changed."
+    },
+    {
+      "module": "src/application/agent_tools/project_reader.py",
+      "name": "MAX_OUTPUT_BYTES",
+      "reason": "Bounded content presentation moved to src.application.read_content. Consumers import MAX_OUTPUT_BYTES from that owner; the 9000-byte budget is unchanged. The filesystem reader no longer owns this presentation constant."
+    },
+    {
+      "module": "src/application/agent_tools/project_reader.py",
+      "name": "MAX_PROJECT_OUTPUT_BYTES",
+      "reason": "Project text presentation moved to src.application.read_content, which owns the 24000-byte project budget and project_output_fits. Filesystem traversal consumes the shared budget check without maintaining a second presentation constant."
+    },
+    {
+      "module": "src/application/agent_tools/project_reader.py",
+      "name": "REDACTION_VERSION",
+      "reason": "Redacted content pagination moved to src.application.read_content. The project-lines-v1 value and returned source.redaction_version field remain unchanged; consumers use the shared content owner rather than a filesystem-module constant."
+    },
+    {
+      "module": "src/application/combo_yield_config.py",
+      "name": "COMBO_YIELD_MARKET_DEFAULT_OVERRIDES",
+      "reason": "The parallel market override table was retired in favor of DEFAULT_CONFIG.markets.<market>.symbol_defaults.combo_yield. combo_yield_defaults_for_market and the validator COMBO_YIELD_DEFAULTS projection remain, preserving US/HK values, unknown-market US fallback, deepcopy isolation and explicit overrides."
     }
   ]
 }

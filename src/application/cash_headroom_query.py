@@ -17,7 +17,8 @@ from domain.domain.cash_secured_utils import (
     normalize_cash_secured_total_by_ccy,
 )
 from src.application.cash_totals import sum_by_currency_to_cny as _sum_by_currency_to_cny
-from src.application.config_loader import normalize_portfolio_broker_config, resolve_data_config_path
+from src.application.config_loader import resolve_data_config_path
+from src.application.config_sections import normalize_portfolio_broker_config
 from src.application.account_config import resolve_account_type, resolve_account_broker
 from src.infrastructure.exchange_rates import (
     get_exchange_rates_or_fetch_latest,

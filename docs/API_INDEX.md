@@ -1,5 +1,21 @@
 # 共享能力与 API 索引
 
+签名游标的纯协议 owner 为 `src/infrastructure/signed_cursor.py`：JSON/HMAC 编解码、
+30 分钟有效期和 `SignedCursorError`。应用 `query_cursor.py` 负责密钥派生、绑定和大小限制；
+各查询继续拥有自己的账户、市场、权限及快照校验。`ledger.trade_event_pagination` 只拥有
+交易事件查询/排序/流状态规则，并保留 codec 与 TTL 的同对象导出；`ledger.api` 的
+`encode_evidence_cursor`、`decode_evidence_cursor`、`TradeEventPaginationError` 为兼容别名，
+不维护第二份协议。通用查询不再为签名协议导入账本工作流。测试：
+`tests/test_signed_cursor.py`、`tests/test_startup_import_boundaries.py` 及各查询分页测试。
+
+有界文本呈现由 `src/application/read_content.py` 统一拥有：UTF-8/大小校验、脱敏、
+文本范围、输出预算、绑定源摘要的续页和同步取消/超时检查。它只消费已读取的字节，
+不读取文件或决定账户权限。项目文件、封存运行、Daily Brief 和绩效展示复用同一实现；
+各业务继续持有自己的权限、来源资格和外层展示预算。`agent_tools/project_reader.py`
+保留文件描述符读取、路径白名单、文件稳定性校验与查询级 syscall 重试，消费上述能力；
+纯内容分页不建立文件读取重试上下文。测试：`tests/test_read_content.py`、
+`tests/test_project_reader.py`、`tests/test_project_runs.py` 及各业务分页测试。
+
 研究不可覆盖文件发布：`research.underlier_history._publish_bytes_once` 维护同目录独占临时文件、0600 权限、flush/fsync、硬链接发布及 finally 清理；目标已存在时失败。两个采集器继续通过各自 `_write_once` 包装计算摘要，上层 `observation_series._put` 保留同内容采纳策略。发布实现留在 underlier 源文件内，使 `collector_sha256` 保持单文件原始字节摘要且继续覆盖发布代码；quote 的 `IMPLEMENTATION_SOURCES` 包含该文件，series 自动继承。因此 underlier 的其它源码变化也会改变 quote 实现指纹，不增加 manifest 字段、不重写历史产物。契约测试：`tests/test_research_file_publication.py`。
 
 2026-10-31 研究部署状态：固定研发包 `f0d46fbf…` 已在 `liuxie-incus` 独立安装并完成两市场Linux隔离、正式启动和独立回读，部署验收时timer均enabled/active，计划11月2日起持续采集，验收时新增真实观察0；这不是当前采集量或运行态的回读。总应用请求预算301次/日、研究占用/余量2GiB/2GiB；旧包原件保留，生产OM未改。下文各入口的“本地开发/未部署”是原切片记录，当前部署边界与真实数据待验项以[研究合同文首](RESEARCH_WATCHLIST_SCOPE.md)为准；不能当作正式OM版本已发布。
@@ -57,7 +73,7 @@
 | 接入运行证据、quality、明确禁用与不可用 | `src/application/quality/service.py::OMQualityService`；资格判断 `src/application/quality/intake_checks.py::trade_intake_runtime_evidence_available`；监听检查 `src/application/quality/runtime_checks.py::build_runtime_checks` | 质量检查复用运行状态 producer；只有明确布尔禁用且无配置错误才是不适用。读取失败按已有配置市场传递，缺证据不生成可信零结果；逐账户数据质量与整体 runtime verdict 分别保留。refresh 会发布质量与控制状态，读取使用既有 schema validator。 | [质量检查](quality-monitoring/om-check-implementation.md)；`tests/quality/test_om_quality_checks.py`、`tests/quality/test_om_quality_service.py` |
 | 标的身份、alias、symbol、市场/币种 | `domain/domain/symbol_identity.py::resolve_symbol_identity`、`domain/domain/symbol_identity.py::canonical_symbol`；扫描范围词法拆分 `src/application/symbol_mutations.py::split_symbol_whitelist` | 身份解析复用显式别名与 canonical symbol，不在下游宽松猜测或持久化别名。扫描范围 helper 仅按逗号拆分：省略为 `None`，显式全空报错；身份规范化仍由原 owner 处理。 | [标的规范](https://github.com/liuxie066/options-monitor/blob/main/docs/GUARDRAILS.md#c-symbol-canonicalization-rule)；`tests/test_symbol_normalization_contract.py`、`tests/test_trade_symbol_identity.py`、`tests/test_symbol_scope_validation.py` |
 | 合约数量、multiplier、股数、strike identity | `domain/domain/trade_contract_identity.py::contract_share_quantity`、`domain/domain/trade_contract_identity.py::require_option_multiplier` | 纯校验/数量换算；使用已证明的合约乘数，缺失不能默认成 100。身份与数量规则不由报表重建。 | [订单需求](ORDER_DOMAIN_MODEL_PRD.md)；`tests/test_trade_contract_identity.py` |
-| 配置、defaults、层叠、有效 runtime | `src/application/layered_config.py::build_layered_runtime_config_from_user_config`、`src/application/config_loader.py::load_config`；OpenD 参数投影 `src/application/opend_fetch_config.py::opend_fetch_kwargs` | 普通扫描与 scheduled 预取使用同一 history_kline 端点预算，逐页保留 max_calls/window_sec/max_wait_sec；构建与加载复用现有 owner；YAML 经支持的 build 生成 runtime JSON。scheduled 加载可能写验证缓存，不能当作无副作用 reader。 | [配置合同](../CONFIGS.md)；`tests/test_config_loader_validation_cache.py`、`tests/test_account_config.py` |
+| 配置、defaults、层叠、有效 runtime | `src/application/layered_config.py::build_layered_runtime_config_from_user_config`、`src/application/config_loader.py::load_config`；OpenD 参数投影 `src/application/opend_fetch_config.py::opend_fetch_kwargs` | 普通扫描与 scheduled 预取使用同一 history_kline 端点预算，逐页保留 max_calls/window_sec/max_wait_sec；构建与加载的 section 兼容归一化统一由 `config_sections.py` 持有：symbols 读写共用行归一化，portfolio 纯变换由构建器/消费者复用；loader 保留原同对象导出。Combo Yield 运行默认直接投影 `DEFAULT_CONFIG` 对应市场 section，不另维护政策默认表。YAML 经支持的 build 生成 runtime JSON。scheduled 加载可能写验证缓存，不能当作无副作用 reader。 | [配置合同](../CONFIGS.md)；`tests/test_config_loader_validation_cache.py`、`tests/test_account_config.py` |
 | 日常策略边界编辑、继承值、草稿校验 | `src/application/config_yaml_symbols.py::read_yaml_symbol_policy`、`src/application/config_yaml_symbols.py::validate_symbol_policy_fields` | 读取有效模板及覆盖；字段校验复用同一正数、布尔、必填边界规则。表单可在两端均询问前延后区间比较，最后一端与 authoring 发布仍校验完整区间；不发布中间边界。 | `tests/test_cli_daily_fields.py`、`tests/test_config_yaml.py` |
 | Bot 原消息重放、当前回复权限与缓存保护 | `src/application/bot/config_scope.py::resolve_replay_authorization`、`src/application/bot/control/policy.py::check_reply_authorization`；默认市场 `src/application/bot/control/settings.py::request_with_default_market_scope` | 可信配置内容、账户与会话绑定复用该 owner；旧无 scope 缓存拒绝重放且不重跑。audit 原响应 CAS 防止查找故障覆写成功；reply claim/send 重读当前来源，缺证据返回 authorization_blocked，保留原 UUID、窗口、UNKNOWN，不猜测补绑旧待发。真实发送仍需授权。 | [Bot](BOT_DESIGN.md)；`tests/test_bot_authorization_boundaries.py`、`tests/test_inbound_replay_authorization.py`、`tests/test_feishu_reply_recovery.py`、`tests/test_wechat_clawbot_channel.py` |
 | 行情、期权链、required-data、批次快照 | `src/application/required_data_snapshot.py::resolve_frozen_required_data_csv_bytes_batch`、`src/application/required_data_snapshot.py::resolve_frozen_required_data_csv_bytes` | 只读 owner 校验的 manifest/blob；批量消费先解析一次。取数/封存由既有 prefetch 与 snapshot owner 承担，消费者不能失败后自行抓取另一份报价。 | [Required Data](REQUIRED_DATA_STORAGE_DESIGN.md)；`tests/test_required_data_snapshot.py`、`tests/test_required_data_coverage.py` |

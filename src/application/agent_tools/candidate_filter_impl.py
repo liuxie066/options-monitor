@@ -29,9 +29,8 @@ from src.application.notification_perception_read import (
     iter_notification_perception_events,
 )
 from src.application.runtime_paths import resolve_runtime_root
-from src.application.agent_tools.project_reader import (
-    ProjectReaderError, decode_cursor, digest, set_continuation,
-)
+from src.application.query_cursor import CursorError as ProjectReaderError, decode_cursor, digest
+from src.application.read_content import set_continuation
 
 
 _FUNCTION_MODE = {"sell_put": "put", "sell_call": "call"}

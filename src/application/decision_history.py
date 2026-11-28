@@ -9,7 +9,11 @@ import re
 from typing import Any, Callable
 
 from domain.domain.daily_decision_brief import daily_brief_compatible_digests
-from src.application.ledger.api import decode_evidence_cursor, encode_evidence_cursor, TradeEventPaginationError
+from src.infrastructure.signed_cursor import (
+    SignedCursorError,
+    decode_cursor as decode_evidence_cursor,
+    encode_cursor as encode_evidence_cursor,
+)
 from src.infrastructure.decision_history_sqlite import DecisionHistoryStore, DecisionHistoryError, content_hash, history_path
 
 
@@ -95,7 +99,7 @@ def read_decision_history(*, base: Path, account: str, market: str, scope: dict[
             state = decode_evidence_cursor(cursor, cursor_key())
             if state.get("tool") != "decision_history_read" or state.get("binding") != binding:
                 raise ValueError("history_cursor_scope_changed")
-        except (TradeEventPaginationError, KeyError, ValueError) as exc:
+        except (SignedCursorError, KeyError, ValueError) as exc:
             raise ValueError("history_cursor_invalid") from exc
     if cancelled and cancelled():
         raise ValueError("history_query_cancelled")

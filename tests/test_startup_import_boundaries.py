@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SIDE_LANE_PREFIXES = (
@@ -43,6 +45,38 @@ def test_tick_entry_imports_do_not_load_research_side_lanes() -> None:
         "import src.application.tick_cron"
     )
 
+    assert loaded == []
+
+
+@pytest.mark.parametrize("module", [
+    "src.application.query_cursor",
+    "src.application.decision_history",
+])
+def test_generic_continuations_do_not_load_ledger(module: str) -> None:
+    loaded = json.loads(_run_python(f"""
+import importlib
+import json
+import sys
+importlib.import_module({module!r})
+print(json.dumps([name for name in sys.modules
+                  if name == 'src.application.ledger' or name.startswith('src.application.ledger.')]))
+"""))
+    assert loaded == []
+
+
+@pytest.mark.parametrize("module", [
+    "src.application.read_content",
+    "src.application.agent_tools.performance_presentation",
+])
+def test_memory_content_presentation_does_not_load_filesystem_reader(module: str) -> None:
+    loaded = json.loads(_run_python(f"""
+import importlib
+import json
+import sys
+importlib.import_module({module!r})
+print(json.dumps([name for name in sys.modules
+                  if name == 'src.application.agent_tools.project_reader']))
+"""))
     assert loaded == []
 
 

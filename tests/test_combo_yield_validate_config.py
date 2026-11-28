@@ -4,6 +4,59 @@ from __future__ import annotations
 import pytest
 
 
+@pytest.mark.parametrize(("market", "open_interest", "volume"), [
+    (None, 100, 5), ("", 100, 5), (" US ", 100, 5), (" hk ", 50, 0), ("unknown", 100, 5),
+])
+def test_combo_defaults_keep_market_values_and_return_independent_copies(market, open_interest, volume):
+    from src.application.combo_yield_config import combo_yield_defaults_for_market
+    from src.application.config_defaults import default_config
+
+    before = default_config()
+    defaults = combo_yield_defaults_for_market(market)
+    assert defaults == {
+        "enabled": False, "structure_mode": "same_expiry_pair", "objective": "premium_funded_long_call",
+        "variant": "sp_lc", "min_combo_net_credit": None, "min_net_credit_annualized": 0.08,
+        "min_net_credit_retention": 0.60, "min_open_interest": open_interest, "min_volume": volume,
+        "max_spread_ratio": 0.35, "max_combo_spread_ratio": 0.5,
+        "call": {"min_delta": 0.15, "max_delta": 0.35}, "put": {"min_delta": 0.15, "max_delta": 0.35},
+    }
+    market_key = str(market or "").strip().lower()
+    market_key = market_key if market_key in {"us", "hk"} else "us"
+    assert defaults == before["markets"][market_key]["symbol_defaults"]["combo_yield"]
+    defaults["call"]["min_delta"] = -1
+    defaults["min_volume"] = -1
+    again = combo_yield_defaults_for_market(market)
+    assert again["call"]["min_delta"] == 0.15 and again["min_volume"] == volume
+    assert default_config() == before
+
+
+def test_combo_validator_defaults_are_an_isolated_system_projection():
+    from src.application.combo_yield_config import COMBO_YIELD_DEFAULTS
+    from src.application.config_defaults import DEFAULT_CONFIG
+
+    source = DEFAULT_CONFIG["markets"]["us"]["symbol_defaults"]["combo_yield"]
+    assert COMBO_YIELD_DEFAULTS == source
+    assert COMBO_YIELD_DEFAULTS is not source
+    assert COMBO_YIELD_DEFAULTS["call"] is not source["call"]
+    assert COMBO_YIELD_DEFAULTS["put"] is not source["put"]
+
+
+def test_combo_authored_overrides_remain_separate_from_system_defaults():
+    from src.application.combo_yield_config import apply_combo_yield_defaults, derive_combo_yield_policy
+    from src.application.config_defaults import default_config
+
+    before = default_config()
+    override = {"enabled": True, "min_open_interest": 7, "min_combo_net_credit": None,
+                "call": {"min_delta": 0.2}}
+    applied = apply_combo_yield_defaults(override, market="hk")
+    policy = derive_combo_yield_policy(override, market="hk")
+    for result in (applied, policy.config):
+        assert result["enabled"] and result["min_open_interest"] == 7 and result["min_volume"] == 0
+        assert result["min_combo_net_credit"] is None
+        assert result["call"] == {"min_delta": 0.2, "max_delta": 0.35}
+    assert default_config() == before
+
+
 def _config(symbols: list[dict], *, templates: dict | None = None) -> dict:
     return {"templates": {} if templates is None else templates, "symbols": symbols}
 

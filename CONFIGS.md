@@ -31,6 +31,15 @@ env-file 不是合并进生成快照的配置层；它在进程启动或工具�
 
 生成后的 runtime JSON 是“本次运行读取的快照”，不是另一套 authoring source。不要一边编辑 `config.yaml`，一边手改 JSON。
 
+配置 section 的兼容归一化统一由 `src/application/config_sections.py` 持有。
+标的列表读取与写入共用同一行归一化实现；portfolio 归一化也由生成器和运行消费者复用，
+不依赖运行加载器的读取或验证缓存。保留旧 `market` 字段到 `broker` 的兼容及显式 `broker`
+优先级，不改变市场身份校验；`config_loader.normalize_portfolio_broker_config` 保留为同对象导出。
+
+Combo Yield 的 US/HK 内置默认统一取自 `DEFAULT_CONFIG.markets.<market>.symbol_defaults.combo_yield`。
+运行政策按市场深拷贝该 section，校验器使用 US 默认的派生副本；不再另维护一套市场覆盖表。
+空或未知市场保持 US 默认兼容行为，显式配置及自定义系统配置仍经现有合并与显式字段规则生效。
+
 同实例根目录已有兼容 `config.bot.json` 时，YAML 配置事务把它与 `resolved/config.bot.json` 一并列入预览、发布和失败补偿；配置入口成功后逐一回读。保留原默认路径优先级及显式路径消费者，避免发布新快照后仍消费旧开关；没有旧文件时不新建兼容副本。
 
 人工维护监控清单使用 `om symbols list|add|rm|edit --market us|hk`；写命令默认预览，`--apply` 经既有配置事务发布 YAML、已配置市场和 Bot 的快照。无显式 `--config-yaml` 时，YAML 默认位置跟随当前运行目录（`OM_RUNTIME_ROOT`、用户记录、repo 回退）；显式 `--config-yaml` 可选择另一实例。外部 Agent 使用 `om-agent run --tool manage_symbols`，其输入和写入门禁由 `om-agent spec` 定义。两类入口不直接写生成的 JSON。

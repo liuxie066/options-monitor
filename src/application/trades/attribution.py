@@ -22,9 +22,13 @@ from src.application.ledger.api import (
     ledger_store_write_guard,
     preview_trade_attribution_migration, apply_trade_attribution_migration,
     read_trade_attribution_snapshot, open_trade_attribution_snapshot_reader, trade_attribution_facts_from_events,
-    encode_evidence_cursor, decode_evidence_cursor, TradeEventPaginationError,
     combo_attribution_history_scopes, ATTRIBUTION_POLICY_VERSION,
     record_trade_attribution_conflicts, ordinary_attribution_window, ordinary_attribution_observation_complete,
+)
+from src.infrastructure.signed_cursor import (
+    SignedCursorError,
+    decode_cursor as decode_evidence_cursor,
+    encode_cursor as encode_evidence_cursor,
 )
 from src.application.futu_quote_routing import runtime_config_market
 from src.application.write_contract import write_control
@@ -501,12 +505,12 @@ def trade_attribution_read(payload: dict[str, Any]) -> tuple[dict[str, Any], lis
                     or set(state["filters"]) != set(filters)
                     or not all(isinstance(value, str) for value in state["filters"].values())
                     or not isinstance(state.get("last_open_event_id"), str)):
-                raise TradeEventPaginationError("invalid attribution cursor")
+                raise SignedCursorError("invalid attribution cursor")
             if any(value and value != state["filters"].get(key) for key, value in filters.items()):
-                raise TradeEventPaginationError("attribution cursor filters changed")
+                raise SignedCursorError("attribution cursor filters changed")
             filters = state["filters"]
             cursor = state["last_open_event_id"]
-        except TradeEventPaginationError as exc:
+        except SignedCursorError as exc:
             raise AgentToolError(code="INPUT_ERROR", message=f"归属分页 cursor 无效或已过期，请重新查询：{exc}") from exc
     snapshot = read_trade_attribution_snapshot(repo, account=account, market=market)
     context = (read_trade_attribution_context(repo, config=config, account=account,

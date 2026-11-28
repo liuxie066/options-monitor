@@ -9,6 +9,60 @@ import json
 import pytest
 
 
+@pytest.mark.parametrize(("row", "expected"), [
+    ({"market": " US "}, {"broker": "US"}),
+    ({"market": "HK", "broker": " 富途 "}, {"broker": "富途"}),
+    ({"market": " HK ", "broker": " "}, {"broker": "HK"}),
+    ({"market": "HK", "broker": None}, {"broker": "HK"}),
+    ({"market": " "}, {}),
+    ({"broker": None}, {"broker": None}),
+])
+def test_watchlist_read_and_write_share_canonical_rows_without_mutating_inputs(row, expected):
+    from src.application.config_sections import resolve_watchlist_config, set_watchlist_config
+
+    nested = {"enabled": True}
+    original = {"symbol": "NVDA", "sell_put": nested, **row}
+    before = dict(original)
+    source = {"symbols": [None, original, "invalid"], "accounts": ["lx"]}
+    expected_row = {"symbol": "NVDA", "sell_put": nested, **expected}
+    read = resolve_watchlist_config(source)
+    target = {"accounts": ["sy"]}
+    assert set_watchlist_config(target, source["symbols"]) is target
+    assert read == target["symbols"] == [expected_row]
+    assert original == before and source["symbols"][1] is original
+    assert read[0] is not original and target["symbols"][0] is not original
+    assert read[0]["sell_put"] is target["symbols"][0]["sell_put"] is nested
+    assert target["accounts"] == ["sy"] and source["accounts"] == ["lx"]
+
+
+def test_watchlist_read_and_write_keep_their_distinct_container_contracts():
+    from src.application.config_sections import resolve_watchlist_config, set_watchlist_config
+
+    rows = ({"symbol": "0700.HK", "market": "HK"},)
+    assert resolve_watchlist_config({"symbols": rows}) == []
+    assert set_watchlist_config(None, rows) == {"symbols": [{"symbol": "0700.HK", "broker": "HK"}]}
+    assert set_watchlist_config(None, None) == {"symbols": []}
+
+
+def test_portfolio_normalization_preserves_shallow_copy_and_explicit_broker():
+    from src.application.config_loader import normalize_portfolio_broker_config
+
+    nested = {"port": 11111}
+    raw = {"portfolio": {"broker": " US ", "market": "HK", "data_config": " p.json ", "futu": nested}}
+    result = normalize_portfolio_broker_config(raw)
+    assert result is not raw and result["portfolio"] is not raw["portfolio"]
+    assert result["portfolio"] == {"broker": "US", "data_config": "p.json", "futu": nested}
+    assert result["portfolio"]["futu"] is nested
+    assert raw["portfolio"]["market"] == "HK" and raw["portfolio"]["broker"] == " US "
+
+
+def test_portfolio_normalization_loader_export_is_the_section_owner():
+    from src.application.config_loader import normalize_portfolio_broker_config as compatibility
+    from src.application.config_sections import normalize_portfolio_broker_config
+
+    assert compatibility is normalize_portfolio_broker_config
+
+
 def _noop_log(_: str) -> None:
     return
 

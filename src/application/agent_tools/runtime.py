@@ -256,7 +256,7 @@ def _scoped_logs_input(payload):
 
 def _scoped_runtime_logs(payload):
     from src.application.agent_tools.project import project_scope, _QUERY_CONTEXT
-    from src.application.agent_tools.project_reader import ProjectReaderError
+    from src.application.query_cursor import CursorError as ProjectReaderError
     from src.application.agent_tools.project_runs import load_run_diagnostics
     from src.application.runtime_paths import resolve_runtime_root
 
@@ -288,9 +288,9 @@ def _scoped_runtime_logs(payload):
 
 def _scoped_runtime_runs(payload):
     from src.application.agent_tools.project import project_scope, _QUERY_CONTEXT
-    from src.application.agent_tools.project_reader import (
-        ProjectReaderError, _directory, reader_query_context, digest, decode_cursor, set_continuation,
-    )
+    from src.application.query_cursor import CursorError as ProjectReaderError, digest, decode_cursor
+    from src.application.agent_tools.project_reader import _directory, reader_query_context
+    from src.application.read_content import set_continuation
     from src.application.agent_tools.project_runs import discover_runs, load_run_record
     from src.application.runtime_paths import resolve_runtime_root
 

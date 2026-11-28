@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from src.application.account_config import ACCOUNT_TYPE_FUTU, ACCOUNT_TYPES, normalize_accounts
-from src.application.config_loader import normalize_portfolio_broker_config
+from src.application.config_sections import normalize_portfolio_broker_config
 from src.application.config_sections import set_watchlist_config
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_primitives import (

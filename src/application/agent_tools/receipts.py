@@ -15,8 +15,12 @@ from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.agent_tools.base import build_agent_tool
 from src.application.daily_decision_brief_repository import query_daily_brief_receipts
-from src.application.ledger.api import (decode_evidence_cursor, encode_evidence_cursor,
-    query_lifecycle_receipts, resolve_position_ledger_sqlite_path, TradeEventPaginationError)
+from src.application.ledger.api import query_lifecycle_receipts, resolve_position_ledger_sqlite_path
+from src.infrastructure.signed_cursor import (
+    SignedCursorError,
+    decode_cursor as decode_evidence_cursor,
+    encode_cursor as encode_evidence_cursor,
+)
 from src.application.positions.maintenance_receipt import query_maintenance_receipts
 from src.application.receipt_query import receipt_digest, receipt_time
 from src.application.research.redaction import redact_text
@@ -122,7 +126,7 @@ def _receipt_read(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], d
             if any(prior.get(field) != value for field, value in query.items()):
                 raise ValueError("query changed")
             query = prior
-        except (TradeEventPaginationError, ValueError, KeyError, TypeError) as exc:
+        except (SignedCursorError, ValueError, KeyError, TypeError) as exc:
             raise AgentToolError(code="cursor_invalidated", message="receipt cursor changed, expired, or is invalid; start a new query") from exc
     if query.get("account") and query["account"] not in allowed:
         raise AgentToolError(code="SCOPE_DENIED", message="receipt account outside configured scope")

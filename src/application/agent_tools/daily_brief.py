@@ -390,7 +390,8 @@ def _daily_brief_bot_input(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _page_daily_brief(data: dict[str, Any], payload: dict[str, Any], *, binding: str,
                       state: dict[str, Any] | None, now_utc: datetime) -> dict[str, Any]:
-    from src.application.agent_tools.project_reader import ProjectReaderError, digest, page_text, set_continuation
+    from src.application.query_cursor import CursorError as ProjectReaderError, digest
+    from src.application.read_content import page_text, set_continuation
 
     section = str(payload.get("section") or "rendered_markdown")
     sections = data.get("sections") or [data]
@@ -486,7 +487,7 @@ def query_daily_brief_tool_view(
     paged = payload.get("section") is not None or bool(payload.get("cursor"))
     state, binding, now = None, "", datetime.now(timezone.utc)
     if paged:
-        from src.application.agent_tools.project_reader import ProjectReaderError, decode_cursor, digest
+        from src.application.query_cursor import CursorError as ProjectReaderError, decode_cursor, digest
 
         binding = digest({"tool": "daily_decision_brief_read", "root": str(runtime_root),
                           "account": str(payload.get("account") or "").strip().lower(), "market": str(market or "").upper(),

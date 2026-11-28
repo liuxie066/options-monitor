@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from src.application.config_sections import normalize_portfolio_broker_config as normalize_portfolio_broker_config
 from src.application.runtime_config_paths import write_json_atomic
 from src.application.settings import build_effective_env
 from src.application.portfolio_management import (
@@ -50,28 +51,6 @@ def resolve_data_config_path(*, base: Path, data_config: str | Path | None) -> P
     if env_ref:
         return Path(env_ref).expanduser().resolve()
     return default_data_config_path(base=base)
-
-
-def normalize_portfolio_broker_config(cfg: dict | None) -> dict:
-    data = dict(cfg or {}) if isinstance(cfg, dict) else {}
-    portfolio = data.get('portfolio')
-    if not isinstance(portfolio, dict):
-        return data
-
-    normalized = {k: v for k, v in portfolio.items() if k != 'market'}
-
-    data_config = str(portfolio.get('data_config') or '').strip()
-    if data_config:
-        normalized['data_config'] = data_config
-
-    broker = str(portfolio.get('broker') or '').strip()
-    if not broker:
-        broker = str(portfolio.get('market') or '').strip()
-    if broker:
-        normalized['broker'] = broker
-
-    data['portfolio'] = normalized
-    return data
 
 
 def _scheduled_validation_cache_state(*, cfg: dict, state_dir: Path) -> tuple[bool, Path, str]:

@@ -1,3 +1,4 @@
+from src.application.read_content import page_text
 from src.application import query_cursor
 """Real filesystem contract checks for the project-only reader."""
 import hashlib
@@ -142,7 +143,7 @@ def test_size_cancel_deadline_and_missing_key(tmp_path, monkeypatch):
     with pytest.raises(reader.ProjectReaderError, match="time_deadline"):
         reader.list_names(tmp_path, deadline_monotonic=time.monotonic() - 1)
     monkeypatch.setattr(query_cursor, "_key", lambda: (_ for _ in ()).throw(reader.ProjectReaderError("continuation_unavailable")))
-    result = reader.page_text(b"a" * 10000, relative_name="docs/read.md", scope={})
+    result = page_text(b"a" * 10000, relative_name="docs/read.md", scope={})
     assert result["continuation_status"] == "continuation_unavailable"
     assert result["next_cursor"] is None and not result["body_complete"]
     assert result["coverage"]["status"] == "partial"
@@ -398,7 +399,7 @@ def test_search_long_line_keeps_full_literal_and_accurate_redacted_context(tmp_p
 
 @pytest.mark.parametrize("resource", ["run", "daily_decision_brief_read", "option_performance_report"])
 def test_non_project_body_keeps_existing_character_ceiling(resource):
-    page = reader.page_text(b"x" * 10000, relative_name="body", scope={}, resource=resource)
+    page = page_text(b"x" * 10000, relative_name="body", scope={}, resource=resource)
     assert page["text"] == "x" * 4000
     assert page["body_range"]["end_char"] == 4000
     assert page["next_cursor"] and not page["body_complete"]

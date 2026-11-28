@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from src.application.read_content import redacted_text
+
 from src.application import query_cursor
 
 import hashlib
@@ -56,7 +58,7 @@ def test_same_bytes_formal_bundle_and_facade(tmp_path, monkeypatch, encoding):
         page = project_run_files(root, **kwargs, action="read", relative_name=target, max_lines=1, cursor=page["next_cursor"])
         chunks.append(page["text"])
     assert page["body_complete"]
-    assert "".join(chunks) == project_reader.redacted_text(bundle["resources"][target])
+    assert "".join(chunks) == redacted_text(bundle["resources"][target])
     found = project_run_files(root, **kwargs, action="search", query="NVDA")
     assert found["entries"] and found["scanned"] == 2
     with pytest.raises(ProjectReaderError):
